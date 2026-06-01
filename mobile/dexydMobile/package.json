@@ -1,6 +1,6 @@
 {
   "name": "dexydMobile",
-  "version": "0.0.1",
+  "version": "0.0.1-b",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
