@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ChatMessage } from '../domain/chat.js';
 import { SessionRecord } from '../domain/session.js';
 
@@ -692,9 +692,14 @@ function extractSessionId(file: string): string | null {
 }
 
 function isInsideWorkspace(root: string, candidate: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}/`);
+  try {
+    const realRoot = realpathSync(resolve(root));
+    const realCandidate = realpathSync(resolve(candidate));
+    const relativePath = relative(realRoot, realCandidate);
+    return relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+  } catch {
+    return false;
+  }
 }
 
 function cleanTitle(value: string | undefined): string {

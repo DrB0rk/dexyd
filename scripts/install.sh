@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEXYD_REPO_URL_DEFAULT="https://github.com/drb0rk/dexyd.git"
+DEXYD_REPO_URL_DEFAULT="https://github.com/DrB0rk/dexyd.git"
 DEXYD_BRANCH_DEFAULT="main"
 DEXYD_INSTALL_DIR_DEFAULT="$HOME/.local/share/dexyd"
 
@@ -32,7 +32,7 @@ Dexyd installer
 
 Usage:
   bash scripts/install.sh [options]
-  curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 
 Options:
   --repo <url>       Git repository URL. Default: $DEXYD_REPO_URL_DEFAULT

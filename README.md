@@ -28,7 +28,7 @@ Dexyd lets you control Codex and OMX sessions from your phone. It runs a small b
 On Linux, install Dexyd with one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
 The installer pulls Dexyd into `~/.local/share/dexyd`, checks dependencies, creates configuration, installs packages, builds the bridge, links the `dexyd` command, and can set up the user service and firewall rule.

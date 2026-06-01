@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -237,6 +237,40 @@ describe('codex session transcript chat projection', () => {
     expect(usage.limits.status).toBe('warn');
     expect(usage.last?.totalTokens).toBe(850);
   });
+
+
+  it('rejects Codex sessions whose real workspace path escapes the configured root', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-symlink-'));
+    cleanupPaths.push(tempDir);
+    const workspaceRoot = join(tempDir, 'workspace-root');
+    const outside = join(tempDir, 'outside-workspace');
+    const symlinked = join(workspaceRoot, 'linked-outside');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspaceRoot, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    symlinkSync(outside, symlinked, 'dir');
+    process.env.CODEX_HOME = codexHome;
+
+    const sessionId = '66666666-6666-4666-8666-666666666666';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        rawEntry('2026-06-01T10:00:00.000Z', 'session_meta', {
+          cwd: symlinked,
+          timestamp: '2026-06-01T10:00:00.000Z'
+        }),
+        ''
+      ].join('\n')
+    );
+
+    const service = new CodexSessionService(workspaceRoot, { warn: () => undefined });
+
+    expect(service.listSessions()).toHaveLength(0);
+    expect(service.getSession(sessionId)).toBeNull();
+  });
+
 });
 
 function entry(type: string, payload: Record<string, unknown>): string {

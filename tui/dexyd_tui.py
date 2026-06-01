@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import selectors
 import shlex
 import shutil
@@ -33,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auth": {
         "accessTokenTtlSeconds": 900,
         "refreshTokenTtlSeconds": 2592000,
-        "signingKey": "dexyd-dev-change-me",
+        "signingKey": secrets.token_urlsafe(48),
     },
     "stream": {
         "replayWindowSeconds": 600,
@@ -489,7 +490,8 @@ def advertised_bridge_url(config: dict[str, Any]) -> str:
 
 def http_json(url: str, method: str = "GET", body: dict[str, Any] | None = None, timeout: int = 8) -> dict[str, Any]:
     payload = None if body is None else json.dumps(body).encode("utf-8")
-    req = request.Request(url=url, data=payload, headers={"Content-Type": "application/json"}, method=method)
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    req = request.Request(url=url, data=payload, headers=headers, method=method)
     with request.urlopen(req, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}

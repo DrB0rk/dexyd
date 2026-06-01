@@ -46,6 +46,26 @@ describe('security pairing flow', () => {
     }
   });
 
+  it('rejects non-http pairing bridge URLs', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-sec-url-'));
+    cleanupPaths.push(tempDir);
+    process.env.DEXYD_CONFIG = writeConfig(tempDir);
+
+    const service = await createDexydApplication();
+
+    try {
+      const start = await service.app.inject({
+        method: 'POST',
+        url: '/pairing/start',
+        payload: { bridgeBaseUrl: 'ftp://dexyd.example.com' }
+      });
+
+      expect(start.statusCode).toBe(400);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it('issues tokens from pairing and refreshes access', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-sec-'));
     cleanupPaths.push(tempDir);

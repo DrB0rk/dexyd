@@ -13,9 +13,11 @@ afterEach(() => {
 });
 
 describe('loadConfig', () => {
-  it('returns defaults when no config path is set', () => {
+  it('returns safe defaults when no config path is set', () => {
     const config = loadConfig({});
     expect(config.server.port).toBe(4242);
+    expect(config.auth.signingKey).toHaveLength(64);
+    expect(config.auth.signingKey).not.toBe('dexyd-dev-change-me');
   });
 
   it('loads yaml and applies schema', () => {

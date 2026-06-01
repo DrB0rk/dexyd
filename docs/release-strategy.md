@@ -20,7 +20,7 @@ Expected quality:
 
 - typecheck passes;
 - tests pass;
-- Android debug APK builds for mobile-impacting changes;
+- local Android debug APK builds for mobile-impacting changes;
 - docs updated for user-visible changes.
 
 ### `beta`
@@ -69,9 +69,11 @@ Keep these aligned before tagging:
 
 Current artifact focus:
 
-- Android APK.
+- Android release APK attached to published GitHub Releases.
 - Source archive.
 - Documentation.
+
+The GitHub Actions APK workflow runs only when a GitHub Release is published. It does not build APKs for branch pushes, pull requests, or tag pushes by themselves.
 
 Planned/future:
 
@@ -84,14 +86,14 @@ Planned/future:
 1. Merge feature work into `dev`.
 2. Verify bridge typecheck/tests/build.
 3. Verify mobile typecheck/lint/tests.
-4. Build Android debug APK.
+4. Build Android debug APK locally for smoke testing.
 5. Smoke test on physical phone.
 6. Update docs and screenshots if flows changed.
 7. Promote `dev` to `beta`.
 8. Test beta against LAN and selected remote mode.
 9. Promote `beta` to `main`.
-10. Tag `vX.Y.Z`.
-11. Attach APK/artifacts and release notes.
+10. Create and publish GitHub Release `vX.Y.Z`.
+11. Confirm the release workflow built and attached `dexyd-vX.Y.Z.apk`.
 
 ## Rollback strategy
 

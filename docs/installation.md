@@ -42,7 +42,7 @@ The Linux installer is the main supported install path today. Android is the pri
 Install from the published repository with one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
 The installer pulls Dexyd into `~/.local/share/dexyd` by default. It can:
@@ -65,15 +65,15 @@ The installer pulls Dexyd into `~/.local/share/dexyd` by default. It can:
 Installer options:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash -s -- --yes
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash -s -- --dir "$HOME/Apps/dexyd"
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | bash -s -- --android --service --firewall
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --dir "$HOME/Apps/dexyd"
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --android --service --firewall
 ```
 
 Use a custom repository or branch while testing forks:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/drb0rk/dexyd/main/scripts/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | \
   DEXYD_REPO_URL=https://github.com/you/dexyd.git DEXYD_BRANCH=dev bash
 ```
 

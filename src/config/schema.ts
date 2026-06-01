@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 
@@ -16,7 +17,7 @@ const storageDefaults = {
 const authDefaults = {
   accessTokenTtlSeconds: 900,
   refreshTokenTtlSeconds: 2592000,
-  signingKey: 'dexyd-dev-change-me'
+  signingKey: randomBytes(48).toString('base64url')
 } as const;
 
 const streamDefaults = {
