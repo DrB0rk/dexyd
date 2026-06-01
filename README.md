@@ -31,7 +31,7 @@ On Linux, install Dexyd with one command:
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
-The installer pulls Dexyd into `~/.local/share/dexyd`, checks dependencies, creates configuration, installs packages, builds the bridge, links the `dexyd` command, and can set up the user service and firewall rule.
+The installer pulls Dexyd into `~/.local/share/dexyd`, checks bridge dependencies, creates configuration with your home directory as the workspace root, installs TUI dependencies, builds the bridge, links the `dexyd` command, and installs or restarts the user service. It does not build or install the Android app.
 
 After installation, open the bridge TUI:
 

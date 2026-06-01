@@ -9,8 +9,7 @@ REPO_URL="${DEXYD_REPO_URL:-$DEXYD_REPO_URL_DEFAULT}"
 BRANCH="${DEXYD_BRANCH:-$DEXYD_BRANCH_DEFAULT}"
 INSTALL_DIR="${DEXYD_INSTALL_DIR:-$DEXYD_INSTALL_DIR_DEFAULT}"
 ASSUME_YES="${DEXYD_ASSUME_YES:-0}"
-INSTALL_ANDROID=0
-INSTALL_SERVICE=0
+INSTALL_SERVICE=1
 OPEN_FIREWALL=0
 USE_CURRENT=0
 
@@ -38,9 +37,8 @@ Options:
   --repo <url>       Git repository URL. Default: $DEXYD_REPO_URL_DEFAULT
   --branch <name>    Git branch/tag to install. Default: $DEXYD_BRANCH_DEFAULT
   --dir <path>       Install directory. Default: $DEXYD_INSTALL_DIR_DEFAULT
-  --yes              Accept default answers.
-  --android          Also install mobile deps and try an Android build.
-  --service          Install/start the user systemd service.
+  --yes              Compatibility no-op; installer is non-interactive.
+  --no-service       Do not install/start the user systemd service.
   --firewall         Open bridge port in a supported Linux firewall.
   --use-current      Install from the current checkout instead of cloning.
   --help             Show this help.
@@ -56,42 +54,14 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
-    --android) INSTALL_ANDROID=1; shift ;;
-    --service) INSTALL_SERVICE=1; shift ;;
+    --no-service) INSTALL_SERVICE=0; shift ;;
+    --service) INSTALL_SERVICE=1; shift ;; # kept for older installer commands
     --firewall) OPEN_FIREWALL=1; shift ;;
     --use-current) USE_CURRENT=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
-
-ask_yes_no() {
-  local prompt="$1" default="${2:-y}" answer suffix
-  if [[ "$ASSUME_YES" == "1" ]]; then
-    [[ "$default" =~ ^[Yy]$ ]]
-    return
-  fi
-  suffix='[Y/n]'
-  [[ "$default" == "n" ]] && suffix='[y/N]'
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt $suffix " answer </dev/tty || true
-  else
-    answer="$default"
-  fi
-  answer="${answer:-$default}"
-  [[ "$answer" =~ ^[Yy]$ ]]
-}
-
-ask_text() {
-  local prompt="$1" default="${2:-}" answer
-  [[ "$ASSUME_YES" == "1" ]] && { printf '%s\n' "$default"; return; }
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$prompt [$default] " answer </dev/tty || true
-  else
-    answer="$default"
-  fi
-  printf '%s\n' "${answer:-$default}"
-}
 
 run_sudo() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -110,36 +80,20 @@ detect_pm() {
 }
 
 install_packages() {
-  local pm="$1" android="$2"
+  local pm="$1"
   case "$pm" in
     apt)
       run_sudo apt-get update
-      if [[ "$android" == "1" ]]; then
-        run_sudo apt-get install -y git curl ca-certificates nodejs npm python3 python3-venv python3-pip openjdk-17-jdk android-tools-adb
-      else
-        run_sudo apt-get install -y git curl ca-certificates nodejs npm python3 python3-venv python3-pip
-      fi
+      run_sudo apt-get install -y git curl ca-certificates nodejs npm python3 python3-venv python3-pip
       ;;
     pacman)
-      if [[ "$android" == "1" ]]; then
-        run_sudo pacman -S --needed git curl nodejs npm python python-pip jdk17-openjdk android-tools
-      else
-        run_sudo pacman -S --needed git curl nodejs npm python python-pip
-      fi
+      run_sudo pacman -S --needed git curl nodejs npm python python-pip
       ;;
     dnf)
-      if [[ "$android" == "1" ]]; then
-        run_sudo dnf install -y git curl ca-certificates nodejs npm python3 python3-pip java-17-openjdk-devel android-tools
-      else
-        run_sudo dnf install -y git curl ca-certificates nodejs npm python3 python3-pip
-      fi
+      run_sudo dnf install -y git curl ca-certificates nodejs npm python3 python3-pip
       ;;
     zypper)
-      if [[ "$android" == "1" ]]; then
-        run_sudo zypper install -y git curl ca-certificates nodejs npm python3 python3-pip java-17-openjdk-devel android-tools
-      else
-        run_sudo zypper install -y git curl ca-certificates nodejs npm python3 python3-pip
-      fi
+      run_sudo zypper install -y git curl ca-certificates nodejs npm python3 python3-pip
       ;;
     *)
       warn "No supported package manager found. Install git, curl, Node.js 20+, npm, and Python 3 manually."
@@ -159,13 +113,14 @@ check_core_dependencies() {
   done
   major="$(node_major)"
   if (( major > 0 && major < 20 )); then
-    warn "Node.js $major detected; Dexyd bridge requires Node.js 20+ and mobile tooling prefers Node.js 22+."
+    warn "Node.js $major detected; Dexyd bridge requires Node.js 20+."
   fi
   if (( ${#missing[@]} > 0 )) || (( major > 0 && major < 20 )); then
     warn "Missing/outdated core dependencies: ${missing[*]:-node-version}"
     pm="$(detect_pm)"
-    if [[ "$pm" != "unknown" ]] && ask_yes_no "Install/refresh distro packages with $pm now?" y; then
-      install_packages "$pm" "$INSTALL_ANDROID"
+    if [[ "$pm" != "unknown" ]]; then
+      dim "Installing or refreshing bridge packages with $pm"
+      install_packages "$pm"
     fi
   fi
   for cmd in git curl node npm python3; do
@@ -177,23 +132,8 @@ check_core_dependencies() {
 }
 
 resolve_repo_root() {
-  local source_dir=""
-  if [[ "${BASH_SOURCE[0]}" != "bash" && -f "${BASH_SOURCE[0]}" ]]; then
-    source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  fi
-
   if [[ "$USE_CURRENT" == "1" ]]; then
     [[ -f package.json ]] || fail "--use-current requires running from the Dexyd repository root."
-    printf '%s\n' "$(pwd)"
-    return
-  fi
-
-  if [[ -n "$source_dir" && -f "$source_dir/package.json" && -d "$source_dir/src" ]]; then
-    if ask_yes_no "Use current checkout at $source_dir?" y; then
-      printf '%s\n' "$source_dir"
-      return
-    fi
-  elif [[ -f package.json && -d src ]] && ask_yes_no "Use current checkout at $(pwd)?" n; then
     printf '%s\n' "$(pwd)"
     return
   fi
@@ -207,7 +147,6 @@ resolve_repo_root() {
   elif [[ -e "$INSTALL_DIR" ]]; then
     if [[ -f "$INSTALL_DIR/package.json" && -d "$INSTALL_DIR/src" ]]; then
       warn "$INSTALL_DIR exists and looks like a Dexyd checkout, but is not a git repo." >&2
-      ask_yes_no "Use it anyway?" y || fail "Choose another --dir or remove $INSTALL_DIR."
     else
       fail "$INSTALL_DIR already exists and is not a Dexyd checkout. Choose another --dir."
     fi
@@ -245,8 +184,19 @@ print((m.group(1).strip() if m else '').rstrip('/'))
 PYCURRENTPUBLIC
 )"
 
-  workspace="$(ask_text "Workspace root" "$current_workspace")"
-  public_url="$(ask_text "Public bridge URL for Caddy/Cloudflare, or blank for LAN" "$current_public")"
+  workspace="$(python3 - "$current_workspace" "$HOME" <<'PYWORKSPACE'
+import os, sys
+value = (sys.argv[1] or '').strip().strip('"\'')
+home = os.path.abspath(os.path.expanduser(sys.argv[2]))
+expanded = os.path.abspath(os.path.expanduser(value)) if value else ''
+placeholders = {'', '/home/you', '~/Projects', '/home/user', '/Users/you'}
+if value in placeholders or expanded in {os.path.abspath(os.path.expanduser(p)) for p in placeholders if p.startswith('~')}:
+    print(home)
+else:
+    print(expanded)
+PYWORKSPACE
+)"
+  public_url="$current_public"
   signing_key="$(python3 - <<'PYKEY'
 import secrets
 print(secrets.token_urlsafe(48))
@@ -261,7 +211,8 @@ workspace, public_url, generated_signing_key = sys.argv[2:5]
 s = path.read_text()
 s = re.sub(r'(?m)^(\s*)host:\s*.*$', r'\1host: 0.0.0.0', s, count=1)
 s = re.sub(r'(?m)^(\s*)publicBaseUrl:\s*.*$', lambda m: f'{m.group(1)}publicBaseUrl: "{public_url}"', s, count=1)
-s = re.sub(r'(?m)^(\s*)workspaceRoot:\s*.*$', lambda m: f'{m.group(1)}workspaceRoot: {workspace}', s, count=1)
+safe_workspace = workspace.replace('\\', '\\\\').replace('"', '\\"')
+s = re.sub(r'(?m)^(\s*)workspaceRoot:\s*.*$', lambda m: f'{m.group(1)}workspaceRoot: "{safe_workspace}"', s, count=1)
 current = ''
 m = re.search(r'(?m)^\s*signingKey:\s*([^\n#]+)', s)
 if m:
@@ -321,9 +272,19 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 SERVICE
-  systemctl --user daemon-reload
-  systemctl --user enable --now dexyd.service
-  ok "Installed and started user service: dexyd.service"
+  if ! systemctl --user daemon-reload; then
+    warn "Could not reload user systemd; skipping service start."
+    return 0
+  fi
+  if systemctl --user enable dexyd.service; then
+    if systemctl --user restart dexyd.service || systemctl --user start dexyd.service; then
+      ok "Installed and started user service: dexyd.service"
+    else
+      warn "Service installed but could not be started automatically."
+    fi
+  else
+    warn "Service installed but could not be enabled automatically."
+  fi
 }
 
 open_bridge_firewall() {
@@ -356,21 +317,6 @@ open_bridge_firewall() {
   return 1
 }
 
-build_android_if_requested() {
-  local root="$1"
-  [[ "$INSTALL_ANDROID" == "1" ]] || ask_yes_no "Install mobile dependencies and build Android debug APK?" n || return 0
-  INSTALL_ANDROID=1
-  if ! has java || ! has adb; then
-    warn "Android build/install needs JDK 17 and adb."
-    if ask_yes_no "Install Android-related distro packages now?" y; then
-      install_packages "$(detect_pm)" 1
-    fi
-  fi
-  npm --prefix "$root/mobile/dexydMobile" install
-  (cd "$root/mobile/dexydMobile/android" && ./gradlew assembleDebug)
-  ok "Android debug APK built"
-}
-
 main() {
   bold "Dexyd installer"
   dim "Repository: $REPO_URL"
@@ -387,21 +333,18 @@ main() {
   bold "Installing bridge dependencies"
   npm install
 
-  if ask_yes_no "Install TUI Python dependencies now?" y; then
-    install_tui_deps "$root"
-  fi
+  install_tui_deps "$root"
 
   bold "Building bridge"
   npm run build
 
-  build_android_if_requested "$root"
   install_command "$root"
 
-  if [[ "$INSTALL_SERVICE" == "1" ]] || ask_yes_no "Install and start Dexyd as a user service?" y; then
+  if [[ "$INSTALL_SERVICE" == "1" ]]; then
     install_user_service "$root"
   fi
 
-  if [[ "$OPEN_FIREWALL" == "1" ]] || ask_yes_no "Open bridge port 4242 in the local firewall if supported?" n; then
+  if [[ "$OPEN_FIREWALL" == "1" ]]; then
     open_bridge_firewall 4242 || true
   fi
 

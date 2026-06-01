@@ -49,26 +49,30 @@ The installer pulls Dexyd into `~/.local/share/dexyd` by default. It can:
 
 - clone or update the repository;
 - detect common Linux distributions;
-- check Git, curl, Node, npm, Python, Java, Android tools, and adb;
+- check Git, curl, Node, npm, and Python;
 - offer distro package installation for missing dependencies;
 - create or update `dexyd.config.yaml`;
 - generate a strong local signing key;
-- set LAN-friendly bridge defaults;
+- set LAN-friendly bridge defaults and use your home directory as the workspace root;
 - install bridge dependencies;
 - install TUI Python dependencies;
 - build the bridge;
-- optionally install mobile dependencies and build an Android APK;
 - link a `dexyd` command into `~/.local/bin`;
-- optionally install and start a user systemd service;
-- optionally open the bridge firewall port.
+- install or restart a user systemd service when user systemd is available;
+- optionally open the bridge firewall port when `--firewall` is passed.
+
+The installer is only for the bridge and TUI. It does not install mobile dependencies, build an Android APK, or touch a connected phone.
 
 Installer options:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --yes
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --dir "$HOME/Apps/dexyd"
-curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --android --service --firewall
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --firewall
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --no-service
 ```
+
+`--yes` is accepted for compatibility with older commands; current installs are already non-interactive except for any password prompt from `sudo` while installing missing system packages.
 
 Use a custom repository or branch while testing forks:
 
@@ -209,7 +213,6 @@ For a source checkout:
 git pull
 npm install
 npm run build
-cd mobile/dexydMobile && npm install
 ```
 
 Restart the bridge or user service after updating.
