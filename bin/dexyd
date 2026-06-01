@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -z "${DEXYD_CONFIG:-}" && -f "$ROOT_DIR/dexyd.config.yaml" ]]; then
+  export DEXYD_CONFIG="$ROOT_DIR/dexyd.config.yaml"
+fi
+
+run_tui() {
+  local venv_dir="$ROOT_DIR/.dexyd/.venv-tui"
+  local req_file="$ROOT_DIR/tui/requirements.txt"
+  local app_file="$ROOT_DIR/tui/dexyd_tui.py"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to run the Dexyd TUI." >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$venv_dir" ]]; then
+    echo "==> Creating TUI virtualenv at $venv_dir"
+    mkdir -p "$(dirname "$venv_dir")"
+    python3 -m venv "$venv_dir"
+  fi
+
+  # shellcheck source=/dev/null
+  source "$venv_dir/bin/activate"
+
+  if [[ ! -f "$venv_dir/.deps-installed" || "$req_file" -nt "$venv_dir/.deps-installed" ]]; then
+    echo "==> Installing/updating TUI dependencies"
+    python -m pip install --upgrade pip
+    python -m pip install -r "$req_file"
+    touch "$venv_dir/.deps-installed"
+  fi
+
+  echo "==> Launching Dexyd TUI"
+  exec python "$app_file" "$@"
+}
+
+case "${1:-}" in
+  --tui|tui)
+    shift || true
+    run_tui "$@"
+    ;;
+  --install|install)
+    shift || true
+    exec bash scripts/install.sh --use-current "$@"
+    ;;
+  --help|-h|help)
+    cat <<'HELP'
+dexyd commands:
+  dexyd --tui       open the bridge TUI
+  dexyd --install   run the installer against this checkout
+  dexyd             start the built bridge (build first if needed)
+HELP
+    ;;
+  *)
+    if [[ ! -f dist/index.js ]]; then
+      npm run build
+    fi
+    exec node --enable-source-maps dist/index.js "$@"
+    ;;
+esac

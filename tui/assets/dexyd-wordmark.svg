@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 120" role="img" aria-label="dexyd wordmark">
+  <rect width="420" height="120" rx="24" fill="#1e1e1f"/>
+  <path d="M38 31h54v13H51v32h41v13H38z" fill="none" stroke="#f2f2f2" stroke-width="8"/>
+  <path d="M118 35l26 26-26 26M144 35l-26 26 26 26" fill="none" stroke="#64d98b" stroke-width="8" stroke-linecap="square"/>
+  <text x="182" y="77" font-family="Inter, system-ui, sans-serif" font-size="48" font-weight="800" letter-spacing="3" fill="#f2f2f2">dexy<tspan fill="#64d98b">d</tspan></text>
+</svg>

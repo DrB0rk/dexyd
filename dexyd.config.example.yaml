@@ -1,0 +1,40 @@
+server:
+  host: 0.0.0.0
+  port: 4242
+  logLevel: info
+  # External URL exposed by Caddy or another reverse proxy. Leave empty for LAN autodetect.
+  publicBaseUrl: ""
+
+storage:
+  dataDir: .dexyd
+  sqlitePath: .dexyd/dexyd.db
+
+auth:
+  accessTokenTtlSeconds: 900
+  refreshTokenTtlSeconds: 2592000
+  signingKey: change-this-in-production-min-16-chars
+
+stream:
+  replayWindowSeconds: 600
+  heartbeatActiveSeconds: 20
+  heartbeatIdleSeconds: 50
+  maxReplayEvents: 500
+  maxQueuedEventsPerClient: 1000
+  maxBufferedBytes: 1048576
+
+codex:
+  runtimePath: codex
+  # Project picker, file browsing, diffs, and Codex runs are confined to this directory.
+  # Use your home directory for flexible project selection; use a narrower path for stricter security.
+  workspaceRoot: /home/you
+  # direct: run "codex exec ..."
+  # omx: run "omx exec ..." so OMX skills/hooks/commands are available in mobile turns
+  # custom: run "<command> <args> exec ..." for another compatible harness wrapper
+  harness:
+    mode: omx
+    command: omx
+    args: []
+
+plugins:
+  enabled: true
+  pluginDir: .dexyd/plugins

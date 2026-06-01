@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">dexyd logo</title>
+  <desc id="desc">Minimal terminal bracket and x mark logo in white and green.</desc>
+  <defs>
+    <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="104" fill="#1e1e1f"/>
+  <path d="M154 170h116v34H188v104h82v34H154z" fill="none" stroke="#f2f2f2" stroke-width="22" stroke-linejoin="miter" filter="url(#softGlow)"/>
+  <path d="M324 178l74 74-74 74M398 178l-74 74 74 74" fill="none" stroke="#64d98b" stroke-width="22" stroke-linecap="square" stroke-linejoin="miter" filter="url(#softGlow)"/>
+  <path d="M108 154l30 24-30 24M154 210h32" fill="none" stroke="#64d98b" stroke-width="16" stroke-linecap="square" stroke-linejoin="miter"/>
+  <text x="256" y="414" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="54" font-weight="700" letter-spacing="8" fill="#f2f2f2">DEXY<tspan fill="#64d98b">D</tspan></text>
+</svg>

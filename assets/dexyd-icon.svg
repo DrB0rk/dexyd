@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="dexyd icon">
+  <rect width="128" height="128" rx="28" fill="#1e1e1f"/>
+  <path d="M32 39h33v13H45v25h20v13H32z" fill="none" stroke="#f2f2f2" stroke-width="8" stroke-linejoin="miter"/>
+  <path d="M80 42l20 20-20 20M100 42L80 62l20 20" fill="none" stroke="#64d98b" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>

@@ -1,0 +1,224 @@
+# Configuration reference
+
+Dexyd loads configuration from the path in `DEXYD_CONFIG`. If no config path is provided, built-in defaults are used.
+
+Supported config formats:
+
+- YAML: `.yaml`, `.yml`
+- TOML: `.toml`
+- JSON: `.json`
+
+The normal source-based setup uses:
+
+```bash
+cp dexyd.config.example.yaml dexyd.config.yaml
+DEXYD_CONFIG=./dexyd.config.yaml npm run start
+```
+
+## Complete YAML example
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 4242
+  logLevel: info
+  publicBaseUrl: ""
+
+storage:
+  dataDir: .dexyd
+  sqlitePath: .dexyd/dexyd.db
+
+auth:
+  accessTokenTtlSeconds: 900
+  refreshTokenTtlSeconds: 2592000
+  signingKey: change-this-in-production-min-16-chars
+
+stream:
+  replayWindowSeconds: 600
+  heartbeatActiveSeconds: 20
+  heartbeatIdleSeconds: 50
+  maxReplayEvents: 500
+  maxQueuedEventsPerClient: 1000
+  maxBufferedBytes: 1048576
+
+codex:
+  runtimePath: codex
+  workspaceRoot: /home/you
+  harness:
+    mode: omx
+    command: omx
+    args: []
+
+plugins:
+  enabled: true
+  pluginDir: .dexyd/plugins
+```
+
+## `server`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `host` | `0.0.0.0` | Address the bridge binds to. `0.0.0.0` allows LAN devices to connect. |
+| `port` | `4242` | Bridge HTTP/WebSocket port. |
+| `logLevel` | `info` | Pino log level: `fatal`, `error`, `warn`, `info`, `debug`, or `trace`. |
+| `publicBaseUrl` | empty | External URL placed in pairing QR codes. Use this for Caddy/domain/Cloudflare. |
+
+### LAN mode
+
+For same-network phone testing:
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 4242
+  publicBaseUrl: ""
+```
+
+When `publicBaseUrl` is empty and `host` is `0.0.0.0`, Dexyd advertises a detected LAN IPv4 address in pairing payloads.
+
+### Domain mode
+
+For Caddy or another reverse proxy:
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 4242
+  publicBaseUrl: "https://dexyd.example.com"
+```
+
+Generate a new pairing QR after changing `publicBaseUrl`; the mobile app stores the URL from the QR.
+
+## `storage`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `dataDir` | `.dexyd` | General local data directory. |
+| `sqlitePath` | `.dexyd/dexyd.db` | SQLite DB path for devices, sessions, tokens, events, pairing, settings, and audit records. |
+
+Back up this directory if you want to keep pairings and session metadata across migrations. Delete it only when you intentionally want to reset local bridge state.
+
+## `auth`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `accessTokenTtlSeconds` | `900` | Short-lived mobile API bearer token lifetime. |
+| `refreshTokenTtlSeconds` | `2592000` | Refresh token lifetime. Default is 30 days. |
+| `signingKey` | development key | HMAC signing secret for access tokens. Must be at least 16 characters. |
+
+For anything beyond local experimentation, replace `signingKey` with a strong random value. Changing it invalidates existing access tokens; revoking devices or deleting token state may still be useful after rotation.
+
+## `stream`
+
+The stream settings control realtime WebSocket behavior and replay after temporary disconnects.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `replayWindowSeconds` | `600` | How long recent events remain replayable. |
+| `heartbeatActiveSeconds` | `20` | Heartbeat interval when the app is active. |
+| `heartbeatIdleSeconds` | `50` | Heartbeat interval when idle. |
+| `maxReplayEvents` | `500` | Max events returned by replay. |
+| `maxQueuedEventsPerClient` | `1000` | Max queued events per connected client. |
+| `maxBufferedBytes` | `1048576` | Backpressure guard per client. |
+
+If phones reconnect after short Wi-Fi drops, replay fills missed events. If the replay window expires, the app should refresh full session snapshots.
+
+## `codex`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `runtimePath` | `codex` | Executable used for direct Codex runs. |
+| `workspaceRoot` | user home | Root directory for project browsing, session workspaces, files, and diffs. |
+| `harness.mode` | `direct` | Launch mode: `direct`, `omx`, or `custom`. |
+| `harness.command` | `omx` | Wrapper command for `omx` or `custom` mode. |
+| `harness.args` | `[]` | Extra wrapper args before `exec`. |
+
+### Workspace root
+
+Dexyd confines project selection, file browsing, file reading, diffs, and session workspaces to `workspaceRoot` using realpath checks. Use your home directory for flexibility or a narrower project directory for a smaller security boundary.
+
+Examples:
+
+```yaml
+codex:
+  workspaceRoot: /home/you
+```
+
+```yaml
+codex:
+  workspaceRoot: /home/you/Projects
+```
+
+### Harness modes
+
+Direct Codex:
+
+```yaml
+codex:
+  runtimePath: codex
+  harness:
+    mode: direct
+```
+
+OMX through `omx exec`:
+
+```yaml
+codex:
+  harness:
+    mode: omx
+    command: omx
+    args: []
+```
+
+Custom wrapper:
+
+```yaml
+codex:
+  harness:
+    mode: custom
+    command: my-wrapper
+    args: ["--profile", "mobile"]
+```
+
+Custom mode should behave like a Codex-compatible wrapper that accepts `exec` and streams recognizable output.
+
+## `plugins`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `true` | Enables plugin subsystem scaffolding. |
+| `pluginDir` | `.dexyd/plugins` | Local plugin directory. |
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DEXYD_CONFIG` | Path to YAML/TOML/JSON config file. |
+
+## Safe production baseline
+
+For a LAN-only trusted setup:
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 4242
+  publicBaseUrl: ""
+auth:
+  signingKey: "replace-with-a-long-random-secret"
+codex:
+  workspaceRoot: /home/you/Projects
+```
+
+For remote access:
+
+```yaml
+server:
+  host: 127.0.0.1
+  port: 4242
+  publicBaseUrl: "https://dexyd.example.com"
+auth:
+  signingKey: "replace-with-a-long-random-secret"
+```
+
+Bind to localhost when a reverse proxy or tunnel runs on the same host and forwards traffic to the bridge.
