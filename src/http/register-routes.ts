@@ -560,6 +560,15 @@ export async function registerRoutes(
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
+    const usage = context.codexSessionService.getUsageStatus(params.data.sessionId);
+    if (usage.limits.status === 'error') {
+      return reply.code(429).send({
+        error: 'usage_limit_reached',
+        detail: usage.limits.detail || 'Codex usage limit has been reached. Wait for the limit to reset or switch account.',
+        usage
+      });
+    }
+
     let result: ReturnType<typeof context.codexChatService.sendMessage>;
     try {
       result = context.codexChatService.sendMessage({

@@ -1285,6 +1285,7 @@ function ChatScreen({
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
   const composerSpacer = composerHeight + keyboardLift + 12;
+  const usageBlockMessage = usageSendBlockMessage(usage);
   const renderedMessages = useMemo(
     () => [...chat.messages].reverse(),
     [chat.messages],
@@ -1371,12 +1372,18 @@ function ChatScreen({
       goToSessions();
       return;
     }
+    if (usageBlockMessage) {
+      chat.setError(usageBlockMessage);
+      return;
+    }
     const ok = await chat.send(message);
     if (ok) {
       setText('');
       scrollToLatest();
     }
   };
+
+  const sendDisabled = !text.trim() || chat.sending || !activeSession || Boolean(usageBlockMessage);
 
   const header = (
     <View style={styles.chatHeader}>
@@ -1489,27 +1496,36 @@ function ChatScreen({
           { bottom: keyboardLift },
         ]}
       >
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder={
-            activeSession ? 'Message' : 'Select a Codex session first'
-          }
-          placeholderTextColor={palette.dim}
-          style={styles.composerInput}
-          multiline
-          onFocus={() => scrollToLatest(false)}
-        />
-        <Pressable
-          onPress={() => send().catch(() => undefined)}
-          disabled={!text.trim() || chat.sending}
-          style={({ pressed }) => [
-            styles.sendButton,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Text style={styles.sendText}>↑</Text>
-        </Pressable>
+        {usageBlockMessage ? (
+          <View style={styles.composerNotice}>
+            <Text style={styles.composerNoticeText} numberOfLines={2}>{usageBlockMessage}</Text>
+          </View>
+        ) : null}
+        <View style={styles.composerRow}>
+          <TextInput
+            value={text}
+            onChangeText={setText}
+            placeholder={
+              activeSession ? 'Message' : 'Select a Codex session first'
+            }
+            placeholderTextColor={palette.dim}
+            style={styles.composerInput}
+            multiline
+            editable={!usageBlockMessage}
+            onFocus={() => scrollToLatest(false)}
+          />
+          <Pressable
+            onPress={() => send().catch(() => undefined)}
+            disabled={sendDisabled}
+            style={({ pressed }) => [
+              styles.sendButton,
+              sendDisabled && styles.sendButtonDisabled,
+              pressed && !sendDisabled && styles.pressed,
+            ]}
+          >
+            <Text style={[styles.sendText, sendDisabled && styles.sendTextDisabled]}>↑</Text>
+          </Pressable>
+        </View>
       </View>
       {diffViewerOpen && diff.diff ? (
         <DiffViewer
@@ -3614,6 +3630,15 @@ function usageSummary(usage: UsageStatus): string {
   return `${context} · ${usage.limits.label}`;
 }
 
+function usageSendBlockMessage(usage: UsageStatus | null): string | null {
+  if (usage?.limits.status !== 'error') return null;
+  const detail =
+    usage.limits.detail && usage.limits.detail !== 'Rate-limit telemetry is available from Codex.'
+      ? usage.limits.detail
+      : 'Wait for the limit to reset or switch Codex account.';
+  return `Usage limit reached · ${detail}`;
+}
+
 function formatCompactNumber(value: number): string {
   if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}m`;
   if (value >= 1_000) return `${Math.round(value / 100) / 10}k`;
@@ -4478,14 +4503,31 @@ const styles = StyleSheet.create({
   },
   composer: {
     minHeight: 40,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
     paddingHorizontal: 10,
     paddingTop: 6,
     paddingBottom: 8,
     borderTopWidth: 1,
     borderTopColor: palette.line,
     backgroundColor: palette.bg,
+  },
+  composerNotice: {
+    marginBottom: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 12,
+    backgroundColor: '#2a2521',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#5f4630',
+  },
+  composerNoticeText: {
+    color: '#f0c58c',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  composerRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
   },
   composerDocked: {
     position: 'absolute',
@@ -4514,10 +4556,16 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     backgroundColor: '#343436',
   },
+  sendButtonDisabled: {
+    opacity: 0.45,
+  },
   sendText: {
     color: palette.text,
     fontSize: 18,
     fontWeight: '700',
+  },
+  sendTextDisabled: {
+    color: palette.dim,
   },
   diffOverlay: {
     position: 'absolute',

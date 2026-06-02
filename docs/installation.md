@@ -45,7 +45,7 @@ Install from the published repository with one command:
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
-The installer pulls Dexyd into `~/.local/share/dexyd` by default. It can:
+The installer puts Dexyd in the XDG app data directory, normally `~/.local/share/dexyd`. It can:
 
 - clone or update the repository;
 - detect common Linux distributions;
@@ -86,6 +86,8 @@ From an existing checkout, run:
 ```bash
 bash scripts/install.sh --use-current
 ```
+
+`--use-current` uses the current checkout as the source, but still deploys Dexyd into the app install directory. It does not run the bridge from your development repository.
 
 After linking, open Dexyd with:
 

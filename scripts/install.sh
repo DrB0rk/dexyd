@@ -3,7 +3,7 @@ set -euo pipefail
 
 DEXYD_REPO_URL_DEFAULT="https://github.com/DrB0rk/dexyd.git"
 DEXYD_BRANCH_DEFAULT="main"
-DEXYD_INSTALL_DIR_DEFAULT="$HOME/.local/share/dexyd"
+DEXYD_INSTALL_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/dexyd"
 
 REPO_URL="${DEXYD_REPO_URL:-$DEXYD_REPO_URL_DEFAULT}"
 BRANCH="${DEXYD_BRANCH:-$DEXYD_BRANCH_DEFAULT}"
@@ -40,7 +40,7 @@ Options:
   --yes              Compatibility no-op; installer is non-interactive.
   --no-service       Do not install/start the user systemd service.
   --firewall         Open bridge port in a supported Linux firewall.
-  --use-current      Install from the current checkout instead of cloning.
+  --use-current      Deploy the current checkout into the install directory.
   --help             Show this help.
 
 Environment overrides:
@@ -131,10 +131,81 @@ check_core_dependencies() {
   ok "Core dependencies ready"
 }
 
+deploy_current_checkout() {
+  local source_root="$1" target_root="$2"
+  python3 - "$source_root" "$target_root" <<'PYCOPY'
+from pathlib import Path
+import os
+import shutil
+import sys
+
+source = Path(sys.argv[1]).resolve()
+target = Path(sys.argv[2]).expanduser().resolve()
+if source == target:
+    print(str(target))
+    raise SystemExit(0)
+if target in source.parents:
+    raise SystemExit(f"Install directory cannot be inside the source checkout: {target}")
+
+exclude_dirs = {
+    ".git",
+    ".github",
+    ".omx",
+    ".dexyd",
+    "dev",
+    "docs",
+    "mobile",
+    "node_modules",
+    "test",
+    ".gradle",
+    "build",
+    "dist",
+}
+exclude_files = {
+    "dexyd.config.yaml",
+}
+preserve_in_target = {
+    ".dexyd",
+    "dexyd.config.yaml",
+}
+
+target.mkdir(parents=True, exist_ok=True)
+for child in list(target.iterdir()):
+    if child.name in preserve_in_target:
+        continue
+    if child.is_dir() and not child.is_symlink():
+        shutil.rmtree(child)
+    else:
+        child.unlink()
+
+def should_skip(path: Path) -> bool:
+    rel = path.relative_to(source)
+    parts = set(rel.parts)
+    if path.name in exclude_files:
+        return True
+    return any(part in exclude_dirs for part in parts)
+
+for item in source.iterdir():
+    if should_skip(item):
+        continue
+    dest = target / item.name
+    if item.is_dir() and not item.is_symlink():
+        shutil.copytree(item, dest, ignore=lambda directory, names: [
+            name for name in names if should_skip(Path(directory) / name)
+        ])
+    else:
+        shutil.copy2(item, dest, follow_symlinks=False)
+
+print(str(target))
+PYCOPY
+}
+
 resolve_repo_root() {
   if [[ "$USE_CURRENT" == "1" ]]; then
     [[ -f package.json ]] || fail "--use-current requires running from the Dexyd repository root."
-    printf '%s\n' "$(pwd)"
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    bold "Deploying current checkout into $INSTALL_DIR" >&2
+    deploy_current_checkout "$(pwd)" "$INSTALL_DIR"
     return
   fi
 
@@ -228,12 +299,30 @@ install_tui_deps() {
   local root="$1"
   local venv="$root/.dexyd/.venv-tui"
   local req="$root/tui/requirements.txt"
+  local marker="$venv/.deps-installed"
   [[ -f "$req" ]] || return 0
+  if [[ -x "$venv/bin/python" && -f "$marker" && "$marker" -nt "$req" ]]; then
+    ok "TUI dependencies already installed"
+    return 0
+  fi
   python3 -m venv "$venv"
-  "$venv/bin/python" -m pip install --upgrade pip
-  "$venv/bin/python" -m pip install -r "$req"
-  touch "$venv/.deps-installed"
+  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install --upgrade pip
+  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install -r "$req"
+  touch "$marker"
   ok "TUI dependencies installed"
+}
+
+install_bridge_deps() {
+  if [[ -f package-lock.json ]]; then
+    npm ci
+  else
+    npm install
+  fi
+}
+
+prune_bridge_dev_deps() {
+  npm prune --omit=dev
+  ok "Pruned bridge development dependencies"
 }
 
 install_command() {
@@ -328,17 +417,18 @@ main() {
   root="$(resolve_repo_root)"
   cd "$root"
 
-  write_config "$root"
+	  write_config "$root"
 
-  bold "Installing bridge dependencies"
-  npm install
+	  bold "Installing bridge dependencies"
+	  install_bridge_deps
 
-  install_tui_deps "$root"
+	  install_tui_deps "$root"
 
-  bold "Building bridge"
-  npm run build
+	  bold "Building bridge"
+	  npm run build
+	  prune_bridge_dev_deps
 
-  install_command "$root"
+	  install_command "$root"
 
   if [[ "$INSTALL_SERVICE" == "1" ]]; then
     install_user_service "$root"

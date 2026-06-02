@@ -73,3 +73,6 @@ venv/
 tmp/
 *.tmp
 *.bak
+bin
+bin/dexyd
+bin/dexyd

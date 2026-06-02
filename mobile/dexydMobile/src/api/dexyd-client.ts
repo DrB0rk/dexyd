@@ -7,6 +7,28 @@ export type AuthTokens = {
   refreshToken: string;
 };
 
+export class DexydApiError extends Error {
+  status: number;
+  bodyText: string;
+  body: unknown;
+  code: string | null;
+
+  constructor(status: number, bodyText: string, body: unknown) {
+    const code = isRecord(body) && typeof body.error === 'string' ? body.error : null;
+    const detail =
+      isRecord(body) && typeof body.detail === 'string'
+        ? body.detail
+        : code ?? (bodyText.trim() || 'request failed');
+
+    super(`dexyd request failed (${status}): ${detail}`);
+    this.name = 'DexydApiError';
+    this.status = status;
+    this.bodyText = bodyText;
+    this.body = body;
+    this.code = code;
+  }
+}
+
 async function fetchJson<T>(baseUrl: string, path: string, init?: RequestInit, tokens?: AuthTokens): Promise<T> {
   const hasBody = init?.body !== undefined && init.body !== null;
   const response = await fetch(`${normalizeBridgeHttpUrl(baseUrl)}${path}`, {
@@ -20,10 +42,22 @@ async function fetchJson<T>(baseUrl: string, path: string, init?: RequestInit, t
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`dexyd request failed (${response.status}): ${text}`);
+    throw new DexydApiError(response.status, text, parseJson(text));
   }
 
   return (await response.json()) as T;
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export async function pairingStart(baseUrl: string): Promise<PairingStartResponse> {

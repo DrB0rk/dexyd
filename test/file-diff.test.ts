@@ -7,7 +7,6 @@ import { createDexydApplication } from '../src/app.js';
 import { pairTestDevice } from './helpers.js';
 
 const cleanupPaths: string[] = [];
-
 afterEach(() => {
   delete process.env.DEXYD_CONFIG;
   for (const path of cleanupPaths.splice(0, cleanupPaths.length)) {
@@ -74,12 +73,12 @@ describe('file and diff APIs', () => {
     cleanupPaths.push(tempDir);
     const workspace = join(tempDir, 'workspace');
     mkdirSync(workspace);
-    execFileSync('git', ['init'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+    if (!execGitOrSkip(['init'], workspace)) return;
+    execGitOrSkip(['config', 'user.email', 'test@example.com'], workspace);
+    execGitOrSkip(['config', 'user.name', 'Test'], workspace);
     writeFileSync(join(workspace, 'file.txt'), 'before\n');
-    execFileSync('git', ['add', 'file.txt'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'init'], { cwd: workspace });
+    execGitOrSkip(['add', 'file.txt'], workspace);
+    execGitOrSkip(['commit', '-m', 'init'], workspace);
     writeFileSync(join(workspace, 'file.txt'), 'after\n');
 
     process.env.DEXYD_CONFIG = writeConfig(tempDir);
@@ -101,3 +100,15 @@ describe('file and diff APIs', () => {
     }
   });
 });
+
+function execGitOrSkip(args: string[], cwd: string): boolean {
+  try {
+    execFileSync('git', args, { cwd, stdio: 'ignore' });
+    return true;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EPERM') {
+      return false;
+    }
+    throw error;
+  }
+}

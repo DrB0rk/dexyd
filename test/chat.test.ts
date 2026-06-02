@@ -6,11 +6,14 @@ import { createDexydApplication } from '../src/app.js';
 import { pairTestDevice } from './helpers.js';
 
 const cleanupPaths: string[] = [];
+const originalCodexHome = process.env.CODEX_HOME;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 afterEach(() => {
   delete process.env.DEXYD_CONFIG;
+  if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = originalCodexHome;
   for (const path of cleanupPaths.splice(0, cleanupPaths.length)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -191,4 +194,73 @@ describe('chat bridge', () => {
       await service.stop();
     }
   });
+
+  it('rejects new prompts when Codex usage limits are exhausted', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-limit-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "should not run"\n');
+    chmodSync(fakeCodex, 0o755);
+
+    const sessionId = '77777777-7777-4777-8777-777777777777';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        rawTranscriptEntry('2026-06-01T10:00:00.000Z', 'session_meta', {
+          cwd: workspace,
+          timestamp: '2026-06-01T10:00:00.000Z'
+        }),
+        rawTranscriptEntry('2026-06-01T10:00:01.000Z', 'event_msg', {
+          type: 'token_count',
+          info: {
+            total_token_usage: { total_tokens: 100 },
+            last_token_usage: { total_tokens: 100 },
+            model_context_window: 1000
+          },
+          rate_limits: {
+            requests: {
+              remaining: 0,
+              limit: 100
+            }
+          }
+        }),
+        ''
+      ].join('\n')
+    );
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'please continue' }
+      });
+
+      expect(sent.statusCode).toBe(429);
+      const body = sent.json() as { error: string; usage: { limits: { status: string; label: string } } };
+      expect(body.error).toBe('usage_limit_reached');
+      expect(body.usage.limits.status).toBe('error');
+      expect(body.usage.limits.label).toBe('limit reached');
+    } finally {
+      await service.stop();
+    }
+  });
 });
+
+function rawTranscriptEntry(timestamp: string, type: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp, type, payload });
+}

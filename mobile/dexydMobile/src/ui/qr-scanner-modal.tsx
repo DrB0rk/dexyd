@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, radii, spacing } from './theme';
 
@@ -9,29 +9,42 @@ type Props = {
 };
 
 type ScannerModules = {
-  CodeScanner: React.ComponentType<any>;
+  Camera: React.ComponentType<any>;
+  useBarcodeScannerOutput: (options: Record<string, unknown>) => unknown;
+  useCameraDevice: (position: 'back' | 'front') => unknown | null;
   useCameraPermission: () => {
     hasPermission: boolean;
     requestPermission: () => Promise<boolean>;
   };
 };
 
+const QR_BARCODE_FORMATS = ['qr-code'];
+
 function loadScannerModules(): ScannerModules | null {
   try {
     const camera = require('react-native-vision-camera') as {
+      Camera: ScannerModules['Camera'];
+      useCameraDevice: ScannerModules['useCameraDevice'];
       useCameraPermission: ScannerModules['useCameraPermission'];
     };
     const barcode = require('react-native-vision-camera-barcode-scanner') as {
-      CodeScanner: ScannerModules['CodeScanner'];
+      useBarcodeScannerOutput: ScannerModules['useBarcodeScannerOutput'];
     };
 
-    if (!camera.useCameraPermission || !barcode.CodeScanner) {
+    if (
+      !camera.Camera ||
+      !camera.useCameraDevice ||
+      !camera.useCameraPermission ||
+      !barcode.useBarcodeScannerOutput
+    ) {
       return null;
     }
 
     return {
+      Camera: camera.Camera,
+      useBarcodeScannerOutput: barcode.useBarcodeScannerOutput,
+      useCameraDevice: camera.useCameraDevice,
       useCameraPermission: camera.useCameraPermission,
-      CodeScanner: barcode.CodeScanner
     };
   } catch {
     return null;
@@ -47,7 +60,9 @@ export function QrScannerModal({ visible, onClose, onScanned }: Props) {
         <ScannerHeader onClose={onClose} />
 
         {scannerModules ? (
-          <NativeQrScanner visible={visible} modules={scannerModules} onClose={onClose} onScanned={onScanned} />
+          <ScannerErrorBoundary resetKey={String(visible)}>
+            <NativeQrScanner visible={visible} modules={scannerModules} onClose={onClose} onScanned={onScanned} />
+          </ScannerErrorBoundary>
         ) : (
           <View style={styles.centered}>
             <View style={styles.permissionCard}>
@@ -59,11 +74,36 @@ export function QrScannerModal({ visible, onClose, onScanned }: Props) {
 
         <View style={styles.hintBox}>
           <Text style={styles.hintTitle}>Tip</Text>
-          <Text style={styles.hintText}>Open `npm run tui`, go to Pairing, generate a QR, then center it in the frame.</Text>
+          <Text style={styles.hintText}>Open `dexyd --tui`, go to Pairing, generate a QR, then center it in the frame.</Text>
         </View>
       </View>
     </Modal>
   );
+}
+
+class ScannerErrorBoundary extends React.PureComponent<
+  { children: React.ReactNode; resetKey: string },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidUpdate(previous: { resetKey: string }) {
+    if (previous.resetKey !== this.props.resetKey && this.state.failed) {
+      this.setState({ failed: false });
+    }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <ScannerFallback title="Scanner unavailable" />;
+    }
+
+    return this.props.children;
+  }
 }
 
 function ScannerHeader({ onClose }: { onClose: () => void }) {
@@ -93,7 +133,27 @@ function NativeQrScanner({
 }) {
   const { hasPermission, requestPermission } = modules.useCameraPermission();
   const scanLockedRef = useRef(false);
-  const CodeScanner = modules.CodeScanner;
+  const [scannerError, setScannerError] = useState<string | null>(null);
+  const Camera = modules.Camera;
+  const device = modules.useCameraDevice('back');
+  const output = modules.useBarcodeScannerOutput({
+    barcodeFormats: QR_BARCODE_FORMATS,
+    outputResolution: 'preview',
+    onBarcodeScanned: (codes: Array<{ rawValue?: string; displayValue?: string }>) => {
+      if (scanLockedRef.current) return;
+
+      const first = codes[0];
+      const rawValue = first?.rawValue ?? first?.displayValue;
+      if (!rawValue) return;
+
+      scanLockedRef.current = true;
+      onScanned(rawValue);
+      onClose();
+    },
+    onError: () => {
+      setScannerError('Camera scanner failed. Paste the pairing URI manually, or reopen this screen.');
+    }
+  });
 
   useEffect(() => {
     if (visible && !hasPermission) {
@@ -104,6 +164,7 @@ function NativeQrScanner({
   useEffect(() => {
     if (!visible) {
       scanLockedRef.current = false;
+      setScannerError(null);
     }
   }, [visible]);
 
@@ -121,30 +182,42 @@ function NativeQrScanner({
     );
   }
 
+  if (!device) {
+    return <ScannerFallback title="No camera found" />;
+  }
+
   return (
     <View style={styles.scannerWrap}>
-      <CodeScanner
+      <Camera
         style={styles.scanner}
         isActive={visible}
-        barcodeFormats={['qr-code']}
-        onBarcodeScanned={(codes: Array<{ rawValue?: string; displayValue?: string }>) => {
-          if (scanLockedRef.current) return;
-
-          const first = codes[0];
-          const rawValue = first?.rawValue ?? first?.displayValue;
-          if (!rawValue) return;
-
-          scanLockedRef.current = true;
-          onScanned(rawValue);
-          onClose();
+        device={device}
+        outputs={[output]}
+        onError={() => {
+          setScannerError('Camera could not start. Paste the pairing URI manually, or reopen this screen.');
         }}
-        onError={() => undefined}
       />
       <View pointerEvents="none" style={styles.scanFrame}>
         <View style={styles.cornerTopLeft} />
         <View style={styles.cornerTopRight} />
         <View style={styles.cornerBottomLeft} />
         <View style={styles.cornerBottomRight} />
+      </View>
+      {scannerError ? (
+        <View style={styles.scannerError}>
+          <Text style={styles.scannerErrorText}>{scannerError}</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ScannerFallback({ title }: { title: string }) {
+  return (
+    <View style={styles.centered}>
+      <View style={styles.permissionCard}>
+        <Text style={styles.permissionTitle}>{title}</Text>
+        <Text style={styles.info}>Close this screen and paste the pairing URI manually. The app can still pair without camera access.</Text>
       </View>
     </View>
   );
@@ -211,6 +284,24 @@ const styles = StyleSheet.create({
   },
   scanner: {
     flex: 1
+  },
+  scannerError: {
+    position: 'absolute',
+    left: spacing.md,
+    right: spacing.md,
+    bottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.md,
+    backgroundColor: 'rgba(18, 18, 20, 0.88)',
+    borderWidth: 1,
+    borderColor: colors.border
+  },
+  scannerErrorText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center'
   },
   scanFrame: {
     position: 'absolute',
