@@ -3,7 +3,7 @@ import { Linking, Platform } from 'react-native';
 import { DexydUpdater } from '../native/dexyd-updater';
 import { errorMessage } from '../utils/error-message';
 
-const FALLBACK_APP_VERSION = '0.0.4';
+const FALLBACK_APP_VERSION = '0.0.5';
 const GITHUB_LATEST_RELEASE_URL =
   'https://api.github.com/repos/DrB0rk/dexyd/releases/latest';
 const GITHUB_RELEASES_URL = 'https://github.com/DrB0rk/dexyd/releases/latest';
@@ -162,14 +162,14 @@ export function useAppUpdater() {
         return false;
       }
 
-      const downloadId = await DexydUpdater.downloadAndInstallApk(
+      const updateSessionId = await DexydUpdater.downloadAndInstallApk(
         updateInfo.apkUrl,
         updateInfo.apkName,
       );
       setMessage(
-        `Downloading ${updateInfo.apkName}. Android will ask you to confirm installation when ready.`,
+        `Preparing ${updateInfo.apkName}. Android will open the update confirmation prompt when ready.`,
       );
-      return Boolean(downloadId);
+      return Boolean(updateSessionId);
     } catch (err) {
       setError(errorMessage(err, 'failed to install update'));
       return false;

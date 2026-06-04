@@ -36,7 +36,7 @@ import { useAppUpdater } from './src/hooks/use-app-updater';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
-import { useChat } from './src/hooks/use-chat';
+import { useChat, visibleChatMessages } from './src/hooks/use-chat';
 import { useCodexAuth } from './src/hooks/use-codex-auth';
 import { useDevices } from './src/hooks/use-devices';
 import { useDiff } from './src/hooks/use-diff';
@@ -1505,12 +1505,13 @@ function ChatScreen({
   const scrollRef = useRef<FlatList<ChatMessage> | null>(null);
   const nearBottomRef = useRef(true);
   const latestButtonVisibleRef = useRef(false);
+  const { height: windowHeight } = useWindowDimensions();
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
+  const queuePanelMaxHeight = Math.max(112, Math.min(220, windowHeight * 0.3));
   const usageBlockMessage = usageSendBlockMessage(usage);
   const renderedMessages = useMemo(
-    () =>
-      chat.messages.filter(message => message.status !== 'queued').reverse(),
+    () => visibleChatMessages(chat.messages),
     [chat.messages],
   );
   const promptDiffTurnIds = useMemo(() => {
@@ -1607,9 +1608,14 @@ function ChatScreen({
     activeSession,
     chat.sending,
   );
-  const workingStateReserve = workingInfo ? 62 : 0;
+  const workingStateReserve = workingInfo ? 48 : 0;
+  const queueStateReserve = chat.queuedMessages.length
+    ? Math.min(queuePanelMaxHeight, 54 + chat.queuedMessages.length * 58) + 8
+    : 0;
   const composerSpacer =
-    composerHeight + keyboardLift + 12 + workingStateReserve;
+    composerHeight + keyboardLift + 12 + workingStateReserve + queueStateReserve;
+  const queueDockBottom = composerHeight + keyboardLift + 8;
+  const workingDockBottom = queueDockBottom + queueStateReserve;
 
   const send = async () => {
     const message = text.trim();
@@ -1711,17 +1717,6 @@ function ChatScreen({
         ListHeaderComponent={
           <View>
             <View style={{ height: composerSpacer }} />
-            {chat.queuedMessages.length ? (
-              <QueuedMessagesPanel
-                items={chat.queuedMessages}
-                activeQueueId={steeringQueueId}
-                onSteer={item => {
-                  setSteeringQueueId(item.queueId);
-                  setText('');
-                }}
-                onRemove={queueId => chat.removeQueued(queueId)}
-              />
-            ) : null}
             {chat.loading ? (
               <ActivityIndicator color={palette.text} size="small" />
             ) : null}
@@ -1743,6 +1738,30 @@ function ChatScreen({
         onMomentumScrollEnd={updateScrollPosition}
         scrollEventThrottle={32}
       />
+      {chat.queuedMessages.length ? (
+        <View
+          style={[
+            styles.queuePanelDock,
+            { bottom: queueDockBottom, maxHeight: queuePanelMaxHeight },
+          ]}
+        >
+          <ScrollView
+            style={styles.queuePanelScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <QueuedMessagesPanel
+              items={chat.queuedMessages}
+              activeQueueId={steeringQueueId}
+              onSteer={item => {
+                setSteeringQueueId(item.queueId);
+                setText('');
+              }}
+              onRemove={queueId => chat.removeQueued(queueId)}
+            />
+          </ScrollView>
+        </View>
+      ) : null}
       {showLatestButton ? (
         <Pressable
           accessibilityRole="button"
@@ -1750,7 +1769,7 @@ function ChatScreen({
           onPress={() => scrollToLatest()}
           style={({ pressed }) => [
             styles.latestButton,
-            { bottom: composerHeight + keyboardLift + 16 },
+            { bottom: composerHeight + keyboardLift + 16 + queueStateReserve },
             pressed && styles.pressed,
           ]}
         >
@@ -1762,7 +1781,7 @@ function ChatScreen({
           pointerEvents="none"
           style={[
             styles.workingStateDock,
-            { bottom: composerHeight + keyboardLift + 14 },
+            { bottom: workingDockBottom },
           ]}
         >
           <WorkingState text={workingInfo} />
@@ -5347,9 +5366,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginLeft: 8,
   },
+  queuePanelDock: {
+    position: 'absolute',
+    left: 10,
+    right: 10,
+    zIndex: 4,
+    elevation: 4,
+  },
+  queuePanelScroll: {
+    flexGrow: 0,
+  },
   queuePanel: {
-    marginHorizontal: 12,
-    marginBottom: 10,
+    marginHorizontal: 0,
+    marginBottom: 0,
     paddingHorizontal: 10,
     paddingVertical: 9,
     borderRadius: 14,

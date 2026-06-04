@@ -237,11 +237,13 @@ export class CodexSessionService {
       const payload = isRecord(entry.payload) ? entry.payload : {};
 
       if (type === 'event_msg' && payload.type === 'user_message' && typeof payload.message === 'string') {
+        const content = normalizeTranscriptUserMessage(payload.message);
+        if (!content) continue;
         appendChatMessage(messages, {
           id: `${sessionId}-user-${sequence}`,
           turnId: typeof payload.turn_id === 'string' ? payload.turn_id : `${sessionId}-${sequence}`,
           role: 'user',
-          content: payload.message,
+          content,
           createdAt: timestamp,
           sequence: sequence++,
           status: 'sent'
@@ -551,6 +553,22 @@ function appendChatMessage(messages: ChatMessage[], next: ChatMessage): void {
   messages.push(next);
 }
 
+function normalizeTranscriptUserMessage(content: string): string {
+  const text = content.trim();
+  if (!text) return '';
+
+  const latestMatch = text.match(/(?:^|\n)Latest user message:\s*\n([\s\S]*)$/i);
+  if (latestMatch?.[1]) {
+    return latestMatch[1].trim();
+  }
+
+  if (/^You are running inside dexyd as the assistant for a mobile chat session\./i.test(text)) {
+    return '';
+  }
+
+  return text;
+}
+
 function chatMessageFromResponseRole(
   role: unknown,
   content: string
@@ -560,11 +578,13 @@ function chatMessageFromResponseRole(
   }
 
   if (role === 'user') {
-    if (isOmxAutomationMessage(content)) {
-      return { role: 'system', content: summarizeOmxAutomation(content) };
+    const normalized = normalizeTranscriptUserMessage(content);
+    if (!normalized) return null;
+    if (isOmxAutomationMessage(normalized)) {
+      return { role: 'system', content: summarizeOmxAutomation(normalized) };
     }
 
-    return { role: 'user', content };
+    return { role: 'user', content: normalized };
   }
 
   if (role === 'developer' && isOmxAutomationMessage(content)) {

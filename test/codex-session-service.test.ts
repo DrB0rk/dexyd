@@ -139,6 +139,58 @@ describe('codex session transcript chat projection', () => {
     expect(messages[1]?.content).not.toContain('arguments');
   });
 
+
+  it('shows only the latest user message from Dexyd wrapper prompts', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-wrapper-prompt-'));
+    cleanupPaths.push(tempDir);
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const sessionId = '90909090-9090-4909-8909-909090909090';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        entry('session_meta', { cwd: workspace, timestamp: '2026-06-01T10:00:00.000Z' }),
+        entry('event_msg', {
+          type: 'user_message',
+          turn_id: 'turn-wrapper',
+          message: [
+            'You are running inside dexyd as the assistant for a mobile chat session.',
+            '',
+            'Answer concisely and directly.',
+            '',
+            'Conversation so far:',
+            'USER: older question',
+            '',
+            'ASSISTANT: older answer that must not appear as user text',
+            '',
+            'Latest user message:',
+            'fix the chat flow'
+          ].join('\n')
+        }),
+        entry('response_item', {
+          type: 'message',
+          role: 'assistant',
+          turn_id: 'turn-wrapper',
+          content: [{ type: 'output_text', text: 'Fixed.' }]
+        }),
+        ''
+      ].join('\n')
+    );
+
+    const service = new CodexSessionService(workspace, { warn: () => undefined });
+    const messages = service.getMessages(sessionId);
+
+    expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      'user:fix the chat flow',
+      'assistant:Fixed.'
+    ]);
+  });
+
   it('renders OMX hook prompts as automation instead of user messages', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-transcript-'));
     cleanupPaths.push(tempDir);

@@ -162,7 +162,7 @@ Major settings areas:
 - **Account & usage** — Codex account, usage/context status, auth switching where available.
 - **Security** — trusted devices and sign-out/revoke actions.
 - **Workspace** — project/workspace overview and selection.
-- **Updates** — check GitHub Releases, download the latest APK, and open Android installer.
+- **Updates** — check GitHub Releases and stage the latest APK through Android's update installer.
 - **Diagnostics** — error history, app reset, connection checks.
 
 App info is shown quietly at the bottom of Settings.
@@ -170,11 +170,11 @@ App info is shown quietly at the bottom of Settings.
 
 ## App updates
 
-Settings → Updates checks `https://github.com/DrB0rk/dexyd/releases/latest` and compares the latest release tag with the installed Android version. If an APK asset is attached to the release, the app can download it and open Android's package installer.
+Settings → Updates checks `https://github.com/DrB0rk/dexyd/releases/latest` and compares the latest release tag with the installed Android version. If an APK asset is attached to the release, the app downloads it inside Dexyd and stages it through Android's `PackageInstaller.Session` update flow.
 
-Android does not allow normal APK apps to silently update themselves. Dexyd can automate the check and download, but Android still asks you to confirm installation. On Android 8+, you may also need to allow Dexyd to install unknown apps before the installer opens.
+Android does not allow normal APK apps to silently update themselves. Dexyd automates the check, APK staging, and installer launch, but Android still asks you to confirm installation. On Android 8+, you may also need to allow Dexyd to install unknown apps before the update prompt opens.
 
-The updater only trusts HTTPS GitHub release asset URLs. If a release has no APK attached, the app opens the GitHub release page instead.
+The updater only trusts HTTPS GitHub release asset URLs, verifies that redirects remain HTTPS, and uses the system installer for final package verification. If a release has no APK attached, the app opens the GitHub release page instead.
 
 ## Multiple bridges
 

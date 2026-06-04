@@ -250,6 +250,36 @@ function summarizeProgress(text: string): string {
   return 'Codex is working…';
 }
 
+function chatMessageTime(message: ChatMessage): number {
+  const time = new Date(message.createdAt).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function compareChatMessages(left: ChatMessage, right: ChatMessage): number {
+  const timeDiff = chatMessageTime(left) - chatMessageTime(right);
+  if (timeDiff !== 0) return timeDiff;
+  return left.sequence - right.sequence;
+}
+
+function sameUserContent(left: ChatMessage, right: ChatMessage): boolean {
+  return (
+    left.role === 'user' &&
+    right.role === 'user' &&
+    left.content.trim() === right.content.trim()
+  );
+}
+
+function pendingUserConfirmed(
+  pending: ChatMessage,
+  fetchedUsers: ChatMessage[],
+): boolean {
+  return fetchedUsers.some(fetched => {
+    if (!sameUserContent(pending, fetched)) return false;
+    if (pending.turnId === fetched.turnId) return true;
+    return Math.abs(chatMessageTime(pending) - chatMessageTime(fetched)) <= 10 * 60 * 1000;
+  });
+}
+
 function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
   const result: ChatMessage[] = [];
   const terminalTurns = new Set(
@@ -283,6 +313,24 @@ function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
     ) {
       continue;
     }
+
+    const duplicate = result.find(existing => {
+      if (
+        existing.role !== message.role ||
+        existing.status !== message.status ||
+        existing.content.trim() !== message.content.trim()
+      ) {
+        return false;
+      }
+      if (existing.turnId === message.turnId) return true;
+      return (
+        existing.role === 'user' &&
+        message.role === 'user' &&
+        Math.abs(chatMessageTime(existing) - chatMessageTime(message)) <=
+          10 * 60 * 1000
+      );
+    });
+    if (duplicate) continue;
 
     const previous = result.at(-1);
     const sameAdjacentMessage =
@@ -318,12 +366,25 @@ export function mergeFetchedChatMessages(
   pendingUserMessages: ChatMessage[],
   activeQueueIds?: Set<string>,
 ): ChatMessage[] {
-  const merged = dedupeMessages([...items, ...pendingUserMessages]);
+  const merged = dedupeMessages(
+    [...items, ...pendingUserMessages].sort(compareChatMessages),
+  );
   if (!activeQueueIds) return merged;
   return merged.filter(
     message =>
       message.status !== 'queued' || activeQueueIds.has(message.queueId ?? ''),
   );
+}
+
+export function visibleChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages
+    .filter(
+      message =>
+        message.status !== 'queued' &&
+        !(message.role === 'tool' && message.status === 'running'),
+    )
+    .slice()
+    .reverse();
 }
 
 function mergeQueuedMessages(
@@ -374,13 +435,9 @@ export function useChat(
       setError(null);
       try {
         const items = await getChatMessages(bridgeUrl, sessionId, tokens);
-        const confirmedKeys = new Set(
-          items
-            .filter(message => message.role === 'user')
-            .map(message => `${message.turnId}:${message.content}`),
-        );
+        const fetchedUsers = items.filter(message => message.role === 'user');
         pendingUserMessagesRef.current = pendingUserMessagesRef.current.filter(
-          message => !confirmedKeys.has(`${message.turnId}:${message.content}`),
+          message => !pendingUserConfirmed(message, fetchedUsers),
         );
 
         let activeQueueIds: Set<string> | undefined;

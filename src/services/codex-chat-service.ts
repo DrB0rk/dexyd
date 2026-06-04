@@ -81,7 +81,9 @@ export class CodexChatService {
       .map((event) => this.eventToChatMessage(event))
       .filter((message): message is ChatMessage => message !== null);
     const codexMessages = this.codexSessionService.getMessages(sessionId, limit);
-    return compactRuntimeMessages([...codexMessages, ...dexydMessages]).slice(-limit);
+    return compactRuntimeMessages([...codexMessages, ...dexydMessages])
+      .sort(compareChatMessages)
+      .slice(-limit);
   }
 
   getQueue(sessionId: string): QueuedChatMessage[] {
@@ -325,7 +327,7 @@ export class CodexChatService {
 
   private async startCodexTurn(input: { session: SessionRecord; turnId: string; message: string }): Promise<void> {
     const turnSnapshot = await this.captureTurnSnapshot(input.session, input.turnId);
-    const prompt = this.buildPrompt(input.session.id, input.message);
+    const prompt = this.buildPrompt(input.session, input.message);
     const maxOutputBytes = this.config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     let outputBytes = 0;
     let stdout = '';
@@ -495,8 +497,11 @@ export class CodexChatService {
     }
   }
 
-  private buildPrompt(sessionId: string, latestMessage: string): string {
-    const history = this.getMessages(sessionId, 40)
+  private buildPrompt(session: SessionRecord, latestMessage: string): string {
+    const content = latestMessage.trim();
+    if (session.source === 'codex') return content;
+
+    const history = this.getMessages(session.id, 40)
       .filter((message) => message.role === 'user' || message.role === 'assistant')
       .slice(-20)
       .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
@@ -506,7 +511,7 @@ export class CodexChatService {
       'You are running inside dexyd as the assistant for a mobile chat session.',
       'Answer concisely and directly. If code changes are needed, make them in the workspace.',
       history ? `Conversation so far:\n${history}` : '',
-      `Latest user message:\n${latestMessage}`
+      `Latest user message:\n${content}`
     ]
       .filter(Boolean)
       .join('\n\n');
@@ -663,21 +668,55 @@ function isRuntimeNoiseLine(line: string): boolean {
 }
 
 function compactRuntimeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const ordered = [...messages].sort(compareChatMessages);
   const terminalTurns = new Set(
-    messages
+    ordered
       .filter((message) => message.role === 'assistant' || message.status === 'failed' || message.status === 'cancelled')
       .map((message) => message.turnId)
   );
   const sentQueuedTurns = new Set(
-    messages
+    ordered
       .filter((message) => message.role === 'user' && message.status === 'sent')
       .map((message) => message.queueId ?? message.turnId)
   );
+  const result: ChatMessage[] = [];
 
-  return messages.filter((message) => {
-    if (message.role === 'tool' && message.status === 'running' && terminalTurns.has(message.turnId)) return false;
-    if (message.status === 'queued' && sentQueuedTurns.has(message.queueId ?? message.turnId)) return false;
-    return true;
+  for (const message of ordered) {
+    if (message.role === 'tool' && message.status === 'running' && terminalTurns.has(message.turnId)) continue;
+    if (message.status === 'queued' && sentQueuedTurns.has(message.queueId ?? message.turnId)) continue;
+    if (isDuplicateRuntimeMessage(result, message)) continue;
+
+    const previous = result.at(-1);
+    if (message.status === 'sent' && message.role === 'tool' && previous?.role === 'tool' && previous.status === 'sent') {
+      result.pop();
+    }
+    result.push(message);
+  }
+
+  return result;
+}
+
+function compareChatMessages(left: ChatMessage, right: ChatMessage): number {
+  const timeDiff = chatMessageTime(left) - chatMessageTime(right);
+  if (timeDiff !== 0) return timeDiff;
+  return left.sequence - right.sequence;
+}
+
+function chatMessageTime(message: ChatMessage): number {
+  const time = new Date(message.createdAt).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function isDuplicateRuntimeMessage(messages: ChatMessage[], next: ChatMessage): boolean {
+  return messages.some((message) => {
+    if (message.role !== next.role || message.status !== next.status) return false;
+    if (message.content.trim() !== next.content.trim()) return false;
+    if (message.turnId === next.turnId) return true;
+    return (
+      message.role === 'user' &&
+      next.role === 'user' &&
+      Math.abs(chatMessageTime(message) - chatMessageTime(next)) <= 10 * 60 * 1000
+    );
   });
 }
 

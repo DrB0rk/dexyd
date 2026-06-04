@@ -1,27 +1,37 @@
 package com.dexydmobile
 
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
-import android.content.Context
+import android.app.PendingIntent
 import android.content.Intent
-import android.content.IntentFilter
-import android.database.Cursor
+import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.widget.Toast
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import java.io.BufferedInputStream
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import java.util.concurrent.Executors
 
 class DexydUpdaterModule(
   private val reactContext: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(reactContext) {
-  private var activeReceiver: BroadcastReceiver? = null
+  private val executor = Executors.newSingleThreadExecutor()
+  private val mainHandler = Handler(Looper.getMainLooper())
 
   override fun getName(): String = "DexydUpdater"
+
+  override fun invalidate() {
+    executor.shutdownNow()
+    super.invalidate()
+  }
 
   @ReactMethod
   fun getInstalledVersion(promise: Promise) {
@@ -67,98 +77,140 @@ class DexydUpdaterModule(
 
   @ReactMethod
   fun downloadAndInstallApk(url: String, fileName: String, promise: Promise) {
-    try {
-      val uri = Uri.parse(url)
-      if (uri.scheme != "https") {
-        promise.reject("invalid_update_url", "Update APK URL must use HTTPS.")
-        return
-      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-        !reactContext.packageManager.canRequestPackageInstalls()
-      ) {
-        promise.reject("install_permission_required", "Allow Dexyd to install unknown apps first.")
-        return
-      }
+    val uri = Uri.parse(url)
+    if (!isTrustedApkSource(uri)) {
+      promise.reject("invalid_update_url", "Update APK URL must be an HTTPS GitHub release asset.")
+      return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+      !reactContext.packageManager.canRequestPackageInstalls()
+    ) {
+      promise.reject("install_permission_required", "Allow Dexyd to install unknown apps first.")
+      return
+    }
 
-      val safeFileName = sanitizeApkFileName(fileName)
-      val manager = reactContext.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-      val request = DownloadManager.Request(uri).apply {
-        setTitle("Dexyd update")
-        setDescription("Downloading $safeFileName")
-        setMimeType(APK_MIME_TYPE)
-        setAllowedOverMetered(true)
-        setAllowedOverRoaming(false)
-        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        setDestinationInExternalFilesDir(
-          reactContext,
-          Environment.DIRECTORY_DOWNLOADS,
-          safeFileName,
-        )
-      }
+    val safeFileName = sanitizeApkFileName(fileName)
+    showToast("Preparing Dexyd update…")
 
-      unregisterReceiver()
-      val downloadId = manager.enqueue(request)
-      val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-          val completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
-          if (completedId != downloadId) return
-          unregisterReceiver()
-          openDownloadedApk(manager, downloadId)
+    executor.execute {
+      var sessionId = -1
+      var installer: PackageInstaller? = null
+      var connection: HttpURLConnection? = null
+      try {
+        installer = reactContext.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+          setAppPackageName(reactContext.packageName)
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setPackageSource(PackageInstaller.PACKAGE_SOURCE_DOWNLOADED_FILE)
+          }
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
+          }
         }
-      }
-      activeReceiver = receiver
-      val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        reactContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-      } else {
-        reactContext.registerReceiver(receiver, filter)
-      }
+        sessionId = installer.createSession(params)
 
-      Toast.makeText(reactContext, "Downloading Dexyd update…", Toast.LENGTH_SHORT).show()
-      promise.resolve(downloadId.toString())
-    } catch (error: Exception) {
-      unregisterReceiver()
-      promise.reject("update_download_failed", "Could not download Dexyd update.", error)
+        connection = openApkConnection(url)
+        val contentLength = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
+
+        installer.openSession(sessionId).use { session ->
+          BufferedInputStream(connection.inputStream).use { input ->
+            session.openWrite(safeFileName, 0, contentLength).use { output ->
+              input.copyTo(output)
+              session.fsync(output)
+            }
+          }
+
+          val callback = Intent(reactContext, DexydInstallReceiver::class.java).apply {
+            action = DexydInstallReceiver.ACTION_INSTALL_COMMIT
+            putExtra(DexydInstallReceiver.EXTRA_APK_NAME, safeFileName)
+          }
+          val pendingIntent = PendingIntent.getBroadcast(
+            reactContext,
+            sessionId,
+            callback,
+            pendingIntentFlags(),
+          )
+          session.commit(pendingIntent.intentSender)
+        }
+
+        showToast("Opening Android installer…")
+        promise.resolve(sessionId.toString())
+      } catch (error: Exception) {
+        if (sessionId != -1) {
+          try {
+            installer?.abandonSession(sessionId)
+          } catch (_: Exception) {
+            // Best-effort cleanup; original failure is reported below.
+          }
+        }
+        showToast("Dexyd update could not be prepared.", Toast.LENGTH_LONG)
+        promise.reject("update_install_failed", "Could not stage Dexyd update for Android installer.", error)
+      } finally {
+        connection?.disconnect()
+      }
     }
   }
 
-  private fun openDownloadedApk(manager: DownloadManager, downloadId: Long) {
-    try {
-      val query = DownloadManager.Query().setFilterById(downloadId)
-      val status = manager.query(query).use { cursor -> readDownloadStatus(cursor) }
-      if (status != DownloadManager.STATUS_SUCCESSFUL) {
-        Toast.makeText(reactContext, "Dexyd update download failed.", Toast.LENGTH_LONG).show()
-        return
+  private fun openApkConnection(url: String): HttpURLConnection {
+    var currentUrl = URL(url)
+    repeat(MAX_REDIRECTS + 1) { redirectCount ->
+      if (currentUrl.protocol?.lowercase(Locale.US) != "https") {
+        throw SecurityException("Update download redirected away from HTTPS.")
       }
-      val apkUri = manager.getUriForDownloadedFile(downloadId)
-      if (apkUri == null) {
-        Toast.makeText(reactContext, "Downloaded APK could not be opened.", Toast.LENGTH_LONG).show()
-        return
+
+      val connection = currentUrl.openConnection()
+      if (connection !is HttpURLConnection) {
+        throw IOException("Update URL did not create an HTTP connection.")
       }
-      val installIntent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(apkUri, APK_MIME_TYPE)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      connection.instanceFollowRedirects = false
+      connection.connectTimeout = 20_000
+      connection.readTimeout = 90_000
+      connection.setRequestProperty("Accept", "$APK_MIME_TYPE, application/octet-stream")
+      connection.setRequestProperty("User-Agent", "Dexyd Android updater")
+      connection.connect()
+
+      val status = connection.responseCode
+      if (status in HTTP_REDIRECT_CODES) {
+        if (redirectCount == MAX_REDIRECTS) {
+          connection.disconnect()
+          throw IOException("Update download redirected too many times.")
+        }
+        val location = connection.getHeaderField("Location")
+        connection.disconnect()
+        if (location.isNullOrBlank()) {
+          throw IOException("Update download redirect had no location.")
+        }
+        currentUrl = URL(currentUrl, location)
+        return@repeat
       }
-      reactContext.startActivity(installIntent)
-    } catch (error: Exception) {
-      Toast.makeText(reactContext, "Could not open Android installer.", Toast.LENGTH_LONG).show()
+
+      if (status !in 200..299) {
+        connection.disconnect()
+        throw IOException("Update download failed with HTTP $status.")
+      }
+      return connection
+    }
+    throw IOException("Update download redirected too many times.")
+  }
+
+  private fun pendingIntentFlags(): Int {
+    val update = PendingIntent.FLAG_UPDATE_CURRENT
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      update or PendingIntent.FLAG_MUTABLE
+    } else {
+      update
     }
   }
 
-  private fun readDownloadStatus(cursor: Cursor?): Int {
-    if (cursor == null || !cursor.moveToFirst()) return DownloadManager.STATUS_FAILED
-    return cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+  private fun isTrustedApkSource(uri: Uri): Boolean {
+    val host = uri.host?.lowercase(Locale.US) ?: return false
+    return uri.scheme.equals("https", ignoreCase = true) &&
+      (host == "github.com" || host.endsWith(".github.com"))
   }
 
-  private fun unregisterReceiver() {
-    val receiver = activeReceiver ?: return
-    try {
-      reactContext.unregisterReceiver(receiver)
-    } catch (_: IllegalArgumentException) {
-      // Already unregistered.
-    } finally {
-      activeReceiver = null
+  private fun showToast(message: String, length: Int = Toast.LENGTH_SHORT) {
+    mainHandler.post {
+      Toast.makeText(reactContext, message, length).show()
     }
   }
 
@@ -170,5 +222,7 @@ class DexydUpdaterModule(
 
   companion object {
     private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+    private const val MAX_REDIRECTS = 5
+    private val HTTP_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
   }
 }

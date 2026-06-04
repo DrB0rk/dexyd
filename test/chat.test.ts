@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -417,6 +417,81 @@ describe('chat bridge', () => {
 
       const fetched = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}`, headers: authHeader });
       expect(fetched.json().session.status).toBe('running');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('sends only the raw app message when resuming a Codex-backed session', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-codex-raw-prompt-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const argsFile = join(tempDir, 'codex-args.txt');
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env bash
+printf '%s\n' "$@" > "${argsFile}"
+echo "raw prompt response"
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    const sessionId = '77777777-7777-4777-8777-777777777777';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        rawTranscriptEntry('2026-06-01T10:00:00.000Z', 'session_meta', {
+          cwd: workspace,
+          timestamp: '2026-06-01T10:00:00.000Z'
+        }),
+        rawTranscriptEntry('2026-06-01T10:00:01.000Z', 'event_msg', {
+          type: 'user_message',
+          message: 'old desktop message',
+          turn_id: 'old-turn'
+        }),
+        rawTranscriptEntry('2026-06-01T10:00:02.000Z', 'response_item', {
+          type: 'message',
+          role: 'assistant',
+          turn_id: 'old-turn',
+          content: [{ type: 'output_text', text: 'old assistant answer' }]
+        }),
+        ''
+      ].join('\n')
+    );
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'new app message only' }
+      });
+      expect(sent.statusCode).toBe(202);
+
+      for (let attempt = 0; attempt < 20 && !existsSync(argsFile); attempt += 1) {
+        await sleep(25);
+      }
+
+      const args = readFileSync(argsFile, 'utf8').trim().split('\n');
+      expect(args.slice(0, 5)).toEqual(['exec', 'resume', '--all', '--skip-git-repo-check', sessionId]);
+      expect(args.at(-1)).toBe('new app message only');
+      expect(args.at(-1)).not.toContain('Conversation so far');
+      expect(args.at(-1)).not.toContain('old assistant answer');
+      expect(args.at(-1)).not.toContain('You are running inside dexyd');
     } finally {
       await service.stop();
     }

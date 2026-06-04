@@ -106,9 +106,9 @@ Go to **Updates → Check updates → Install bridge update**. The TUI reruns th
 
 ### Android app
 
-Open **Settings → Updates** in the app. Dexyd checks the latest GitHub Release, downloads the APK if one is attached, and opens Android's installer prompt.
+Open **Settings → Updates** in the app. Dexyd checks the latest GitHub Release, stages the attached APK through Android's PackageInstaller update flow, and opens the Android update confirmation prompt.
 
-Android does not allow normal APK apps to silently self-update; you must confirm the installation.
+Android does not allow normal APK apps to silently self-update; you still confirm the installation, but you no longer need to open a downloaded APK file manually.
 
 ## Security model in short
 

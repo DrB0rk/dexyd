@@ -271,4 +271,4 @@ dexyd --tui
 
 Open **Updates**, choose **Check updates**, then **Install bridge update** when a newer release is available. The update flow reruns the official installer for the installed app directory and preserves configuration/data.
 
-Use the mobile app **Settings → Updates** to update the Android APK from GitHub Releases. Android requires final confirmation before installing the downloaded APK.
+Use the mobile app **Settings → Updates** to update the Android APK from GitHub Releases. Dexyd stages the APK with Android PackageInstaller and opens the update confirmation prompt; Android still requires final confirmation before installing.
