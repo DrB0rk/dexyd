@@ -25,7 +25,7 @@ from urllib.parse import urlencode, urlparse
 import qrcode
 import yaml
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Static, TabbedContent, TabPane
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -1201,12 +1201,19 @@ class DexydTextualApp(App[None]):
     .row {
       height: auto;
       width: 1fr;
+      margin-bottom: 1;
     }
     .col {
       width: 1fr;
+      min-width: 0;
       height: auto;
     }
     .actions {
+      height: auto;
+      width: 1fr;
+      margin-bottom: 1;
+    }
+    .action_row {
       height: auto;
       width: 1fr;
       margin-bottom: 1;
@@ -1265,13 +1272,13 @@ class DexydTextualApp(App[None]):
             with TabPane("Home", id="dashboard"):
                 with VerticalScroll(classes="page"):
                     yield Static("", id="dashboard_hero", classes="hero")
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         yield Static("", id="bridge_card", classes="panel col")
                         yield Static("", id="storage_card", classes="panel col")
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         yield Static("", id="security_card", classes="panel col")
                         yield Static("", id="next_steps_card", classes="panel col")
-                    with Vertical(classes="actions"):
+                    with Horizontal(classes="action_row"):
                         yield Button("Refresh", id="refresh_dashboard", variant="primary")
                         yield Button("Check updates", id="check_updates")
                         yield Button("Reload config", id="reload_config")
@@ -1284,7 +1291,7 @@ class DexydTextualApp(App[None]):
                     )
                     yield Static("", id="bridge_config_status", classes="panel")
 
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("LOCAL BRIDGE", classes="section_title")
                             yield Static("Server host", classes="field_label")
@@ -1328,7 +1335,7 @@ class DexydTextualApp(App[None]):
                         "PAIR PHONE\n\nGenerate the QR only after Connection shows the URL you want to use. If you change LAN/domain/tunnel settings, generate a fresh QR.",
                         classes="hero",
                     )
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("PAIRING SETTINGS", classes="section_title")
                             yield Static("Expiry seconds", classes="field_label")
@@ -1346,7 +1353,7 @@ class DexydTextualApp(App[None]):
             with TabPane("Work", id="sessions"):
                 with VerticalScroll(classes="page"):
                     yield Static("WORKSPACES & SESSIONS\n\nCreate local helper sessions, inspect recent sessions, and view chat/diff snippets from the bridge side.", classes="hero")
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("PROJECT", classes="section_title")
                             yield Static("Project path", classes="field_label")
@@ -1370,7 +1377,7 @@ class DexydTextualApp(App[None]):
                             with Vertical(classes="actions"):
                                 yield Button("Delete/hide", id="delete_session", variant="error")
                                 yield Button("Dexyd help chat", id="open_dexyd_chat")
-                    with Vertical(classes="actions"):
+                    with Horizontal(classes="action_row"):
                         yield Button("Refresh sessions", id="refresh_sessions", variant="primary")
                         yield Button("Show chat", id="show_chat")
                     yield Static("", id="session_output")
@@ -1380,14 +1387,14 @@ class DexydTextualApp(App[None]):
             with TabPane("Devices", id="devices"):
                 with VerticalScroll(classes="page"):
                     yield Static("TRUSTED DEVICES\n\nPhones paired with this bridge. Revoke from the mobile Security screen when a phone is lost or replaced.", classes="hero")
-                    with Vertical(classes="actions"):
+                    with Horizontal(classes="action_row"):
                         yield Button("Refresh devices", id="refresh_devices", variant="primary")
                     yield Static("", id="device_output")
 
             with TabPane("Advanced", id="settings"):
                 with VerticalScroll(classes="page"):
                     yield Static("ADVANCED SETTINGS\n\nLess common runtime, security, stream, and harness settings. Save here after editing, then restart the bridge/service.", classes="hero")
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("SECURITY", classes="section_title")
                             yield Static("Access token TTL", classes="field_label")
@@ -1410,7 +1417,7 @@ class DexydTextualApp(App[None]):
                             yield Static("Log level", classes="field_label")
                             yield Static("fatal, error, warn, info, debug, or trace.", classes="field_help")
                             yield Input(placeholder="info", id="cfg_server_log_level")
-                    with Vertical(classes="row"):
+                    with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("CODEX / HARNESS", classes="section_title")
                             yield Static("Codex runtime", classes="field_label")
@@ -1429,7 +1436,7 @@ class DexydTextualApp(App[None]):
                             yield Static("Optional args before exec.", classes="field_help")
                             yield Input(placeholder="--profile mobile", id="cfg_codex_harness_args")
                         yield Static("", id="settings_summary", classes="panel col")
-                    with Vertical(classes="actions"):
+                    with Horizontal(classes="action_row"):
                         yield Button("Save advanced settings", id="save_settings", variant="success")
                         yield Button("Reset form", id="reset_settings")
 
@@ -1441,7 +1448,7 @@ class DexydTextualApp(App[None]):
                         "Bridge updates preserve config and data.",
                         classes="hero",
                     )
-                    with Vertical(classes="actions"):
+                    with Horizontal(classes="action_row"):
                         yield Button("Check updates", id="check_updates", variant="primary")
                         yield Button("Install bridge update", id="install_update", variant="success")
                     yield Static("", id="update_output")
