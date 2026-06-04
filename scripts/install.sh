@@ -25,7 +25,7 @@ else
   dim() { printf '%s\n' "$*"; }
 fi
 ok() { printf '✓ %s\n' "$*"; }
-warn() { printf '! %s\n' "$*"; }
+warn() { printf '! %s\n' "$*" >&2; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
