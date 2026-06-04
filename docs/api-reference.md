@@ -157,7 +157,9 @@ Body:
 
 ### `GET /usage/status?sessionId=<id>`
 
-Returns usage/context status from session telemetry where available. Without `sessionId`, returns the best current/global status the service can infer.
+Returns session context status and account usage status from telemetry where available.
+
+Context usage is session-specific when `sessionId` is supplied. Account usage is account-level and may be unavailable or summarized when the Codex runtime does not expose detailed limits.
 
 ## Projects
 
@@ -266,12 +268,13 @@ Message statuses:
 
 - `sent`
 - `running`
+- `queued`
 - `failed`
 - `cancelled`
 
 ### `POST /sessions/:sessionId/chat`
 
-Sends a user message and starts a Codex/OMX turn.
+Sends a user message and starts a Codex/OMX turn. If the session is already busy, the bridge queues the message instead of dropping it.
 
 Body:
 
@@ -279,11 +282,77 @@ Body:
 { "message": "Fix the failing test" }
 ```
 
-Response status is `202 Accepted` and includes turn metadata.
+Response status is `202 Accepted` and includes turn metadata:
+
+```json
+{
+  "turnId": "uuid",
+  "userEvent": { "sequence": 123, "eventType": "chat.message.user" },
+  "queued": false
+}
+```
+
+Queued response example:
+
+```json
+{
+  "turnId": "uuid",
+  "userEvent": { "sequence": 124, "eventType": "chat.message.queued" },
+  "queued": true,
+  "queueId": "uuid"
+}
+```
 
 ### `POST /sessions/:sessionId/cancel`
 
 Cancels a running session turn where possible.
+
+## Chat queue
+
+### `GET /sessions/:sessionId/queue`
+
+Returns queued messages for a busy session:
+
+```json
+{
+  "queue": [
+    {
+      "queueId": "uuid",
+      "turnId": "uuid",
+      "sessionId": "session-id",
+      "content": "Follow-up prompt",
+      "createdAt": "2026-06-04T00:00:00.000Z",
+      "updatedAt": "2026-06-04T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+### `POST /sessions/:sessionId/queue/:queueId/steer`
+
+Adds steering guidance to a queued message before it runs.
+
+Body:
+
+```json
+{ "message": "Also keep the change small and add a regression test." }
+```
+
+Response:
+
+```json
+{ "queued": { "queueId": "uuid", "content": "..." } }
+```
+
+### `DELETE /sessions/:sessionId/queue/:queueId`
+
+Removes a queued message.
+
+Response:
+
+```json
+{ "removed": true }
+```
 
 ## Files and diffs
 
@@ -307,6 +376,21 @@ Returns current session/workspace diff summary:
   "truncated": false
 }
 ```
+
+### `GET /sessions/:sessionId/diff?turnId=<turnId>`
+
+Returns a per-turn diff summary captured for a completed mobile-started assistant turn:
+
+```json
+{
+  "status": "ok",
+  "stat": "2 files changed, 12 insertions(+), 3 deletions(-)",
+  "diff": "diff --git ...",
+  "truncated": false
+}
+```
+
+If the turn has no captured diff, the bridge returns an empty diff summary. This can happen for older turns, external turns, failed turns, or turns that did not change files.
 
 ## Interactions
 
@@ -362,9 +446,13 @@ Important event types include:
 - `session.updated`
 - `session.deleted`
 - `chat.message.user`
+- `chat.message.queued`
+- `chat.message.queued.updated`
+- `chat.message.queued.removed`
 - `chat.turn.started`
 - `chat.output.delta`
 - `chat.message.assistant`
+- `chat.turn.diff`
 - `chat.turn.cancelled`
 - `chat.turn.failed`
 - `interaction.approval.responded`

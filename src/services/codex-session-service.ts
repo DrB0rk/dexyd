@@ -39,6 +39,8 @@ export type UsageStatus = {
   };
 };
 
+type UsageContext = UsageStatus['context'];
+
 type LoggerLike = {
   warn: (obj: unknown, msg?: string) => void;
 };
@@ -65,6 +67,13 @@ type SessionCandidate = {
   originator: string | undefined;
   source: string | undefined;
   omx: boolean | undefined;
+  active: boolean | undefined;
+  usageContext: UsageContext | undefined;
+};
+
+type TranscriptActivity = {
+  running: boolean;
+  updatedAt: string | null;
 };
 
 type ToolActivity = {
@@ -72,6 +81,7 @@ type ToolActivity = {
   name: string;
   turnId: string;
   category: ToolCategory;
+  detail: string | null;
 };
 
 type ToolCategory = 'command' | 'edit' | 'plan' | 'inspect' | 'network' | 'image' | 'generic';
@@ -79,6 +89,7 @@ type ToolCategory = 'command' | 'edit' | 'plan' | 'inspect' | 'network' | 'image
 const CODEX_SESSION_ID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const MAX_SESSION_FILES = 400;
 const MAX_CHAT_LINES = 5000;
+const ACTIVE_TRANSCRIPT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 
 export class CodexSessionService {
   private readonly codexHome: string;
@@ -102,6 +113,8 @@ export class CodexSessionService {
 
       const fileStat = safeStat(file);
       const fromFile = this.readSessionMeta(file);
+      const activity = this.readTranscriptActivity(file, fileStat?.mtimeMs);
+      const usageContext = this.readTranscriptUsageContext(file);
       const indexed = index.get(id);
       const fromHistory = history.get(id);
       const cwd = fromFile.cwd;
@@ -119,7 +132,9 @@ export class CodexSessionService {
         updatedAt: indexed?.updated_at || fromHistory?.updatedAt || fileStat?.mtime.toISOString(),
         originator: fromFile.originator,
         source: fromFile.source,
-        omx: fromFile.omx || omxSessions.has(id) || activeOmx.has(id)
+        omx: fromFile.omx || omxSessions.has(id) || activeOmx.has(id),
+        active: activity.running,
+        usageContext
       });
     }
 
@@ -129,7 +144,7 @@ export class CodexSessionService {
       .slice(0, limit)
       .map((candidate) => ({
         id: candidate.id,
-        status: activeOmx.has(candidate.id) ? 'running' : 'idle',
+        status: activeOmx.has(candidate.id) || candidate.active ? 'running' : 'idle',
         profile: candidate.omx ? 'omx' : candidate.originator || candidate.source || 'codex',
         workspacePath: candidate.cwd!,
         createdAt: candidate.createdAt || candidate.updatedAt || new Date(0).toISOString(),
@@ -137,7 +152,8 @@ export class CodexSessionService {
         source: 'codex',
         title: cleanTitle(candidate.title) || basename(candidate.cwd!) || candidate.id,
         codexSessionPath: candidate.path,
-        omx: Boolean(candidate.omx)
+        omx: Boolean(candidate.omx),
+        ...(candidate.usageContext ? { usageContext: candidate.usageContext } : {})
       }));
   }
 
@@ -182,13 +198,7 @@ export class CodexSessionService {
       const percent = usedTokens !== null && windowTokens ? Math.round((usedTokens / windowTokens) * 1000) / 10 : null;
       const contextStatus = percent === null ? 'unknown' : percent >= 95 ? 'error' : percent >= 80 ? 'warn' : 'ok';
       const limits = limitStatusFromTelemetry(payload.rate_limits);
-      const status = contextStatus === 'error' || limits.status === 'error'
-        ? 'error'
-        : contextStatus === 'warn' || limits.status === 'warn'
-          ? 'warn'
-          : contextStatus === 'unknown' && limits.status === 'unknown'
-            ? 'unknown'
-            : 'ok';
+      const status = limits.status === 'unknown' ? 'ok' : limits.status;
 
       return {
         status,
@@ -258,11 +268,13 @@ export class CodexSessionService {
       if (type === 'response_item' && (payload.type === 'function_call' || payload.type === 'custom_tool_call')) {
         const callId = typeof payload.call_id === 'string' ? payload.call_id : `${sessionId}-tool-${sequence}`;
         const name = typeof payload.name === 'string' ? payload.name : 'tool';
+        const category = categorizeTool(name);
         const activity = {
           callId,
           name,
           turnId: typeof payload.turn_id === 'string' ? payload.turn_id : callId,
-          category: categorizeTool(name)
+          category,
+          detail: toolDetail(name, category, payload)
         };
         toolActivities.set(callId, activity);
         upsertToolMessage(messages, {
@@ -283,7 +295,8 @@ export class CodexSessionService {
           callId,
           name: 'tool',
           turnId: callId,
-          category: 'generic'
+          category: 'generic',
+          detail: null
         };
         const output = typeof payload.output === 'string' ? payload.output : '';
         upsertToolMessage(messages, {
@@ -304,7 +317,8 @@ export class CodexSessionService {
           callId,
           name: 'apply_patch',
           turnId: callId,
-          category: 'edit'
+          category: 'edit',
+          detail: null
         };
         upsertToolMessage(messages, {
           id: `${sessionId}-tool-${callId}`,
@@ -404,6 +418,122 @@ export class CodexSessionService {
       }
     }
     return result;
+  }
+
+  private readTranscriptActivity(file: string, fileMtimeMs: number | undefined): TranscriptActivity {
+    if (fileMtimeMs && Date.now() - fileMtimeMs > ACTIVE_TRANSCRIPT_MAX_AGE_MS) {
+      return { running: false, updatedAt: null };
+    }
+
+    const activeTaskTurns = new Set<string>();
+    const activeToolCalls = new Set<string>();
+    let sawRunningSignal = false;
+    let openAssistantTurn = false;
+    let updatedAt: string | null = null;
+
+    for (const line of readLastLines(file, MAX_CHAT_LINES)) {
+      const parsed = parseJsonLine(line);
+      if (!parsed || !isRecord(parsed)) continue;
+      if (typeof parsed.timestamp === 'string') updatedAt = parsed.timestamp;
+      const payload = isRecord(parsed.payload) ? parsed.payload : {};
+
+      if (parsed.type === 'event_msg') {
+        if (payload.type === 'task_started') {
+          const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : 'unknown-task';
+          activeTaskTurns.add(turnId);
+          sawRunningSignal = true;
+          openAssistantTurn = true;
+          continue;
+        }
+
+        if (payload.type === 'user_message') {
+          openAssistantTurn = true;
+          continue;
+        }
+
+        if (payload.type === 'agent_message' || payload.type === 'task_complete') {
+          if (payload.type === 'task_complete') {
+            const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : null;
+            if (turnId) activeTaskTurns.delete(turnId);
+            else activeTaskTurns.clear();
+          }
+          activeToolCalls.clear();
+          openAssistantTurn = false;
+          continue;
+        }
+
+        if (payload.type === 'turn_aborted' || payload.type === 'error') {
+          activeTaskTurns.clear();
+          activeToolCalls.clear();
+          openAssistantTurn = false;
+          continue;
+        }
+      }
+
+      if (parsed.type === 'response_item') {
+        if (payload.type === 'reasoning') {
+          sawRunningSignal = true;
+          openAssistantTurn = true;
+          continue;
+        }
+
+        if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
+          const callId = typeof payload.call_id === 'string' ? payload.call_id : null;
+          const status = typeof payload.status === 'string' ? payload.status : null;
+          if (callId && status !== 'completed') activeToolCalls.add(callId);
+          sawRunningSignal = true;
+          openAssistantTurn = true;
+          continue;
+        }
+
+        if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') {
+          const callId = typeof payload.call_id === 'string' ? payload.call_id : null;
+          if (callId) activeToolCalls.delete(callId);
+          if (openAssistantTurn) sawRunningSignal = true;
+          continue;
+        }
+
+        if (payload.type === 'message') {
+          if (payload.role === 'assistant') {
+            activeToolCalls.clear();
+            openAssistantTurn = false;
+          } else if (payload.role === 'user') {
+            openAssistantTurn = true;
+          }
+        }
+      }
+    }
+
+    const fresh = !fileMtimeMs || Date.now() - fileMtimeMs <= ACTIVE_TRANSCRIPT_MAX_AGE_MS;
+    return {
+      running: fresh && sawRunningSignal && (activeTaskTurns.size > 0 || activeToolCalls.size > 0 || openAssistantTurn),
+      updatedAt
+    };
+  }
+
+  private readTranscriptUsageContext(file: string): UsageContext | undefined {
+    for (const line of readLastLines(file, MAX_CHAT_LINES).reverse()) {
+      const parsed = parseJsonLine(line);
+      if (!parsed || !isRecord(parsed)) continue;
+      const payload = isRecord(parsed.payload) ? parsed.payload : {};
+      if (parsed.type !== 'event_msg' || payload.type !== 'token_count') continue;
+
+      const info = isRecord(payload.info) ? payload.info : {};
+      const total = tokenUsageFromRecord(info.total_token_usage);
+      const last = tokenUsageFromRecord(info.last_token_usage);
+      const windowTokens = typeof info.model_context_window === 'number' ? info.model_context_window : null;
+      const usedTokens = last?.totalTokens ?? total?.totalTokens ?? null;
+      const percent = usedTokens !== null && windowTokens ? Math.round((usedTokens / windowTokens) * 1000) / 10 : null;
+      const status = percent === null ? 'unknown' : percent >= 95 ? 'error' : percent >= 80 ? 'warn' : 'ok';
+      return {
+        usedTokens,
+        windowTokens,
+        percent,
+        status
+      };
+    }
+
+    return undefined;
   }
 }
 
@@ -520,7 +650,7 @@ function limitStatusFromTelemetry(raw: unknown): UsageStatus['limits'] {
         ? 'limit reached'
         : status === 'warn'
           ? 'limit low'
-          : normalized.includes('remaining')
+          : lowRemaining !== null || normalized.includes('remaining')
             ? 'limits ok'
             : 'limits reported',
     detail:
@@ -544,9 +674,11 @@ function lowestRemainingPercent(value: unknown): number | null {
 
     const remaining = numberField(candidate, 'remaining');
     const limit = numberField(candidate, 'limit') ?? numberField(candidate, 'max');
+    const usedPercent = numberField(candidate, 'used_percent') ?? numberField(candidate, 'usedPercentage');
     const percent =
       numberField(candidate, 'remaining_percent') ??
       numberField(candidate, 'remainingPercentage') ??
+      (usedPercent !== null ? Math.max(0, 100 - usedPercent) : null) ??
       (remaining !== null && limit ? (remaining / limit) * 100 : null);
 
     if (percent !== null) {
@@ -615,8 +747,126 @@ function categorizeTool(name: string): ToolCategory {
 
 function toolProgressText(activity: ToolActivity, state: 'running' | 'done' | 'failed'): string {
   const verb = toolVerb(activity.category, state);
-  if (state === 'failed') return `${verb}.`;
-  return state === 'running' ? `${verb}…` : `${verb}.`;
+  const detail = activity.detail ? ` · ${activity.detail}` : '';
+  if (state === 'failed') return `${verb}${detail}.`;
+  return state === 'running' ? `${verb}${detail}…` : `${verb}${detail}.`;
+}
+
+function toolDetail(
+  name: string,
+  category: ToolCategory,
+  payload: Record<string, unknown>
+): string | null {
+  const args = toolArguments(payload);
+  const normalized = name.toLowerCase();
+
+  if (category === 'command') {
+    return commandDetail(args) ?? readableToolName(name);
+  }
+
+  if (category === 'edit') {
+    return pathDetail(args) ?? readableToolName(name);
+  }
+
+  if (category === 'plan') {
+    const plan = args && Array.isArray(args.plan) ? args.plan : null;
+    return plan ? `${plan.length} step${plan.length === 1 ? '' : 's'}` : readableToolName(name);
+  }
+
+  if (category === 'network') {
+    return queryDetail(args) ?? readableToolName(name);
+  }
+
+  if (category === 'inspect' || category === 'image') {
+    return pathDetail(args) ?? queryDetail(args) ?? readableToolName(name);
+  }
+
+  if (normalized.includes('multi_tool_use')) {
+    const uses = args && Array.isArray(args.tool_uses) ? args.tool_uses.length : null;
+    return uses ? `${uses} parallel step${uses === 1 ? '' : 's'}` : readableToolName(name);
+  }
+
+  return readableToolName(name);
+}
+
+function toolArguments(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const raw = payload.arguments ?? payload.input;
+  if (isRecord(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function commandDetail(args: Record<string, unknown> | null): string | null {
+  if (!args) return null;
+  const cmd = stringField(args, 'cmd') ?? stringField(args, 'command');
+  if (!cmd) return null;
+  const workdir = stringField(args, 'workdir');
+  const safeCommand = truncateDetail(redactSensitiveText(oneLine(cmd)), 120);
+  if (!workdir) return safeCommand;
+  return `${safeCommand} @ ${truncateDetail(workdir, 44)}`;
+}
+
+function pathDetail(args: Record<string, unknown> | null): string | null {
+  if (!args) return null;
+  const value =
+    stringField(args, 'path') ??
+    stringField(args, 'file') ??
+    stringField(args, 'filename') ??
+    stringField(args, 'ref_id') ??
+    stringField(args, 'pattern');
+  return value ? truncateDetail(oneLine(value), 90) : null;
+}
+
+function queryDetail(args: Record<string, unknown> | null): string | null {
+  if (!args) return null;
+  const value = stringField(args, 'query') ?? stringField(args, 'q') ?? firstSearchQuery(args);
+  return value ? truncateDetail(oneLine(value), 90) : null;
+}
+
+function firstSearchQuery(args: Record<string, unknown>): string | null {
+  for (const key of ['search_query', 'image_query']) {
+    const value = args[key];
+    if (!Array.isArray(value)) continue;
+    const first = value.find(isRecord);
+    const query = first ? stringField(first, 'q') : null;
+    if (query) return query;
+  }
+  return null;
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function truncateDetail(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function readableToolName(name: string): string | null {
+  const clean = name
+    .replace(/^functions\./, '')
+    .replace(/^web\./, '')
+    .replace(/_/g, ' ')
+    .trim();
+  return clean || null;
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/(authorization:\s*bearer\s+)[^\s'"]+/gi, '$1[redacted]')
+    .replace(/(--?(?:token|api-key|password|secret)(?:=|\s+))[^\s'"]+/gi, '$1[redacted]')
+    .replace(/((?:TOKEN|API_KEY|PASSWORD|SECRET)=)[^\s'"]+/g, '$1[redacted]');
 }
 
 function toolVerb(category: ToolCategory, state: 'running' | 'done' | 'failed'): string {

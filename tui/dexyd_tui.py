@@ -698,16 +698,39 @@ def ensure_dexyd_help_workspace(config: dict[str, Any]) -> Path:
     return help_dir
 
 
-def install_user_service(config_path: Path) -> str:
-    systemctl = shutil.which("systemctl")
-    node = shutil.which("node") or "node"
-    repo_root = Path.cwd().resolve()
+def user_service_dir() -> Path:
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
-    service_file = service_dir / "dexyd.service"
+    return service_dir
+
+
+def systemctl_user(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return subprocess.CompletedProcess(["systemctl", "--user", *args], 127, "", "systemctl not found")
+    return run_capture([systemctl, "--user", *args], timeout=timeout)
+
+
+def user_service_state(name: str) -> tuple[str, str]:
+    active = systemctl_user(["is-active", name], timeout=5)
+    enabled = systemctl_user(["is-enabled", name], timeout=5)
+    active_text = (active.stdout or active.stderr or "unknown").strip() or "unknown"
+    enabled_text = (enabled.stdout or enabled.stderr or "unknown").strip() or "unknown"
+    if active.returncode != 0 and active_text in {"", "unknown"}:
+        active_text = "inactive"
+    if enabled.returncode != 0 and enabled_text in {"", "unknown"}:
+        enabled_text = "disabled"
+    return active_text, enabled_text
+
+
+def install_user_service(config_path: Path) -> str:
+    node = shutil.which("node") or "node"
+    repo_root = Path.cwd().resolve()
+    service_file = user_service_dir() / "dexyd.service"
     service_file.write_text(
         "[Unit]\n"
         "Description=dexyd bridge\n"
+        "Wants=network-online.target\n"
         "After=network-online.target\n\n"
         "[Service]\n"
         f"WorkingDirectory={repo_root}\n"
@@ -719,16 +742,56 @@ def install_user_service(config_path: Path) -> str:
         "WantedBy=default.target\n",
         encoding="utf-8",
     )
-    if not systemctl:
-        return f"Service file written: {service_file}\nsystemctl not found; enable it manually on your init system."
     build = run_capture(["npm", "run", "build"], timeout=120)
     if build.returncode != 0:
         return f"Service file written: {service_file}\nBuild failed; run npm run build before enabling.\n{build.stderr or build.stdout}"
-    for command in ([systemctl, "--user", "daemon-reload"], [systemctl, "--user", "enable", "--now", "dexyd.service"]):
-        result = run_capture(list(command), timeout=30)
+    for command in (["daemon-reload"], ["enable", "--now", "dexyd.service"]):
+        result = systemctl_user(list(command), timeout=30)
         if result.returncode != 0:
-            return f"Service file written: {service_file}\nCommand failed: {' '.join(command)}\n{result.stderr or result.stdout}"
-    return f"Installed and started user service: {service_file}\nCheck with: systemctl --user status dexyd.service"
+            return f"Service file written: {service_file}\nCommand failed: systemctl --user {' '.join(command)}\n{result.stderr or result.stdout}"
+    return f"Bridge autostart enabled and running: {service_file}\nCheck with: systemctl --user status dexyd.service"
+
+
+def install_cloudflare_user_service(cloudflared: str | None = None) -> str:
+    if not CLOUDFLARE_CONFIG_FILE.exists():
+        return "Cloudflare config is missing. Run named tunnel setup first."
+    path = cloudflared or cloudflared_path()
+    if not path:
+        return "cloudflared is missing. Install cloudflared first."
+
+    service_file = user_service_dir() / "dexyd-cloudflared.service"
+    service_file.write_text(
+        "[Unit]\n"
+        "Description=dexyd Cloudflare named tunnel\n"
+        "Wants=network-online.target dexyd.service\n"
+        "After=network-online.target dexyd.service\n\n"
+        "[Service]\n"
+        f"ExecStart={path} --config {CLOUDFLARE_CONFIG_FILE} tunnel run\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n",
+        encoding="utf-8",
+    )
+    for command in (["daemon-reload"], ["enable", "dexyd-cloudflared.service"]):
+        result = systemctl_user(list(command), timeout=30)
+        if result.returncode != 0:
+            return f"Tunnel service file written: {service_file}\nCommand failed: systemctl --user {' '.join(command)}\n{result.stderr or result.stdout}"
+    return f"Tunnel autostart enabled: {service_file}"
+
+
+def start_cloudflare_user_service() -> str:
+    result = systemctl_user(["start", "dexyd-cloudflared.service"], timeout=30)
+    if result.returncode != 0:
+        return f"Could not start tunnel service.\n{result.stderr or result.stdout}"
+    return "Tunnel service started."
+
+
+def stop_cloudflare_user_service() -> str:
+    result = systemctl_user(["stop", "dexyd-cloudflared.service"], timeout=30)
+    if result.returncode != 0:
+        return f"Could not stop tunnel service.\n{result.stderr or result.stdout}"
+    return "Tunnel service stopped."
 
 def read_session_count(sqlite_path: Path) -> int:
     if not sqlite_path.exists():
@@ -744,6 +807,126 @@ def read_session_count(sqlite_path: Path) -> int:
     finally:
         connection.close()
 
+
+
+def workspace_root_for(config: dict[str, Any]) -> Path:
+    return Path(str(config["codex"].get("workspaceRoot") or Path.home())).expanduser().resolve()
+
+
+def resolve_workspace_child(config: dict[str, Any], value: str) -> Path:
+    root = workspace_root_for(config)
+    raw = value.strip() or str(root)
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(f"Project path must stay inside workspace root: {root}") from exc
+    return resolved
+
+
+def list_projects(config: dict[str, Any], limit: int = 40) -> list[Path]:
+    root = workspace_root_for(config)
+    if not root.exists():
+        return []
+    projects: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if len(projects) >= limit:
+            break
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        projects.append(child.resolve())
+    return projects
+
+
+def create_project_dir(config: dict[str, Any], path_value: str) -> Path:
+    path = resolve_workspace_child(config, path_value)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def ensure_session_tables(sqlite_path: Path) -> None:
+    if not sqlite_path.exists():
+        raise RuntimeError("Dexyd database is missing. Start the bridge once before managing sessions in the TUI.")
+
+
+def create_local_session(sqlite_path: Path, workspace_path: str, title: str) -> str:
+    ensure_session_tables(sqlite_path)
+    session_id = secrets.token_hex(16)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    connection = sqlite3.connect(str(sqlite_path))
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = {str(row[1]) for row in cursor.fetchall()}
+        if "title" in columns:
+            cursor.execute(
+                """
+                INSERT INTO sessions (id, status, workspace_path, created_at, updated_at, profile, title)
+                VALUES (?, 'created', ?, ?, ?, 'default', ?)
+                """,
+                (session_id, workspace_path, now, now, title.strip() or Path(workspace_path).name),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO sessions (id, status, workspace_path, created_at, updated_at, profile)
+                VALUES (?, 'created', ?, ?, ?, 'default')
+                """,
+                (session_id, workspace_path, now, now),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    return session_id
+
+
+def set_local_session_status(sqlite_path: Path, session_id: str, status: str) -> bool:
+    if status not in {"created", "running", "idle", "completed", "failed", "cancelled"}:
+        raise RuntimeError("Invalid session status")
+    ensure_session_tables(sqlite_path)
+    connection = sqlite3.connect(str(sqlite_path))
+    try:
+        result = connection.execute(
+            "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
+            (status, time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), session_id.strip()),
+        )
+        connection.commit()
+        return result.rowcount > 0
+    finally:
+        connection.close()
+
+
+def delete_or_hide_session(sqlite_path: Path, session_id: str) -> tuple[bool, bool]:
+    session_id = session_id.strip()
+    if not session_id:
+        raise RuntimeError("Enter a session id first")
+    ensure_session_tables(sqlite_path)
+    connection = sqlite3.connect(str(sqlite_path))
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+        result = cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        cursor.execute(
+            "INSERT OR REPLACE INTO hidden_sessions (id, hidden_at) VALUES (?, ?)",
+            (session_id, time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())),
+        )
+        connection.commit()
+        return result.rowcount > 0, True
+    finally:
+        connection.close()
+
+
+def project_list_text(config: dict[str, Any]) -> str:
+    root = workspace_root_for(config)
+    projects = list_projects(config)
+    if not projects:
+        return f"PROJECTS\n\nNo project folders found under {root}."
+    rows = ["PROJECTS", "", f"Root: {root}", ""]
+    rows.extend(f"{index}. {path.name}\n   {path}" for index, path in enumerate(projects, start=1))
+    return "\n\n".join(rows)
 
 def git_diff_summary(workspace_path: str) -> str:
     path = Path(workspace_path)
@@ -901,9 +1084,14 @@ class DexydTextualApp(App[None]):
                         yield Button("Clear", id="clear_qr")
                     yield Static("Generate a QR to pair the mobile app.", id="qr_output")
 
-            with TabPane("Connect", id="connection"):
+            with TabPane("Bridge config", id="connection"):
                 with VerticalScroll():
-                    yield Static("CONNECT\n\nLAN by default. Add a domain or named Cloudflare Tunnel before generating a pairing QR.", classes="hero")
+                    yield Static("BRIDGE CONFIG\n\nCheck the local bridge, configure autostart, and manage the named Cloudflare Tunnel used for pairing.", classes="hero")
+                    yield Static("", id="bridge_config_status", classes="card")
+                    with Horizontal():
+                        yield Button("Refresh status", id="bridge_config_refresh", variant="primary")
+                        yield Button("Enable bridge autostart", id="install_service")
+                        yield Button("Enable tunnel autostart", id="cf_install_service")
                     with Horizontal(classes="two_col"):
                         with Vertical(classes="card col"):
                             yield Static("CLOUDFLARE TUNNEL", classes="card_title")
@@ -920,6 +1108,7 @@ class DexydTextualApp(App[None]):
                                 yield Button("Login", id="cf_login")
                                 yield Button("Auto named setup", id="cf_start_named", variant="success")
                             with Horizontal():
+                                yield Button("Start tunnel service", id="cf_service_start", variant="success")
                                 yield Button("Stop tunnel", id="cf_stop", variant="error")
                         yield Static("", id="cloudflare_output", classes="card col")
 
@@ -985,13 +1174,34 @@ class DexydTextualApp(App[None]):
 
             with TabPane("Sessions", id="sessions"):
                 with VerticalScroll():
-                    yield Static("Projects, sessions, recent chat, and workspace diff.", classes="hero")
+                    yield Static("Manage local Dexyd projects/sessions and inspect recent chat/diff.", classes="hero")
+                    with Horizontal(classes="two_col"):
+                        with Vertical(classes="card col"):
+                            yield Static("PROJECTS", classes="card_title")
+                            yield Static("Project path", classes="field_label")
+                            yield Static("Absolute path, or relative to the configured workspace root.", classes="field_help")
+                            yield Input(placeholder="my-project or /home/me/project", id="project_path")
+                            with Horizontal():
+                                yield Button("Create project", id="create_project", variant="success")
+                                yield Button("Refresh projects", id="refresh_projects")
+                            yield Static("", id="project_output")
+                        with Vertical(classes="card col"):
+                            yield Static("SESSIONS", classes="card_title")
+                            yield Static("Session id", classes="field_label")
+                            yield Input(placeholder="Session id to inspect/manage", id="chat_session_id")
+                            yield Static("New session title", classes="field_label")
+                            yield Input(placeholder="Optional title", id="session_title")
+                            yield Static("Status", classes="field_label")
+                            yield Input(placeholder="idle | completed | cancelled | failed", id="session_status", value="idle")
+                            with Horizontal():
+                                yield Button("Create session", id="create_session", variant="success")
+                                yield Button("Set status", id="set_session_status")
+                            with Horizontal():
+                                yield Button("Delete/hide session", id="delete_session", variant="error")
+                                yield Button("Dexyd chat", id="open_dexyd_chat")
                     with Horizontal():
                         yield Button("Refresh sessions", id="refresh_sessions", variant="primary")
-                        yield Button("Dexyd chat", id="open_dexyd_chat")
-                    yield Input(placeholder="Session id to inspect", id="chat_session_id")
-                    with Horizontal():
-                        yield Button("Show chat", id="show_chat", variant="primary")
+                        yield Button("Show chat", id="show_chat")
                     yield Static("", id="session_output")
                     yield Static("", id="chat_output", classes="card")
                     yield Static("", id="diff_output", classes="card")
@@ -1010,7 +1220,7 @@ class DexydTextualApp(App[None]):
                         "Open this TUI:\n  dexyd --tui\n\n"
                         "Run bridge only:\n  dexyd\n  npm run dev\n\n"
                         "Pairing path:\n  TUI Pairing tab → Generate QR → mobile Pairing screen → Scan QR\n\n"
-                        "Cloudflare path:\n  Connection tab → enter hostname → Auto named setup → generate a new pairing QR.\n\n"
+                        "Cloudflare path:\n  Bridge config tab → enter hostname → Auto named setup → generate a new pairing QR.\n\n"
                         "Keyboard:\n  q = quit, r = refresh current dashboard/device data",
                         classes="card",
                     )
@@ -1032,7 +1242,9 @@ class DexydTextualApp(App[None]):
         self.refresh_dashboard()
         self.refresh_devices()
         self.refresh_sessions()
+        self.refresh_projects()
         self.refresh_cloudflare()
+        self.refresh_bridge_config_status()
 
     def reload_config(self) -> None:
         self.store = load_config_store(str(self.store.path))
@@ -1122,7 +1334,7 @@ class DexydTextualApp(App[None]):
         next_steps = (
             "ACTIONS\n\n"
             "Pair → generate QR\n"
-            "Connect → domain/tunnel\n"
+            "Bridge config → autostart/tunnel\n"
             "Sessions → inspect chat"
         )
         self.query_one("#dashboard_hero", Static).update(hero)
@@ -1150,6 +1362,32 @@ class DexydTextualApp(App[None]):
         if self.cloudflare_log_text:
             output += f"\n\nRECENT ACTIVITY\n\n{self.cloudflare_log_text}"
         self.query_one("#cloudflare_output", Static).update(output)
+
+    def refresh_bridge_config_status(self) -> None:
+        config = self.store.config
+        base_url = bridge_url(config)
+        public_url = advertised_bridge_url(config)
+        health, detail = get_bridge_health(base_url)
+        bridge_active, bridge_enabled = user_service_state("dexyd.service")
+        tunnel_active, tunnel_enabled = user_service_state("dexyd-cloudflared.service")
+        pid = read_pid(CLOUDFLARE_PID_FILE)
+        tunnel_process = "running" if process_is_running(pid) else "stopped"
+        config_state = "present" if CLOUDFLARE_CONFIG_FILE.exists() else "missing"
+        self.query_one("#bridge_config_status", Static).update(
+            "BRIDGE STATUS\n\n"
+            f"Local API: {base_url} · {health}\n"
+            f"Public URL: {public_url}\n"
+            f"Health: {detail}\n\n"
+            "AUTOSTART\n\n"
+            f"Bridge service: {bridge_active} · {bridge_enabled}\n"
+            f"Tunnel service: {tunnel_active} · {tunnel_enabled}\n\n"
+            "TUNNEL\n\n"
+            f"Process: {tunnel_process}{f' · pid {pid}' if process_is_running(pid) else ''}\n"
+            f"Config: {config_state} · {CLOUDFLARE_CONFIG_FILE}"
+        )
+
+    def refresh_projects(self) -> None:
+        self.query_one("#project_output", Static).update(project_list_text(self.store.config))
 
     def append_cloudflare_output(self, message: str) -> None:
         if threading.current_thread() is not threading.main_thread():
@@ -1208,6 +1446,7 @@ class DexydTextualApp(App[None]):
         self.refresh_dashboard()
         self.refresh_settings_summary()
         self.refresh_cloudflare()
+        self.refresh_bridge_config_status()
 
     def build_pairing_output(self, pairing_base_url: str, expires_in_seconds: int) -> tuple[str, str]:
         pairing = start_pairing(bridge_url(self.store.config), pairing_base_url, expires_in_seconds)
@@ -1295,6 +1534,7 @@ class DexydTextualApp(App[None]):
             self.append_cloudflare_output(route_output)
 
         config_path = write_cloudflare_config(tunnel_id, hostname, origin)
+        autostart_message = install_cloudflare_user_service(path)
         stop_pid(read_pid(CLOUDFLARE_PID_FILE))
         pid = start_cloudflared_process([path, "--config", str(config_path), "tunnel", "run"])
         public_url = f"https://{hostname}"
@@ -1304,6 +1544,7 @@ class DexydTextualApp(App[None]):
             f"Tunnel: {tunnel_name} ({tunnel_id})\n"
             f"Origin: {origin}\n"
             f"Config: {config_path}\n"
+            f"Autostart: {autostart_message}\n"
             f"PID: {pid}\n"
             "Waiting for public tunnel health before generating the pairing QR..."
         )
@@ -1473,7 +1714,7 @@ class DexydTextualApp(App[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
         try:
-            if button_id in {"refresh_dashboard", "refresh_devices", "refresh_sessions"}:
+            if button_id in {"refresh_dashboard", "refresh_devices", "refresh_sessions", "refresh_projects", "bridge_config_refresh"}:
                 self.refresh_all()
                 self.set_status("Refreshed")
             elif button_id == "reload_config":
@@ -1481,9 +1722,33 @@ class DexydTextualApp(App[None]):
                 self.set_status("Config reloaded")
             elif button_id == "install_service":
                 self.set_status(install_user_service(self.store.path))
+                self.refresh_bridge_config_status()
             elif button_id == "show_chat":
                 self.refresh_chat_output()
                 self.set_status("Chat refreshed")
+            elif button_id == "create_project":
+                path = create_project_dir(self.store.config, self.query_one("#project_path", Input).value)
+                self.query_one("#project_path", Input).value = str(path)
+                self.refresh_projects()
+                self.set_status(f"Project ready: {path}")
+            elif button_id == "create_session":
+                project = create_project_dir(self.store.config, self.query_one("#project_path", Input).value)
+                title = self.query_one("#session_title", Input).value
+                session_id = create_local_session(sqlite_path_for(self.store.config), str(project), title)
+                self.query_one("#chat_session_id", Input).value = session_id
+                self.refresh_sessions()
+                self.set_status(f"Session created: {session_id}")
+            elif button_id == "set_session_status":
+                session_id = self.query_one("#chat_session_id", Input).value.strip()
+                status = self.query_one("#session_status", Input).value.strip().lower()
+                changed = set_local_session_status(sqlite_path_for(self.store.config), session_id, status)
+                self.refresh_sessions()
+                self.set_status(f"Session status {'updated' if changed else 'not found'}: {session_id}")
+            elif button_id == "delete_session":
+                session_id = self.query_one("#chat_session_id", Input).value.strip()
+                deleted, hidden = delete_or_hide_session(sqlite_path_for(self.store.config), session_id)
+                self.refresh_sessions()
+                self.set_status(f"Session {'deleted' if deleted else 'hidden'}: {session_id} ({'hidden' if hidden else 'visible'})")
             elif button_id == "open_dexyd_chat":
                 self.open_dexyd_help_session()
             elif button_id == "save_settings":
@@ -1506,11 +1771,18 @@ class DexydTextualApp(App[None]):
                 self.set_status("QR output cleared")
             elif button_id == "cf_check":
                 self.refresh_cloudflare()
+                self.refresh_bridge_config_status()
                 self.set_status("Cloudflare status refreshed")
             elif button_id == "cf_install":
                 self.run_cloudflare_task("Install cloudflared", self.ensure_cloudflared)
             elif button_id == "cf_login":
                 self.run_cloudflare_task("Cloudflare login", lambda: self.cloudflare_login(self.ensure_cloudflared()))
+            elif button_id == "cf_install_service":
+                self.set_status(install_cloudflare_user_service(self.ensure_cloudflared()))
+                self.refresh_bridge_config_status()
+            elif button_id == "cf_service_start":
+                self.set_status(start_cloudflare_user_service())
+                self.refresh_bridge_config_status()
             elif button_id == "cf_start_named":
                 hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
                 tunnel_name = self.query_one("#cf_tunnel_name", Input).value.strip() or "dexyd"
@@ -1523,9 +1795,11 @@ class DexydTextualApp(App[None]):
             elif button_id == "cf_stop":
                 pid = read_pid(CLOUDFLARE_PID_FILE)
                 stopped = stop_pid(pid)
+                service_msg = stop_cloudflare_user_service()
                 self.refresh_cloudflare()
+                self.refresh_bridge_config_status()
                 if stopped:
-                    self.set_status("Cloudflare tunnel stopped")
+                    self.set_status(f"Cloudflare tunnel stopped. {service_msg}")
                 elif process_is_running(pid):
                     self.set_status("Cloudflare tunnel did not stop; check process permissions")
                 else:

@@ -65,6 +65,13 @@ Keep these aligned before tagging:
 - Android version name/code when release builds are formalized;
 - release notes.
 
+Beta package versions and tags use the `-b` suffix, for example:
+
+```text
+0.0.2-b
+v0.0.2-b
+```
+
 ## Release artifacts
 
 Current artifact focus:
@@ -73,7 +80,7 @@ Current artifact focus:
 - Source archive.
 - Documentation.
 
-The GitHub Actions APK workflow runs only when a GitHub Release is published. It does not build APKs for branch pushes, pull requests, or tag pushes by themselves.
+The GitHub Actions APK workflow runs only when a GitHub Release is published. It does not build APKs for branch pushes, pull requests, or tag pushes by themselves. A published beta release such as `v0.0.2-b` should produce an attached APK named like `dexyd-v0.0.2-b.apk`.
 
 Planned/future:
 
@@ -91,9 +98,9 @@ Planned/future:
 6. Update docs and screenshots if flows changed.
 7. Promote `dev` to `beta`.
 8. Test beta against LAN and selected remote mode.
-9. Promote `beta` to `main`.
-10. Create and publish GitHub Release `vX.Y.Z`.
-11. Confirm the release workflow built and attached `dexyd-vX.Y.Z.apk`.
+9. For stable releases, promote `beta` to `main`. For beta releases, keep the release target on `beta`.
+10. Create and publish GitHub Release `vX.Y.Z` or prerelease `vX.Y.Z-b`.
+11. Confirm the release workflow built and attached `dexyd-vX.Y.Z.apk` or `dexyd-vX.Y.Z-b.apk`.
 
 ## Rollback strategy
 

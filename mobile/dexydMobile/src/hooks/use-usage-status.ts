@@ -17,6 +17,7 @@ export function useUsageStatus(
   const refresh = useCallback(async () => {
     if (!tokens) {
       setUsage(null);
+      setError(null);
       return;
     }
 
@@ -24,6 +25,7 @@ export function useUsageStatus(
     setError(null);
     try {
       setUsage(await getUsageStatus(bridgeUrl, tokens, sessionId));
+      setError(null);
     } catch (err) {
       setError(errorMessage(err, 'failed to load usage'));
     } finally {

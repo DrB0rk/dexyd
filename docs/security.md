@@ -106,6 +106,17 @@ codex:
 
 Using `/home/you` is convenient but exposes more files to paired devices. Do not set the workspace root to `/`.
 
+## Diff visibility
+
+Per-message diff capture is intended to show what a completed mobile-started turn changed. Diff summaries and diff text may include source code, file paths, and any secrets that were added to or removed from tracked files during that turn.
+
+Security guidance:
+
+- treat diff access like file-read access;
+- keep paired devices trusted;
+- avoid editing secrets through paired sessions;
+- revoke devices if a paired phone is lost.
+
 ## Codex/OMX execution
 
 Dexyd can launch Codex directly or through a harness like OMX. These processes run as the bridge user and can modify files in the selected workspace according to Codex behavior and user approvals.

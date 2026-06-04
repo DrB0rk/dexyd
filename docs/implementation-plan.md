@@ -21,11 +21,11 @@ Dexyd should be a small, robust, security-minded mobile control surface for loca
 - Device revocation and audit logs.
 - Session creation/list/delete/hide.
 - External Codex/OMX session discovery.
-- Chat send/cancel and output processing.
+- Chat send/cancel, queueing, steering, and output processing.
 - Approval/question response endpoint.
 - Usage/context status parsing.
 - Codex account status/switch wrapper.
-- Workspace-confined project/file/diff services.
+- Workspace-confined project/file/diff services, including bounded per-turn diff snapshots.
 
 ### Mobile app
 
@@ -39,7 +39,7 @@ Dexyd should be a small, robust, security-minded mobile control surface for loca
 - Compact working status instead of raw tool spam.
 - User/assistant/system message handling.
 - Markdown-ish message styling for common code/title patterns.
-- View-code-diff action after completed messages.
+- Per-message View message diff action after completed assistant turns.
 - Inbox for actionable updates, approvals, and questions.
 - Integrated approval/question responses.
 - Settings submenus.
@@ -61,9 +61,9 @@ Dexyd should be a small, robust, security-minded mobile control surface for loca
 
 ### Tooling/docs
 
-- Linux installer.
+- Linux installer with XDG app-directory deployment, service setup, verification, and clean removal.
 - Android all-in-one build/run script.
-- Android APK workflow foundation.
+- Android APK workflow that runs only for published GitHub Releases.
 - Initial iOS native target.
 - End-user README.
 - Expanded docs set.

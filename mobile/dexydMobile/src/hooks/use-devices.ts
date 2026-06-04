@@ -11,6 +11,7 @@ export function useDevices(bridgeUrl: string, tokens: AuthTokens | null) {
   const refresh = useCallback(async () => {
     if (!tokens) {
       setDevices([]);
+      setError(null);
       return;
     }
 
@@ -19,6 +20,7 @@ export function useDevices(bridgeUrl: string, tokens: AuthTokens | null) {
     try {
       const items = await getDevices(bridgeUrl, tokens);
       setDevices(items);
+      setError(null);
     } catch (err) {
       setError(errorMessage(err, 'failed to load devices'));
     } finally {
@@ -38,7 +40,7 @@ export function useDevices(bridgeUrl: string, tokens: AuthTokens | null) {
         setError(errorMessage(err, 'failed to revoke device'));
       }
     },
-    [bridgeUrl, refresh, tokens]
+    [bridgeUrl, refresh, tokens],
   );
 
   useEffect(() => {
@@ -50,6 +52,6 @@ export function useDevices(bridgeUrl: string, tokens: AuthTokens | null) {
     loading,
     error,
     refresh,
-    revoke
+    revoke,
   };
 }

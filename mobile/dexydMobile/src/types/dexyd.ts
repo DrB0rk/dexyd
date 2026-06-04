@@ -16,6 +16,23 @@ export type DexydSession = {
   source?: 'dexyd' | 'codex';
   title?: string;
   omx?: boolean;
+  usageContext?: {
+    usedTokens: number | null;
+    windowTokens: number | null;
+    percent: number | null;
+    status: 'ok' | 'warn' | 'error' | 'unknown';
+  };
+};
+
+
+export type QueuedChatMessage = {
+  queueId: string;
+  turnId: string;
+  sessionId: string;
+  content: string;
+  actorDeviceId: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type EventEnvelope<T = unknown> = {
@@ -45,5 +62,6 @@ export type ChatMessage = {
   content: string;
   createdAt: string;
   sequence: number;
-  status: 'sent' | 'running' | 'failed' | 'cancelled';
+  status: 'sent' | 'running' | 'failed' | 'cancelled' | 'queued';
+  queueId?: string;
 };

@@ -22,7 +22,13 @@ export const sessionRecordSchema = z.object({
   updatedAt: z.string().min(1),
   source: z.enum(['dexyd', 'codex']).default('dexyd').optional(),
   title: z.string().nullable().optional(),
-  omx: z.boolean().optional()
+  omx: z.boolean().optional(),
+  usageContext: z.object({
+    usedTokens: z.number().nullable(),
+    windowTokens: z.number().nullable(),
+    percent: z.number().nullable(),
+    status: z.enum(['ok', 'warn', 'error', 'unknown'])
+  }).optional()
 });
 
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;

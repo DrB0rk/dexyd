@@ -1,6 +1,6 @@
 import { normalizeBridgeHttpUrl } from '../config/bridge';
 import { CodexAuthStatus, DeviceRecord, DiffSummary, FileListResponse, FileReadResponse, PairingCompleteResponse, PairingStartResponse, ProjectBrowseResponse, ProjectSuggestResponse, UsageStatus } from '../types/api';
-import { ChatMessage, DexydSession, EventEnvelope } from '../types/dexyd';
+import { ChatMessage, DexydSession, EventEnvelope, QueuedChatMessage } from '../types/dexyd';
 
 export type AuthTokens = {
   accessToken: string;
@@ -12,37 +12,83 @@ export class DexydApiError extends Error {
   bodyText: string;
   body: unknown;
   code: string | null;
+  endpoint: string;
 
-  constructor(status: number, bodyText: string, body: unknown) {
+  constructor(status: number, bodyText: string, body: unknown, endpoint: string) {
     const code = isRecord(body) && typeof body.error === 'string' ? body.error : null;
     const detail =
       isRecord(body) && typeof body.detail === 'string'
         ? body.detail
         : code ?? (bodyText.trim() || 'request failed');
 
-    super(`dexyd request failed (${status}): ${detail}`);
+    super(`Bridge returned HTTP ${status} for ${endpoint}: ${detail}`);
     this.name = 'DexydApiError';
     this.status = status;
     this.bodyText = bodyText;
     this.body = body;
     this.code = code;
+    this.endpoint = endpoint;
+  }
+}
+
+export class DexydBridgeConnectionError extends Error {
+  bridgeUrl: string;
+  endpoint: string;
+  detail: string;
+
+  constructor(bridgeUrl: string, endpoint: string, detail: string) {
+    const normalized = safeNormalizeBridgeUrl(bridgeUrl);
+    super(
+      `Can't reach Dexyd bridge at ${normalized}${endpoint}. ` +
+        'Check that the bridge service is running, this phone can reach the LAN/domain/tunnel, and the firewall allows the bridge port. ' +
+        `Detail: ${detail}`
+    );
+    this.name = 'DexydBridgeConnectionError';
+    this.bridgeUrl = normalized;
+    this.endpoint = endpoint;
+    this.detail = detail;
+  }
+}
+
+function safeNormalizeBridgeUrl(baseUrl: string): string {
+  try {
+    return normalizeBridgeHttpUrl(baseUrl);
+  } catch {
+    return baseUrl.trim() || '(not configured)';
   }
 }
 
 async function fetchJson<T>(baseUrl: string, path: string, init?: RequestInit, tokens?: AuthTokens): Promise<T> {
+  let normalizedBaseUrl: string;
+  try {
+    normalizedBaseUrl = normalizeBridgeHttpUrl(baseUrl);
+  } catch (error) {
+    throw new DexydBridgeConnectionError(baseUrl, path, error instanceof Error ? error.message : 'invalid bridge URL');
+  }
+
+  const endpoint = `${normalizedBaseUrl}${path}`;
   const hasBody = init?.body !== undefined && init.body !== null;
-  const response = await fetch(`${normalizeBridgeHttpUrl(baseUrl)}${path}`, {
-    ...init,
-    headers: {
-      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
-      ...(tokens?.accessToken ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
-      ...(init?.headers ?? {})
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      ...init,
+      headers: {
+        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+        ...(tokens?.accessToken ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
+        ...(init?.headers ?? {})
+      }
+    });
+  } catch (error) {
+    throw new DexydBridgeConnectionError(
+      normalizedBaseUrl,
+      path,
+      error instanceof Error && error.message.trim() ? error.message : 'network request failed'
+    );
+  }
 
   if (!response.ok) {
     const text = await response.text();
-    throw new DexydApiError(response.status, text, parseJson(text));
+    throw new DexydApiError(response.status, text, parseJson(text), path);
   }
 
   return (await response.json()) as T;
@@ -203,8 +249,8 @@ export async function sendChatMessage(
   sessionId: string,
   message: string,
   tokens: AuthTokens
-): Promise<{ turnId: string; userEvent: EventEnvelope }> {
-  return fetchJson<{ turnId: string; userEvent: EventEnvelope }>(
+): Promise<{ turnId: string; userEvent: EventEnvelope; queued?: boolean; queueId?: string }> {
+  return fetchJson<{ turnId: string; userEvent: EventEnvelope; queued?: boolean; queueId?: string }>(
     baseUrl,
     sessionPath(sessionId, '/chat'),
     {
@@ -247,6 +293,45 @@ export async function respondToInteraction(
   );
 }
 
+
+export async function getQueuedMessages(baseUrl: string, sessionId: string, tokens: AuthTokens): Promise<QueuedChatMessage[]> {
+  const result = await fetchJson<{ queue: QueuedChatMessage[] }>(baseUrl, sessionPath(sessionId, '/queue'), undefined, tokens);
+  return result.queue;
+}
+
+export async function steerQueuedMessage(
+  baseUrl: string,
+  sessionId: string,
+  queueId: string,
+  message: string,
+  tokens: AuthTokens
+): Promise<QueuedChatMessage> {
+  const result = await fetchJson<{ queued: QueuedChatMessage }>(
+    baseUrl,
+    sessionPath(sessionId, `/queue/${encodeURIComponent(queueId)}/steer`),
+    {
+      method: 'POST',
+      body: JSON.stringify({ message })
+    },
+    tokens
+  );
+  return result.queued;
+}
+
+export async function removeQueuedMessage(
+  baseUrl: string,
+  sessionId: string,
+  queueId: string,
+  tokens: AuthTokens
+): Promise<{ removed: boolean }> {
+  return fetchJson<{ removed: boolean }>(
+    baseUrl,
+    sessionPath(sessionId, `/queue/${encodeURIComponent(queueId)}`),
+    { method: 'DELETE' },
+    tokens
+  );
+}
+
 export async function cancelSession(baseUrl: string, sessionId: string, tokens: AuthTokens): Promise<{ cancelled: boolean; killed: boolean }> {
   return fetchJson<{ cancelled: boolean; killed: boolean }>(baseUrl, sessionPath(sessionId, '/cancel'), { method: 'POST' }, tokens);
 }
@@ -259,6 +344,7 @@ export async function readFile(baseUrl: string, sessionId: string, path: string,
   return fetchJson<FileReadResponse>(baseUrl, `${sessionPath(sessionId, '/files/read')}?path=${encodeURIComponent(path)}`, undefined, tokens);
 }
 
-export async function getDiff(baseUrl: string, sessionId: string, tokens: AuthTokens): Promise<DiffSummary> {
-  return fetchJson<DiffSummary>(baseUrl, sessionPath(sessionId, '/diff'), undefined, tokens);
+export async function getDiff(baseUrl: string, sessionId: string, tokens: AuthTokens, turnId?: string | null): Promise<DiffSummary> {
+  const suffix = turnId ? `/diff?turnId=${encodeURIComponent(turnId)}` : '/diff';
+  return fetchJson<DiffSummary>(baseUrl, sessionPath(sessionId, suffix), undefined, tokens);
 }

@@ -48,9 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.s
 The installer puts Dexyd in the XDG app data directory, normally `~/.local/share/dexyd`. It can:
 
 - clone or update the repository;
+- clean or replace older Dexyd service and command links;
 - detect common Linux distributions;
 - check Git, curl, Node, npm, and Python;
-- offer distro package installation for missing dependencies;
+- install common missing distro packages when a supported package manager is available;
 - create or update `dexyd.config.yaml`;
 - generate a strong local signing key;
 - set LAN-friendly bridge defaults and use your home directory as the workspace root;
@@ -58,6 +59,7 @@ The installer puts Dexyd in the XDG app data directory, normally `~/.local/share
 - install TUI Python dependencies;
 - build the bridge;
 - link a `dexyd` command into `~/.local/bin`;
+- verify that the command, build output, and TUI virtualenv point at the installed app directory;
 - install or restart a user systemd service when user systemd is available;
 - optionally open the bridge firewall port when `--firewall` is passed.
 
@@ -70,9 +72,12 @@ curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.s
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --dir "$HOME/Apps/dexyd"
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --firewall
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --no-service
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
 ```
 
 `--yes` is accepted for compatibility with older commands; current installs are already non-interactive except for any password prompt from `sudo` while installing missing system packages.
+
+`--clean` removes the installed Dexyd app directory, user service, and `~/.local/bin/dexyd` command link, then exits.
 
 Use a custom repository or branch while testing forks:
 
@@ -209,7 +214,19 @@ Run on a physical iPhone:
 
 ## Updates
 
-For a source checkout:
+For an installed bridge, rerun the installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
+```
+
+From a local checkout, reinstall into the proper app directory:
+
+```bash
+bash scripts/install.sh --use-current
+```
+
+For a source checkout that you intentionally run in-place:
 
 ```bash
 git pull
@@ -221,7 +238,19 @@ Restart the bridge or user service after updating.
 
 ## Uninstall / reset
 
-Stop a user service:
+Remove an installed bridge:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
+```
+
+Or, from a checkout:
+
+```bash
+bash scripts/install.sh --clean
+```
+
+To stop only the user service:
 
 ```bash
 systemctl --user disable --now dexyd.service

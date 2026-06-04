@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getProjects, suggestProjects, type AuthTokens } from '../api/dexyd-client';
+import {
+  getProjects,
+  suggestProjects,
+  type AuthTokens,
+} from '../api/dexyd-client';
 import { ProjectBrowseResponse, ProjectSuggestResponse } from '../types/api';
 import { errorMessage } from '../utils/error-message';
 
@@ -7,11 +11,15 @@ export function useProjects(bridgeUrl: string, tokens: AuthTokens | null) {
   const [projects, setProjects] = useState<ProjectBrowseResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [suggestions, setSuggestions] = useState<ProjectSuggestResponse | null>(null);
+  const [suggestions, setSuggestions] = useState<ProjectSuggestResponse | null>(
+    null,
+  );
 
   const refresh = useCallback(async () => {
     if (!tokens) {
       setProjects(null);
+      setSuggestions(null);
+      setError(null);
       return;
     }
 
@@ -19,6 +27,7 @@ export function useProjects(bridgeUrl: string, tokens: AuthTokens | null) {
     setError(null);
     try {
       setProjects(await getProjects(bridgeUrl, tokens));
+      setError(null);
     } catch (err) {
       setError(errorMessage(err, 'failed to load projects'));
     } finally {
@@ -28,12 +37,16 @@ export function useProjects(bridgeUrl: string, tokens: AuthTokens | null) {
 
   const browse = useCallback(
     async (path = '') => {
-      if (!tokens) return null;
+      if (!tokens) {
+        setError(null);
+        return null;
+      }
       setLoading(true);
       setError(null);
       try {
         const next = await getProjects(bridgeUrl, tokens, path);
         setProjects(next);
+        setError(null);
         return next;
       } catch (err) {
         setError(errorMessage(err, 'failed to browse projects'));
@@ -47,11 +60,16 @@ export function useProjects(bridgeUrl: string, tokens: AuthTokens | null) {
 
   const suggest = useCallback(
     async (path = '') => {
-      if (!tokens) return null;
+      if (!tokens) {
+        setError(null);
+        setSuggestions(null);
+        return null;
+      }
       setError(null);
       try {
         const next = await suggestProjects(bridgeUrl, tokens, path);
         setSuggestions(next);
+        setError(null);
         return next;
       } catch (err) {
         setError(errorMessage(err, 'failed to suggest projects'));

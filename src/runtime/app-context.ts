@@ -86,11 +86,13 @@ export function buildAppContext(config: DexydConfig): AppContext {
 
   const codexAuthService = new CodexAuthService();
   const codexSessionService = new CodexSessionService(config.codex.workspaceRoot, logger);
+  const diffService = new DiffService();
 
   const codexChatService = new CodexChatService(
     db,
     eventService,
     codexSessionService,
+    diffService,
     {
       runtimePath: config.codex.runtimePath,
       harness: config.codex.harness
@@ -99,7 +101,6 @@ export function buildAppContext(config: DexydConfig): AppContext {
   );
   const dexydChatService = new DexydChatService(config.codex.workspaceRoot);
   const fileService = new FileService();
-  const diffService = new DiffService();
   const projectService = new ProjectService(config.codex.workspaceRoot);
 
   return {

@@ -15,6 +15,14 @@ cp dexyd.config.example.yaml dexyd.config.yaml
 DEXYD_CONFIG=./dexyd.config.yaml npm run start
 ```
 
+The Linux installer creates the installed config at:
+
+```text
+~/.local/share/dexyd/dexyd.config.yaml
+```
+
+or under `$XDG_DATA_HOME/dexyd/` when `XDG_DATA_HOME` is set.
+
 ## Complete YAML example
 
 ```yaml

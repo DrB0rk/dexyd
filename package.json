@@ -1,6 +1,6 @@
 {
   "name": "dexyd",
-  "version": "0.0.1-b",
+  "version": "0.0.2-b",
   "description": "dexyd bridge foundation",
   "type": "module",
   "private": true,
@@ -22,7 +22,12 @@
     "install:linux": "bash scripts/install.sh",
     "mobile:ios": "cd mobile/dexydMobile && npm run ios",
     "mobile:ios:device": "cd mobile/dexydMobile && npm run ios:device",
-    "mobile:ios:pods": "cd mobile/dexydMobile && npm run ios:pods"
+    "mobile:ios:pods": "cd mobile/dexydMobile && npm run ios:pods",
+    "android:all": "bash dev/scripts/run-all.sh",
+    "android:all:tui": "bash dev/scripts/run-all.sh --with-tui",
+    "android:all:debug": "bash dev/scripts/run-all.sh --debug-metro",
+    "android:all:debug:tui": "bash dev/scripts/run-all.sh --debug-metro --with-tui",
+    "firewall:open": "bash dev/scripts/firewall-port.sh"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",

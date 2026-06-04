@@ -20,7 +20,18 @@ The bridge handles:
 
 ## Runtime layout
 
-Common local paths:
+Common installed paths:
+
+| Path | Purpose |
+| --- | --- |
+| `~/.local/share/dexyd/` | Default XDG application install directory. Respects `XDG_DATA_HOME`. |
+| `~/.local/share/dexyd/dexyd.config.yaml` | Installed bridge config. |
+| `~/.local/share/dexyd/.dexyd/dexyd.db` | Installed SQLite bridge database. |
+| `~/.local/share/dexyd/.dexyd/cloudflared/` | TUI-managed Cloudflare named tunnel logs/config/pid files. |
+| `~/.local/bin/dexyd` | Command link created by the installer. |
+| `~/.config/systemd/user/dexyd.service` | Optional user service created by the installer/TUI. |
+
+Common source-checkout paths:
 
 | Path | Purpose |
 | --- | --- |

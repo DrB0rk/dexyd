@@ -66,7 +66,10 @@ function decodeBase64Url(value: string): string {
   return atob(padded);
 }
 
-function buildPairingCompleteInput(pairingUri: string, deviceLabel: string): ParsedPairing {
+function buildPairingCompleteInput(
+  pairingUri: string,
+  deviceLabel: string,
+): ParsedPairing {
   const trimmed = pairingUri.trim();
   const params = parsePairingQuery(trimmed);
 
@@ -83,31 +86,34 @@ function buildPairingCompleteInput(pairingUri: string, deviceLabel: string): Par
           request: {
             pairingId: payload.pairingId,
             challenge: payload.challenge,
-            deviceLabel
+            deviceLabel,
           },
-          bridgeBaseUrl: payload.bridgeBaseUrl
+          bridgeBaseUrl: payload.bridgeBaseUrl,
         };
       }
-    } catch {
-    }
+    } catch {}
   }
 
-  if (trimmed.startsWith('dexyd://pair') && params.pairingId && params.challenge) {
+  if (
+    trimmed.startsWith('dexyd://pair') &&
+    params.pairingId &&
+    params.challenge
+  ) {
     return {
       request: {
         pairingId: params.pairingId,
         challenge: params.challenge,
-        deviceLabel
+        deviceLabel,
       },
-      bridgeBaseUrl: params.bridgeBaseUrl
+      bridgeBaseUrl: params.bridgeBaseUrl,
     };
   }
 
   return {
     request: {
       pairingUri: trimmed,
-      deviceLabel
-    }
+      deviceLabel,
+    },
   };
 }
 
@@ -141,7 +147,10 @@ async function writeStoredAuth(next: StoredAuthState): Promise<void> {
   await AsyncStorage.removeItem(LEGACY_STORAGE_KEY);
 }
 
-export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: string) => Promise<void> | void) {
+export function useAuth(
+  bridgeUrl: string,
+  onBridgeUrlFromPairing?: (bridgeUrl: string) => Promise<void> | void,
+) {
   const [state, setState] = useState<AuthState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -151,10 +160,10 @@ export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: 
     let cancelled = false;
     setLoading(true);
     readStoredAuth()
-      .then(async (stored) => {
+      .then(async stored => {
         if (cancelled) return;
         const tokensByBridge = stored.tokensByBridge ?? {};
-        let nextState = bridgeKey ? tokensByBridge[bridgeKey] ?? null : null;
+        let nextState = bridgeKey ? (tokensByBridge[bridgeKey] ?? null) : null;
 
         if (!nextState && bridgeKey && tokensByBridge.legacy) {
           nextState = tokensByBridge.legacy;
@@ -164,8 +173,9 @@ export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: 
         }
 
         setState(nextState);
+        setError(null);
       })
-      .catch((err) => setError(errorMessage(err, 'failed to load auth state')))
+      .catch(err => setError(errorMessage(err, 'failed to load auth state')))
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
@@ -175,51 +185,65 @@ export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: 
     };
   }, [bridgeKey]);
 
-  const persist = useCallback(async (next: AuthState | null, targetBridgeUrl = bridgeUrl) => {
-    const key = safeBridgeKey(targetBridgeUrl);
-    if (!key) {
-      setState(null);
-      return;
-    }
+  const persist = useCallback(
+    async (next: AuthState | null, targetBridgeUrl = bridgeUrl) => {
+      const key = safeBridgeKey(targetBridgeUrl);
+      if (!key) {
+        setState(null);
+        return;
+      }
 
-    const stored = await readStoredAuth();
-    const tokensByBridge = { ...(stored.tokensByBridge ?? {}) };
-    delete tokensByBridge.legacy;
+      const stored = await readStoredAuth();
+      const tokensByBridge = { ...(stored.tokensByBridge ?? {}) };
+      delete tokensByBridge.legacy;
 
-    if (next) {
-      tokensByBridge[key] = next;
-    } else {
-      delete tokensByBridge[key];
-    }
+      if (next) {
+        tokensByBridge[key] = next;
+      } else {
+        delete tokensByBridge[key];
+      }
 
-    await writeStoredAuth({
-      activeBridgeUrl: next ? key : stored.activeBridgeUrl === key ? '' : stored.activeBridgeUrl,
-      tokensByBridge,
-    });
+      await writeStoredAuth({
+        activeBridgeUrl: next
+          ? key
+          : stored.activeBridgeUrl === key
+            ? ''
+            : stored.activeBridgeUrl,
+        tokensByBridge,
+      });
 
-    if (key === bridgeKey) {
-      setState(next);
-    }
-  }, [bridgeKey, bridgeUrl]);
+      if (key === bridgeKey) {
+        setState(next);
+      }
+    },
+    [bridgeKey, bridgeUrl],
+  );
 
   const pairFromUri = useCallback(
     async (pairingUri: string, deviceLabel: string) => {
       setError(null);
       const parsed = buildPairingCompleteInput(pairingUri, deviceLabel);
-      const requestBridgeUrl = parsed.bridgeBaseUrl ? normalizeBridgeHttpUrl(parsed.bridgeBaseUrl) : bridgeUrl;
+      const requestBridgeUrl = parsed.bridgeBaseUrl
+        ? normalizeBridgeHttpUrl(parsed.bridgeBaseUrl)
+        : bridgeUrl;
 
       if (!requestBridgeUrl.trim()) {
-        throw new Error('Pairing QR must include a bridge URL, or set the bridge URL in Settings first.');
+        throw new Error(
+          'Pairing QR must include a bridge URL, or set the bridge URL in Settings first.',
+        );
       }
-
-      const response = await pairingComplete(parsed.request, requestBridgeUrl);
-      await persist(response, requestBridgeUrl);
 
       if (parsed.bridgeBaseUrl) {
         await onBridgeUrlFromPairing?.(requestBridgeUrl);
       }
+
+      const response = await pairingComplete(parsed.request, requestBridgeUrl);
+      await persist(response, requestBridgeUrl);
+      setState(response);
+      setError(null);
+      return requestBridgeUrl;
     },
-    [bridgeUrl, onBridgeUrlFromPairing, persist]
+    [bridgeUrl, onBridgeUrlFromPairing, persist],
   );
 
   const refresh = useCallback(async () => {
@@ -235,21 +259,26 @@ export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: 
     try {
       const next = await refreshTokens(bridgeUrl, state.refreshToken);
       await persist(next, bridgeUrl);
+      setError(null);
     } catch (err) {
-      setError(errorMessage(err, 'refresh failed'));
+      const message = errorMessage(err, 'refresh failed');
       await persist(null, bridgeUrl);
+      setError(message);
     }
   }, [bridgeUrl, persist, state]);
 
   const signOut = useCallback(async () => {
     if (state && bridgeUrl.trim()) {
       try {
-        await revoke(bridgeUrl, { accessToken: state.accessToken, refreshToken: state.refreshToken });
-      } catch {
-      }
+        await revoke(bridgeUrl, {
+          accessToken: state.accessToken,
+          refreshToken: state.refreshToken,
+        });
+      } catch {}
     }
 
     await persist(null, bridgeUrl);
+    setError(null);
   }, [bridgeUrl, persist, state]);
 
   return useMemo(
@@ -260,8 +289,8 @@ export function useAuth(bridgeUrl: string, onBridgeUrlFromPairing?: (bridgeUrl: 
       pairFromUri,
       refresh,
       signOut,
-      setError
+      setError,
     }),
-    [error, loading, pairFromUri, refresh, signOut, state]
+    [error, loading, pairFromUri, refresh, signOut, state],
   );
 }

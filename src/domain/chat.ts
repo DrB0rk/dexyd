@@ -19,5 +19,6 @@ export type ChatMessage = {
   content: string;
   createdAt: string;
   sequence: number;
-  status: 'sent' | 'running' | 'failed' | 'cancelled';
+  status: 'sent' | 'running' | 'failed' | 'cancelled' | 'queued';
+  queueId?: string;
 };

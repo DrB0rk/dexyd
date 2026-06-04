@@ -7,8 +7,10 @@ import { EventEnvelope } from '../runtime/runtime-state.js';
 import { EventService } from './event-service.js';
 import { SqliteService } from '../db/sqlite.js';
 import { ChatMessage } from '../domain/chat.js';
+import { DiffSummary } from '../domain/diff.js';
 import { SessionRecord } from '../domain/session.js';
 import { CodexSessionService } from './codex-session-service.js';
+import { DiffService, WorkspaceSnapshot } from './diff-service.js';
 
 type LoggerLike = {
   info: (obj: unknown, msg?: string) => void;
@@ -31,17 +33,31 @@ type RuntimeLaunch = {
   label: string;
 };
 
+export type QueuedChatMessage = {
+  queueId: string;
+  turnId: string;
+  sessionId: string;
+  content: string;
+  actorDeviceId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 
 export class CodexChatService {
   private readonly launch: RuntimeLaunch;
   private readonly activeTurns = new Map<string, Set<ChildProcess>>();
+  private readonly runtimeStatuses = new Map<string, { status: SessionRecord['status']; updatedAt: string }>();
+  private readonly queues = new Map<string, QueuedChatMessage[]>();
+  private readonly drainingSessions = new Set<string>();
   private readonly cancelTimers = new WeakMap<ChildProcess, NodeJS.Timeout>();
 
   constructor(
     private readonly db: SqliteService,
     private readonly eventService: EventService,
     private readonly codexSessionService: CodexSessionService,
+    private readonly diffService: DiffService,
     private readonly config: CodexChatConfig,
     private readonly logger: LoggerLike
   ) {
@@ -68,37 +84,122 @@ export class CodexChatService {
     return compactRuntimeMessages([...codexMessages, ...dexydMessages]).slice(-limit);
   }
 
+  getQueue(sessionId: string): QueuedChatMessage[] {
+    return [...(this.queues.get(sessionId) ?? [])];
+  }
+
+  getTurnDiff(sessionId: string, turnId: string): DiffSummary | null {
+    const event = this.db
+      .listSessionEvents(sessionId, 1000)
+      .filter((entry) => entry.eventType === 'chat.turn.diff')
+      .reverse()
+      .find((entry) => {
+        const payload = entry.payload as Record<string, unknown>;
+        return payload.turnId === turnId;
+      });
+    if (!event) return null;
+
+    const payload = event.payload as Record<string, unknown>;
+    return {
+      status: typeof payload.status === 'string' ? payload.status : '',
+      stat: typeof payload.stat === 'string' ? payload.stat : '',
+      diff: typeof payload.diff === 'string' ? payload.diff : '',
+      truncated: payload.truncated === true
+    };
+  }
+
+  applyRuntimeStatus<T extends SessionRecord>(session: T): T {
+    const status = this.getRuntimeStatus(session.id);
+    if (!status) return session;
+    return {
+      ...session,
+      status: status.status,
+      updatedAt: status.updatedAt
+    };
+  }
+
+  getRuntimeStatus(sessionId: string): { status: SessionRecord['status']; updatedAt: string } | null {
+    if (this.isSessionBusy(sessionId)) {
+      return { status: 'running', updatedAt: new Date().toISOString() };
+    }
+    return this.runtimeStatuses.get(sessionId) ?? null;
+  }
+
+  steerQueuedMessage(input: { sessionId: string; queueId: string; steering: string }): QueuedChatMessage | null {
+    const content = input.steering.trim();
+    if (!content) return null;
+    const queue = this.queues.get(input.sessionId) ?? [];
+    const index = queue.findIndex((item) => item.queueId === input.queueId);
+    if (index < 0) return null;
+
+    const existing = queue[index];
+    if (!existing) return null;
+    const updated: QueuedChatMessage = {
+      ...existing,
+      content: `${existing.content}\n\nSteering note: ${content}`,
+      updatedAt: new Date().toISOString()
+    };
+    queue[index] = updated;
+    this.queues.set(input.sessionId, queue);
+    this.eventService.emit({
+      eventType: 'chat.message.queued.updated',
+      source: 'session',
+      sessionId: input.sessionId,
+      payload: {
+        id: updated.queueId,
+        queueId: updated.queueId,
+        turnId: updated.turnId,
+        role: 'user',
+        content: updated.content
+      }
+    });
+    return updated;
+  }
+
+  removeQueuedMessage(input: { sessionId: string; queueId: string }): boolean {
+    const queue = this.queues.get(input.sessionId) ?? [];
+    const next = queue.filter((item) => item.queueId !== input.queueId);
+    if (next.length === queue.length) return false;
+    if (next.length) this.queues.set(input.sessionId, next);
+    else this.queues.delete(input.sessionId);
+    this.eventService.emit({
+      eventType: 'chat.message.queued.removed',
+      source: 'session',
+      sessionId: input.sessionId,
+      payload: { queueId: input.queueId }
+    });
+    return true;
+  }
+
   sendMessage(input: { session: SessionRecord; message: string; actorDeviceId: string }): {
     turnId: string;
     userEvent: EventEnvelope;
+    queued: boolean;
+    queueId?: string;
   } {
-    if (this.activeTurns.get(input.session.id)?.size) {
-      throw new Error('session_busy');
-    }
-
-    const turnId = randomUUID();
-    const userMessageId = randomUUID();
     const content = input.message.trim();
+    const turnId = randomUUID();
 
-    const userEvent = this.eventService.emit({
-      eventType: 'chat.message.user',
-      source: 'session',
-      sessionId: input.session.id,
-      payload: {
-        id: userMessageId,
+    if (this.isSessionBusy(input.session.id)) {
+      const queued = this.enqueueMessage({
+        sessionId: input.session.id,
         turnId,
-        role: 'user',
         content,
         actorDeviceId: input.actorDeviceId
-      }
+      });
+      return { turnId, userEvent: queued.event, queued: true, queueId: queued.item.queueId };
+    }
+
+    const userEvent = this.emitUserMessage({
+      sessionId: input.session.id,
+      turnId,
+      content,
+      actorDeviceId: input.actorDeviceId
     });
 
-    this.startCodexTurn({ session: input.session, turnId, message: content }).catch((error) => {
-      const message = error instanceof Error ? error.message : 'chat turn failed';
-      this.emitFailure(input.session.id, turnId, message);
-    });
+    this.scheduleCodexTurn({ session: input.session, turnId, message: content });
 
-    return { turnId, userEvent };
+    return { turnId, userEvent, queued: false };
   }
 
   cancelSession(sessionId: string): boolean {
@@ -122,7 +223,90 @@ export class CodexChatService {
     return true;
   }
 
-  private async startCodexTurn(input: { session: SessionRecord; turnId: string; message: string }): Promise<void> {
+  private emitUserMessage(input: { sessionId: string; turnId: string; content: string; actorDeviceId: string; queueId?: string }): EventEnvelope {
+    return this.eventService.emit({
+      eventType: 'chat.message.user',
+      source: 'session',
+      sessionId: input.sessionId,
+      payload: {
+        id: randomUUID(),
+        turnId: input.turnId,
+        role: 'user',
+        content: input.content,
+        actorDeviceId: input.actorDeviceId,
+        ...(input.queueId ? { queueId: input.queueId } : {})
+      }
+    });
+  }
+
+  private enqueueMessage(input: { sessionId: string; turnId: string; content: string; actorDeviceId: string }): { item: QueuedChatMessage; event: EventEnvelope } {
+    const now = new Date().toISOString();
+    const item: QueuedChatMessage = {
+      queueId: randomUUID(),
+      turnId: input.turnId,
+      sessionId: input.sessionId,
+      content: input.content,
+      actorDeviceId: input.actorDeviceId,
+      createdAt: now,
+      updatedAt: now
+    };
+    const queue = [...(this.queues.get(input.sessionId) ?? []), item];
+    this.queues.set(input.sessionId, queue);
+    const event = this.eventService.emit({
+      eventType: 'chat.message.queued',
+      source: 'session',
+      sessionId: input.sessionId,
+      payload: {
+        id: item.queueId,
+        queueId: item.queueId,
+        turnId: item.turnId,
+        role: 'user',
+        content: item.content,
+        actorDeviceId: item.actorDeviceId
+      }
+    });
+    return { item, event };
+  }
+
+  private startNextQueuedTurn(session: SessionRecord): void {
+    if (this.isSessionBusy(session.id)) return;
+    const queue = this.queues.get(session.id) ?? [];
+    const next = queue.shift();
+    if (!next) {
+      this.queues.delete(session.id);
+      return;
+    }
+    if (queue.length) this.queues.set(session.id, queue);
+    else this.queues.delete(session.id);
+
+    this.drainingSessions.add(session.id);
+    this.eventService.emit({
+      eventType: 'chat.message.queued.removed',
+      source: 'session',
+      sessionId: session.id,
+      payload: { queueId: next.queueId, turnId: next.turnId, started: true }
+    });
+    this.emitUserMessage({
+      sessionId: session.id,
+      turnId: next.turnId,
+      content: next.content,
+      actorDeviceId: next.actorDeviceId,
+      queueId: next.queueId
+    });
+    this.drainingSessions.delete(session.id);
+
+    this.scheduleCodexTurn({ session, turnId: next.turnId, message: next.content });
+  }
+
+  private isSessionBusy(sessionId: string): boolean {
+    return Boolean(
+      this.activeTurns.get(sessionId)?.size ||
+        this.drainingSessions.has(sessionId) ||
+        this.runtimeStatuses.get(sessionId)?.status === 'running'
+    );
+  }
+
+  private scheduleCodexTurn(input: { session: SessionRecord; turnId: string; message: string }): void {
     this.setSessionStatus(input.session.id, 'running');
     this.eventService.emit({
       eventType: 'chat.turn.started',
@@ -131,6 +315,16 @@ export class CodexChatService {
       payload: { turnId: input.turnId }
     });
 
+    setImmediate(() => {
+      this.startCodexTurn(input).catch((error) => {
+        const message = error instanceof Error ? error.message : 'chat turn failed';
+        this.emitFailure(input.session.id, input.turnId, message);
+      });
+    });
+  }
+
+  private async startCodexTurn(input: { session: SessionRecord; turnId: string; message: string }): Promise<void> {
+    const turnSnapshot = await this.captureTurnSnapshot(input.session, input.turnId);
     const prompt = this.buildPrompt(input.session.id, input.message);
     const maxOutputBytes = this.config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     let outputBytes = 0;
@@ -188,6 +382,7 @@ export class CodexChatService {
       });
 
       child.on('close', (code, signal) => {
+        void (async () => {
         this.untrackChild(input.session.id, child);
         cancelled = signal === 'SIGTERM' || signal === 'SIGKILL';
         if (spawnFailed) {
@@ -197,8 +392,10 @@ export class CodexChatService {
 
         const cleanOutput = sanitizeRuntimeOutput(stdout.trim() || stderr.trim());
         if (cancelled) {
+          await this.emitTurnDiff(input.session, input.turnId, turnSnapshot);
           this.emitCancellation(input.session.id, input.turnId);
         } else if (code === 0) {
+          await this.emitTurnDiff(input.session, input.turnId, turnSnapshot);
           if (cleanOutput) {
             this.eventService.emit({
               eventType: 'chat.message.assistant',
@@ -214,12 +411,67 @@ export class CodexChatService {
             });
           }
           this.setSessionStatus(input.session.id, 'idle');
+          this.startNextQueuedTurn(input.session);
         } else {
+          await this.emitTurnDiff(input.session, input.turnId, turnSnapshot);
           this.emitFailure(input.session.id, input.turnId, cleanOutput || formatCodexExit(code, signal));
         }
         resolve();
+        })().catch((error) => {
+          this.logger.warn(
+            {
+              sessionId: input.session.id,
+              turnId: input.turnId,
+              error: error instanceof Error ? error.message : 'unknown error'
+            },
+            'chat turn close handling failed'
+          );
+          this.emitFailure(input.session.id, input.turnId, 'Chat turn close handling failed.');
+          resolve();
+        });
       });
     });
+  }
+
+  private async captureTurnSnapshot(session: SessionRecord, turnId: string): Promise<WorkspaceSnapshot | null> {
+    try {
+      return await this.diffService.createSnapshot(session);
+    } catch (error) {
+      this.logger.warn(
+        {
+          sessionId: session.id,
+          turnId,
+          error: error instanceof Error ? error.message : 'unknown error'
+        },
+        'failed to capture pre-turn workspace snapshot'
+      );
+      return null;
+    }
+  }
+
+  private async emitTurnDiff(session: SessionRecord, turnId: string, snapshot: WorkspaceSnapshot | null): Promise<void> {
+    if (!snapshot) return;
+    try {
+      const diff = await this.diffService.summarizeChangesSince(session, snapshot);
+      this.eventService.emit({
+        eventType: 'chat.turn.diff',
+        source: 'codexAdapter',
+        sessionId: session.id,
+        payload: {
+          turnId,
+          ...diff
+        }
+      });
+    } catch (error) {
+      this.logger.warn(
+        {
+          sessionId: session.id,
+          turnId,
+          error: error instanceof Error ? error.message : 'unknown error'
+        },
+        'failed to summarize per-turn workspace diff'
+      );
+    }
   }
 
   private trackChild(sessionId: string, child: ChildProcess): void {
@@ -277,8 +529,18 @@ export class CodexChatService {
   }
 
   private setSessionStatus(sessionId: string, status: SessionRecord['status']): void {
-    const session = this.db.patchSession({ sessionId, status });
+    const updatedAt = new Date().toISOString();
+    if (status === 'idle') {
+      this.runtimeStatuses.delete(sessionId);
+    } else {
+      this.runtimeStatuses.set(sessionId, { status, updatedAt });
+    }
+
+    const localSession = this.db.patchSession({ sessionId, status });
+    const codexSession = localSession ? null : this.codexSessionService.getSession(sessionId);
+    const session = localSession ?? (codexSession ? { ...codexSession, status, updatedAt } : null);
     if (!session) return;
+
     this.eventService.emit({
       eventType: 'session.updated',
       source: 'session',
@@ -313,6 +575,19 @@ export class CodexChatService {
     const payload = event.payload as Record<string, unknown>;
     const turnId = typeof payload.turnId === 'string' ? payload.turnId : `sequence-${event.sequence}`;
 
+    if (event.eventType === 'chat.message.queued' || event.eventType === 'chat.message.queued.updated') {
+      return {
+        id: typeof payload.id === 'string' ? payload.id : `${event.sequence}`,
+        turnId,
+        role: 'user',
+        content: typeof payload.content === 'string' ? payload.content : '',
+        createdAt: event.timestamp,
+        sequence: event.sequence,
+        status: 'queued',
+        ...(typeof payload.queueId === 'string' ? { queueId: payload.queueId } : {})
+      };
+    }
+
     if (event.eventType === 'chat.message.user' || event.eventType === 'chat.message.assistant') {
       const role = payload.role === 'assistant' ? 'assistant' : 'user';
       return {
@@ -322,7 +597,8 @@ export class CodexChatService {
         content: typeof payload.content === 'string' ? payload.content : '',
         createdAt: event.timestamp,
         sequence: event.sequence,
-        status: 'sent'
+        status: 'sent',
+        ...(typeof payload.queueId === 'string' ? { queueId: payload.queueId } : {})
       };
     }
 
@@ -382,8 +658,17 @@ function compactRuntimeMessages(messages: ChatMessage[]): ChatMessage[] {
       .filter((message) => message.role === 'assistant' || message.status === 'failed' || message.status === 'cancelled')
       .map((message) => message.turnId)
   );
+  const sentQueuedTurns = new Set(
+    messages
+      .filter((message) => message.role === 'user' && message.status === 'sent')
+      .map((message) => message.queueId ?? message.turnId)
+  );
 
-  return messages.filter((message) => !(message.role === 'tool' && message.status === 'running' && terminalTurns.has(message.turnId)));
+  return messages.filter((message) => {
+    if (message.role === 'tool' && message.status === 'running' && terminalTurns.has(message.turnId)) return false;
+    if (message.status === 'queued' && sentQueuedTurns.has(message.queueId ?? message.turnId)) return false;
+    return true;
+  });
 }
 
 function resolveRuntimeLaunch(config: CodexChatConfig): RuntimeLaunch {

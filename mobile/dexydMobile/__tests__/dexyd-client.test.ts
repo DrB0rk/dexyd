@@ -1,4 +1,4 @@
-import { deleteSession, pairingStart } from '../src/api/dexyd-client';
+import { deleteSession, getQueuedMessages, getSessions, pairingStart, removeQueuedMessage, steerQueuedMessage } from '../src/api/dexyd-client';
 
 const mockFetch = jest.fn();
 
@@ -42,4 +42,68 @@ describe('dexyd client request headers', () => {
       })
     );
   });
+
+  it('explains bridge connectivity failures', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Network request failed'));
+
+    await expect(getSessions('http://10.0.0.88:4242', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    })).rejects.toThrow(
+      "Can't reach Dexyd bridge at http://10.0.0.88:4242/sessions. Check that the bridge service is running"
+    );
+  });
+
+  it('includes endpoint context for HTTP API failures', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: jest.fn(),
+      text: jest.fn().mockResolvedValue(JSON.stringify({ error: 'bridge_degraded', detail: 'database down' }))
+    });
+
+    await expect(getSessions('http://bridge.local', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    })).rejects.toThrow('Bridge returned HTTP 503 for /sessions: database down');
+  });
+
+  it('supports queued chat message APIs', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: jest.fn().mockResolvedValue({ queue: [{ queueId: 'queue-1', content: 'queued' }] }),
+      text: jest.fn().mockResolvedValue('')
+    });
+
+    await expect(getQueuedMessages('http://bridge.local', 'session-1', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    })).resolves.toHaveLength(1);
+
+    await steerQueuedMessage('http://bridge.local', 'session-1', 'queue-1', 'steer it', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    });
+    expect(mockFetch).toHaveBeenLastCalledWith(
+      'http://bridge.local/sessions/session-1/queue/queue-1/steer',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ message: 'steer it' }),
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' })
+      })
+    );
+
+    await removeQueuedMessage('http://bridge.local', 'session-1', 'queue-1', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    });
+    expect(mockFetch).toHaveBeenLastCalledWith(
+      'http://bridge.local/sessions/session-1/queue/queue-1',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.not.objectContaining({ 'Content-Type': 'application/json' })
+      })
+    );
+  });
+
 });

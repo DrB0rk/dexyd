@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDexydApplication } from '../src/app.js';
 import { pairTestDevice } from './helpers.js';
@@ -195,6 +196,103 @@ describe('chat bridge', () => {
     }
   });
 
+
+  it('queues prompts while a session is busy and drains them after the active turn', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-queue-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(fakeCodex, '#!/usr/bin/env bash\nsleep 0.15\necho "assistant response from queue fake"\n');
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const first = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'first' }
+      });
+      expect(first.statusCode).toBe(202);
+      expect((first.json() as { queued: boolean }).queued).toBe(false);
+
+      const second = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'second' }
+      });
+      expect(second.statusCode).toBe(202);
+      const secondBody = second.json() as { queued: boolean; queueId: string };
+      expect(secondBody.queued).toBe(true);
+      expect(secondBody.queueId).toBeTruthy();
+
+      const third = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'third' }
+      });
+      const thirdBody = third.json() as { queued: boolean; queueId: string };
+      expect(thirdBody.queued).toBe(true);
+
+      const steered = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/queue/${secondBody.queueId}/steer`,
+        headers: authHeader,
+        payload: { message: 'prefer the short answer' }
+      });
+      expect(steered.statusCode).toBe(200);
+      expect((steered.json() as { queued: { content: string } }).queued.content).toContain('Steering note: prefer the short answer');
+
+      const removed = await service.app.inject({
+        method: 'DELETE',
+        url: `/sessions/${sessionId}/queue/${thirdBody.queueId}`,
+        headers: authHeader
+      });
+      expect(removed.statusCode).toBe(200);
+      expect((removed.json() as { removed: boolean }).removed).toBe(true);
+
+      let queue: Array<{ queueId: string; content: string }> = [];
+      const queued = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/queue`, headers: authHeader });
+      queue = (queued.json() as { queue: Array<{ queueId: string; content: string }> }).queue;
+      expect(queue).toHaveLength(1);
+      expect(queue[0]?.content).toContain('prefer the short answer');
+
+      let messages: Array<{ role: string; content: string; status: string }> = [];
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const response = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/chat`, headers: authHeader });
+        messages = (response.json() as { messages: Array<{ role: string; content: string; status: string }> }).messages;
+        if (messages.filter((message) => message.role === 'assistant').length >= 2) break;
+        await sleep(25);
+      }
+
+      expect(messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
+      expect(messages.some((message) => message.role === 'user' && message.content.includes('Steering note: prefer the short answer'))).toBe(true);
+
+      const empty = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/queue`, headers: authHeader });
+      expect((empty.json() as { queue: unknown[] }).queue).toHaveLength(0);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it('rejects new prompts when Codex usage limits are exhausted', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-limit-'));
     cleanupPaths.push(tempDir);
@@ -255,6 +353,213 @@ describe('chat bridge', () => {
       expect(body.error).toBe('usage_limit_reached');
       expect(body.usage.limits.status).toBe('error');
       expect(body.usage.limits.label).toBe('limit reached');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('prefers live Codex transcript status over a stale local duplicate session', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-duplicate-status-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho unused\n');
+    chmodSync(fakeCodex, 0o755);
+
+    const sessionId = '98989898-9898-4989-8989-989898989898';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        rawTranscriptEntry('2026-06-01T10:00:00.000Z', 'session_meta', {
+          cwd: workspace,
+          timestamp: '2026-06-01T10:00:00.000Z'
+        }),
+        rawTranscriptEntry(new Date().toISOString(), 'event_msg', {
+          type: 'task_started',
+          turn_id: 'turn-open'
+        }),
+        rawTranscriptEntry(new Date().toISOString(), 'event_msg', {
+          type: 'user_message',
+          message: 'active from desktop'
+        }),
+        ''
+      ].join('\n')
+    );
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const db = new Database(service.context.config.storage.sqlitePath);
+      try {
+        db.prepare(
+          `INSERT INTO sessions (id, status, profile, workspace_path, created_at, updated_at, title)
+           VALUES (?, 'idle', 'default', ?, ?, ?, 'stale local')`
+        ).run(sessionId, workspace, '2026-06-01T09:00:00.000Z', '2026-06-01T09:00:00.000Z');
+      } finally {
+        db.close();
+      }
+
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const listed = await service.app.inject({ method: 'GET', url: '/sessions', headers: authHeader });
+      const sessions = (listed.json() as { sessions: Array<{ id: string; status: string }> }).sessions;
+      expect(sessions.filter((session) => session.id === sessionId)).toHaveLength(1);
+      expect(sessions.find((session) => session.id === sessionId)?.status).toBe('running');
+
+      const fetched = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}`, headers: authHeader });
+      expect(fetched.json().session.status).toBe('running');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('reports Codex-backed sessions as running while a mobile-started turn is active', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-codex-status-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(fakeCodex, '#!/usr/bin/env bash\nsleep 0.2\necho "codex-backed response"\n');
+    chmodSync(fakeCodex, 0o755);
+
+    const sessionId = '88888888-8888-4888-8888-888888888888';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        rawTranscriptEntry('2026-06-01T10:00:00.000Z', 'session_meta', {
+          cwd: workspace,
+          timestamp: '2026-06-01T10:00:00.000Z'
+        }),
+        ''
+      ].join('\n')
+    );
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'continue this codex session' }
+      });
+      expect(sent.statusCode).toBe(202);
+
+      const active = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}`, headers: authHeader });
+      expect(active.json().session.status).toBe('running');
+
+      const listed = await service.app.inject({ method: 'GET', url: '/sessions', headers: authHeader });
+      const sessions = (listed.json() as { sessions: Array<{ id: string; status: string }> }).sessions;
+      expect(sessions.find((session) => session.id === sessionId)?.status).toBe('running');
+
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const response = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}`, headers: authHeader });
+        if (response.json().session.status === 'idle') return;
+        await sleep(25);
+      }
+
+      const finished = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}`, headers: authHeader });
+      expect(finished.json().session.status).toBe('idle');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('captures code diffs for the completed chat turn only', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-turn-diff-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+    writeFileSync(join(workspace, 'preexisting.txt'), 'dirty before turn\n');
+    writeFileSync(join(workspace, 'changed.txt'), 'before\n');
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      [
+        '#!/usr/bin/env bash',
+        'printf "after\\n" > changed.txt',
+        'mkdir -p src',
+        'printf "new file\\n" > src/new.txt',
+        'echo "changed files"',
+        ''
+      ].join('\n')
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'edit files' }
+      });
+      expect(sent.statusCode).toBe(202);
+      const turnId = (sent.json() as { turnId: string }).turnId;
+
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const response = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/chat`, headers: authHeader });
+        const messages = (response.json() as { messages: Array<{ role: string }> }).messages;
+        if (messages.some((message) => message.role === 'assistant')) break;
+        await sleep(25);
+      }
+
+      const diff = await service.app.inject({
+        method: 'GET',
+        url: `/sessions/${sessionId}/diff?turnId=${encodeURIComponent(turnId)}`,
+        headers: authHeader
+      });
+      expect(diff.statusCode).toBe(200);
+      const body = diff.json() as { status: string; diff: string; stat: string };
+      expect(body.status).toContain('M changed.txt');
+      expect(body.status).toContain('A src/new.txt');
+      expect(body.status).not.toContain('preexisting.txt');
+      expect(body.diff).toContain('-before');
+      expect(body.diff).toContain('+after');
+      expect(body.diff).toContain('+new file');
+      expect(body.diff).not.toContain('dirty before turn');
+
+      const missing = await service.app.inject({
+        method: 'GET',
+        url: `/sessions/${sessionId}/diff?turnId=missing-turn`,
+        headers: authHeader
+      });
+      expect(missing.statusCode).toBe(200);
+      expect((missing.json() as { diff: string }).diff).toBe('');
     } finally {
       await service.stop();
     }

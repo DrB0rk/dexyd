@@ -85,15 +85,18 @@ Chat includes:
 - user messages;
 - assistant messages;
 - compact working status;
+- queued follow-up messages;
 - approval/question interactions;
 - usage/account context in appropriate places;
-- **View code diff** action after completed responses that changed files.
+- **View message diff** action after completed responses that changed files.
+
+If a session is already busy, a newly sent message is queued instead of being dropped. The queue is visible from chat, and queued messages can be steered with extra guidance before they run.
 
 The input box is docked above the keyboard and should remain visible across screen sizes.
 
 ## Working status
 
-The app summarizes active work instead of dumping every tool call into the chat. It should show enough to understand what is happening without turning internal steps into noisy chat messages.
+The app summarizes active work in a floating status area above the composer instead of dumping every tool call into the chat. It should show enough to understand what is happening without turning internal steps into noisy chat messages.
 
 Examples:
 
@@ -105,15 +108,18 @@ Examples:
 
 ## Code diffs
 
-When a completed assistant response changes code, a **View code diff** button appears under the relevant completed message. The diff viewer shows:
+When a completed assistant response changes code, a **View message diff** button appears under the relevant completed message. The diff is scoped to that turn/message, not the whole session.
 
-- diff status;
-- summary stat;
-- full diff text when available;
+The full-screen diff viewer shows:
+
+- changed-file dropdown;
+- per-file colored diff lines;
+- summary stats;
+- full raw diff text when needed;
 - whether output was truncated;
 - refresh and close actions.
 
-Diffs are session/workspace scoped and come from the bridge endpoint for that session.
+Per-message diffs are captured around mobile-started turns. Older turns, external turns, or turns that did not change files may have no captured diff.
 
 ## Inbox
 
@@ -124,7 +130,7 @@ Inbox is not a general session list. It is only for items that need attention:
 - agent questions;
 - alerts;
 - connection problems;
-- usage warnings.
+- account usage warnings when remaining usage crosses important thresholds.
 
 Swipe down to refresh Inbox.
 
@@ -190,7 +196,7 @@ Dexyd currently has in-app notifications for:
 - alerts;
 - approvals;
 - questions;
-- usage warnings.
+- account usage warnings at important remaining-usage thresholds.
 
 OS-level push/local notifications are planned but not complete.
 

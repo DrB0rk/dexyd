@@ -17,6 +17,7 @@ import {
   LayoutChangeEvent,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
@@ -25,16 +26,11 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
-import {
-  SafeAreaProvider,
-  SafeAreaView,
-} from 'react-native-safe-area-context';
-import {
-  getHealth,
-  respondToInteraction,
-} from './src/api/dexyd-client';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { getHealth, respondToInteraction } from './src/api/dexyd-client';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
@@ -47,15 +43,32 @@ import { useSessions } from './src/hooks/use-sessions';
 import { useUsageStatus } from './src/hooks/use-usage-status';
 import { QrScannerModal } from './src/ui/qr-scanner-modal';
 import { radii, spacing } from './src/ui/theme';
-import { CodexAuthStatus, DiffSummary, ProjectBrowseResponse, ProjectSuggestResponse, UsageStatus } from './src/types/api';
-import { ChatMessage, DexydSession, EventEnvelope } from './src/types/dexyd';
+import {
+  CodexAuthStatus,
+  DiffSummary,
+  ProjectBrowseResponse,
+  ProjectSuggestResponse,
+  UsageStatus,
+} from './src/types/api';
+import {
+  ChatMessage,
+  DexydSession,
+  EventEnvelope,
+  QueuedChatMessage,
+} from './src/types/dexyd';
 import { errorMessage } from './src/utils/error-message';
+import { parseUnifiedDiff, type ParsedDiffLine } from './src/utils/diff-view';
 
 type TabKey = 'chat' | 'sessions' | 'inbox' | 'settings';
 type BottomTabKey = Exclude<TabKey, 'chat'>;
 type StatusKind = 'ok' | 'warn' | 'error' | 'idle';
 type AttentionKind = 'message' | 'update' | 'approval' | 'question';
-type SystemNotificationKind = 'response' | 'alert' | 'approval' | 'question' | 'usage';
+type SystemNotificationKind =
+  | 'response'
+  | 'alert'
+  | 'approval'
+  | 'question'
+  | 'usage';
 type AttentionChoice = {
   id: string;
   label: string;
@@ -133,7 +146,10 @@ function keyboardDockHeight(event: KeyboardEvent): number {
   const maxReasonableLift = Math.round(screenHeight * 0.75);
 
   return Math.ceil(
-    Math.min(Math.max(frame.height, windowOverlap, screenOverlap), maxReasonableLift),
+    Math.min(
+      Math.max(frame.height, windowOverlap, screenOverlap),
+      maxReasonableLift,
+    ),
   );
 }
 
@@ -142,6 +158,10 @@ const tabs: Array<{ key: BottomTabKey; label: string; icon: string }> = [
   { key: 'inbox', label: 'Inbox', icon: '☼' },
   { key: 'settings', label: 'Settings', icon: '✣' },
 ];
+const bottomTabOrder = tabs.map(item => item.key);
+const PAGE_SWIPE_DISTANCE = 72;
+const PAGE_SWIPE_CLAIM_DISTANCE = 28;
+const PAGE_SWIPE_VELOCITY = 0.45;
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>('sessions');
@@ -181,14 +201,18 @@ export default function App() {
         : null,
     [auth.auth, bridgeSettings.bridgeUrl],
   );
-  const sessions = useSessions(bridgeSettings.bridgeUrl, tokens);
-  const projects = useProjects(bridgeSettings.bridgeUrl, tokens);
   const stream = useBridgeStream(
     bridgeSettings.wsUrl,
     bridgeSettings.bridgeUrl,
     tokens?.accessToken ?? null,
     auth.refresh,
   );
+  const sessions = useSessions(
+    bridgeSettings.bridgeUrl,
+    tokens,
+    stream.lastEvent,
+  );
+  const projects = useProjects(bridgeSettings.bridgeUrl, tokens);
   const chat = useChat(
     bridgeSettings.bridgeUrl,
     tokens,
@@ -204,7 +228,7 @@ export default function App() {
     stream.lastEvent,
   );
   const codexAuth = useCodexAuth(bridgeSettings.bridgeUrl, tokens);
-  const lastUsageAlertRef = useRef<string | null>(null);
+  const usageAlertThresholdsRef = useRef<Set<number>>(new Set());
   const lastErrorNotificationRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -234,7 +258,9 @@ export default function App() {
   useEffect(() => {
     if (!auth.auth) return;
     setOnboardingDismissed(true);
-    AsyncStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true').catch(() => undefined);
+    AsyncStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true').catch(
+      () => undefined,
+    );
   }, [auth.auth]);
 
   const dismissOnboarding = useCallback(async () => {
@@ -246,11 +272,18 @@ export default function App() {
     sessions.sessions.find(session => session.id === activeSessionId) ??
     (transientSession?.id === activeSessionId ? transientSession : null);
   const projectOptions = useMemo(
-    () => buildProjectOptions(projects.projects, sessions.sessions, addedProjects, removedProjectPaths),
+    () =>
+      buildProjectOptions(
+        projects.projects,
+        sessions.sessions,
+        addedProjects,
+        removedProjectPaths,
+      ),
     [addedProjects, projects.projects, removedProjectPaths, sessions.sessions],
   );
-  const selectedProject =
-    projectOptions.find(project => project.path === selectedProjectPath) ??
+  const selectedProject = projectOptions.find(
+    project => project.path === selectedProjectPath,
+  ) ??
     projectOptions[0] ?? {
       path: '.',
       label: 'Project',
@@ -279,31 +312,41 @@ export default function App() {
     }
   }, [projectOptions, selectedProjectPath]);
 
-  const refreshHealth = useCallback(async () => {
-    if (!bridgeSettings.bridgeUrl.trim()) {
-      setBridgeHealth('unconfigured');
-      return;
-    }
-    setHealthLoading(true);
-    try {
-      const health = await getHealth(bridgeSettings.bridgeUrl);
-      setBridgeHealth(health.status);
-    } catch {
-      setBridgeHealth('down');
-    } finally {
-      setHealthLoading(false);
-    }
-  }, [bridgeSettings.bridgeUrl]);
+  const refreshHealth = useCallback(
+    async (targetBridgeUrl = bridgeSettings.bridgeUrl) => {
+      const url = targetBridgeUrl.trim();
+      if (!url) {
+        setBridgeHealth('unconfigured');
+        return;
+      }
+      setHealthLoading(true);
+      setBridgeHealth(current =>
+        current === 'unconfigured' ? 'checking' : current,
+      );
+      try {
+        const health = await getHealth(url);
+        setBridgeHealth(health.status);
+      } catch {
+        setBridgeHealth('down');
+      } finally {
+        setHealthLoading(false);
+      }
+    },
+    [bridgeSettings.bridgeUrl],
+  );
 
   useEffect(() => {
     refreshHealth().catch(() => undefined);
   }, [refreshHealth]);
 
   useEffect(() => {
-    const show = Keyboard.addListener('keyboardDidShow', (event: KeyboardEvent) => {
-      setKeyboardVisible(true);
-      setKeyboardHeight(keyboardDockHeight(event));
-    });
+    const show = Keyboard.addListener(
+      'keyboardDidShow',
+      (event: KeyboardEvent) => {
+        setKeyboardVisible(true);
+        setKeyboardHeight(keyboardDockHeight(event));
+      },
+    );
     const hide = Keyboard.addListener('keyboardDidHide', () => {
       setKeyboardVisible(false);
       setKeyboardHeight(0);
@@ -318,33 +361,36 @@ export default function App() {
   useEffect(() => {
     if (Platform.OS !== 'android') return undefined;
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (scannerOpen) {
-        setScannerOpen(false);
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (scannerOpen) {
+          setScannerOpen(false);
+          return true;
+        }
+        if (addSessionOpen) {
+          setAddSessionOpen(false);
+          return true;
+        }
+        if (projectPickerOpen) {
+          setProjectPickerOpen(false);
+          return true;
+        }
+        if (projectMenuOpen) {
+          setProjectMenuOpen(false);
+          return true;
+        }
+        if (tab === 'chat') {
+          setTab('sessions');
+          return true;
+        }
+        if (tab !== 'sessions') {
+          setTab('sessions');
+          return true;
+        }
         return true;
-      }
-      if (addSessionOpen) {
-        setAddSessionOpen(false);
-        return true;
-      }
-      if (projectPickerOpen) {
-        setProjectPickerOpen(false);
-        return true;
-      }
-      if (projectMenuOpen) {
-        setProjectMenuOpen(false);
-        return true;
-      }
-      if (tab === 'chat') {
-        setTab('sessions');
-        return true;
-      }
-      if (tab !== 'sessions') {
-        setTab('sessions');
-        return true;
-      }
-      return true;
-    });
+      },
+    );
 
     return () => subscription.remove();
   }, [addSessionOpen, projectMenuOpen, projectPickerOpen, scannerOpen, tab]);
@@ -355,30 +401,47 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [systemNotification]);
 
-  const addErrorHistory = useCallback((item: Omit<ErrorHistoryItem, 'id' | 'timestamp'> & { timestamp?: string }) => {
-    const timestamp = item.timestamp ?? new Date().toISOString();
-    const id = `${item.level}-${item.title}-${item.body}-${timestamp}`;
-    setErrorHistory(current => [
-      { ...item, id, timestamp },
-      ...current.filter(existing => !(existing.title === item.title && existing.body === item.body)),
-    ].slice(0, 40));
-  }, []);
+  const addErrorHistory = useCallback(
+    (
+      item: Omit<ErrorHistoryItem, 'id' | 'timestamp'> & { timestamp?: string },
+    ) => {
+      const timestamp = item.timestamp ?? new Date().toISOString();
+      const id = `${item.level}-${item.title}-${item.body}-${timestamp}`;
+      setErrorHistory(current =>
+        [
+          { ...item, id, timestamp },
+          ...current.filter(
+            existing =>
+              !(existing.title === item.title && existing.body === item.body),
+          ),
+        ].slice(0, 40),
+      );
+    },
+    [],
+  );
 
-  const notify = useCallback((input: Omit<SystemNotification, 'timestamp'> & { timestamp?: string }) => {
-    const timestamp = input.timestamp ?? new Date().toISOString();
-    if (input.kind === 'alert' || input.kind === 'usage') {
-      addErrorHistory({
-        level: input.kind === 'usage' && input.title.toLowerCase().includes('warning') ? 'warning' : 'error',
-        title: input.title,
-        body: input.body,
+  const notify = useCallback(
+    (input: Omit<SystemNotification, 'timestamp'> & { timestamp?: string }) => {
+      const timestamp = input.timestamp ?? new Date().toISOString();
+      if (input.kind === 'alert' || input.kind === 'usage') {
+        addErrorHistory({
+          level:
+            input.kind === 'usage' &&
+            input.title.toLowerCase().includes('warning')
+              ? 'warning'
+              : 'error',
+          title: input.title,
+          body: input.body,
+          timestamp,
+        });
+      }
+      setSystemNotification({
+        ...input,
         timestamp,
       });
-    }
-    setSystemNotification({
-      ...input,
-      timestamp,
-    });
-  }, [addErrorHistory]);
+    },
+    [addErrorHistory],
+  );
 
   useEffect(() => {
     const response = interactionResponseFromEvent(stream.lastEvent);
@@ -406,10 +469,12 @@ export default function App() {
 
     const item = attentionItemFromEvent(stream.lastEvent, sessions.sessions);
     if (!item) return;
-    setAttentionItems(current => [
-      item,
-      ...current.filter(existing => existing.id !== item.id),
-    ].slice(0, 50));
+    setAttentionItems(current =>
+      [item, ...current.filter(existing => existing.id !== item.id)].slice(
+        0,
+        50,
+      ),
+    );
     notify(notificationFromAttention(item));
   }, [notify, sessions.sessions, stream.lastEvent]);
 
@@ -434,15 +499,20 @@ export default function App() {
 
   useEffect(() => {
     const current = usage.usage;
-    if (!current || current.status === 'ok' || current.status === 'unknown') return;
-    const key = `${current.status}-${current.updatedAt ?? ''}-${current.context.percent ?? 'x'}-${current.limits.label}`;
-    if (lastUsageAlertRef.current === key) return;
-    lastUsageAlertRef.current = key;
+    if (!current) return;
+    const remaining = accountRemainingPercent(current);
+    if (remaining !== null && remaining > 50) {
+      usageAlertThresholdsRef.current.clear();
+    }
+    const threshold = accountUsageWarningThreshold(current);
+    if (threshold === null) return;
+    if (usageAlertThresholdsRef.current.has(threshold)) return;
+    usageAlertThresholdsRef.current.add(threshold);
     notify({
-      id: `usage-${key}`,
+      id: `account-usage-${threshold}`,
       kind: 'usage',
-      title: current.status === 'error' ? 'Usage limit alert' : 'Usage warning',
-      body: usageSummary(current),
+      title: `Account usage warning: below ${threshold}%`,
+      body: accountUsageWarningBody(current, threshold),
       sessionId: current.sessionId,
     });
   }, [notify, usage.usage]);
@@ -471,41 +541,57 @@ export default function App() {
       setTab('settings');
       return;
     }
-    sessions.createDexydChat().then(session => {
-      if (!session) return;
-      setTransientSession(session);
-      setActiveSessionId(session.id);
-      setTab('chat');
-    }).catch(() => undefined);
+    sessions
+      .createDexydChat()
+      .then(session => {
+        if (!session) return;
+        setTransientSession(session);
+        setActiveSessionId(session.id);
+        setTab('chat');
+      })
+      .catch(() => undefined);
   }, [sessions, tokens]);
 
-  const createNamedSession = useCallback((project: ProjectOption, title: string) => {
-    if (!tokens) return;
-    sessions.create(project.path, title).then(session => {
-      if (!session) return;
-      setTransientSession(session);
-      setActiveSessionId(session.id);
-      setSelectedProjectPath(project.path);
-      setAddSessionOpen(false);
-      setTab('chat');
-    }).catch(() => undefined);
-  }, [sessions, tokens]);
+  const createNamedSession = useCallback(
+    (project: ProjectOption, title: string) => {
+      if (!tokens) return;
+      sessions
+        .create(project.path, title)
+        .then(session => {
+          if (!session) return;
+          setTransientSession(session);
+          setActiveSessionId(session.id);
+          setSelectedProjectPath(project.path);
+          setAddSessionOpen(false);
+          setTab('chat');
+        })
+        .catch(() => undefined);
+    },
+    [sessions, tokens],
+  );
 
-  const removeProject = useCallback((path: string) => {
-    setAddedProjects(current => {
-      const next = current.filter(project => project.path !== path);
-      AsyncStorage.setItem(ADDED_PROJECTS_KEY, JSON.stringify(next)).catch(() => undefined);
-      return next;
-    });
-    setRemovedProjectPaths(current => {
-      const next = Array.from(new Set([...current, path]));
-      AsyncStorage.setItem(REMOVED_PROJECTS_KEY, JSON.stringify(next)).catch(() => undefined);
-      return next;
-    });
-    if (selectedProjectPath === path) {
-      setSelectedProjectPath('.');
-    }
-  }, [selectedProjectPath]);
+  const removeProject = useCallback(
+    (path: string) => {
+      setAddedProjects(current => {
+        const next = current.filter(project => project.path !== path);
+        AsyncStorage.setItem(ADDED_PROJECTS_KEY, JSON.stringify(next)).catch(
+          () => undefined,
+        );
+        return next;
+      });
+      setRemovedProjectPaths(current => {
+        const next = Array.from(new Set([...current, path]));
+        AsyncStorage.setItem(REMOVED_PROJECTS_KEY, JSON.stringify(next)).catch(
+          () => undefined,
+        );
+        return next;
+      });
+      if (selectedProjectPath === path) {
+        setSelectedProjectPath('.');
+      }
+    },
+    [selectedProjectPath],
+  );
 
   const respondToAttention = useCallback(
     async (
@@ -545,7 +631,10 @@ export default function App() {
   );
 
   const showOnboarding =
-    !bridgeSettings.loading && !auth.loading && !auth.auth && !onboardingDismissed;
+    !bridgeSettings.loading &&
+    !auth.loading &&
+    !auth.auth &&
+    !onboardingDismissed;
 
   const status = getStatus({
     authLoading: auth.loading,
@@ -557,16 +646,52 @@ export default function App() {
     errors: [
       auth.error,
       bridgeSettings.error,
-      sessions.error,
-      projects.error,
-      chat.error,
-      stream.socketState === 'polling' ? null : stream.socketError,
+      stream.socketState === 'polling' || stream.socketState === 'open'
+        ? null
+        : stream.socketError,
     ],
   });
 
+  const pageSwipeEnabled =
+    !showOnboarding &&
+    tab !== 'chat' &&
+    !projectMenuOpen &&
+    !projectPickerOpen &&
+    !addSessionOpen &&
+    !scannerOpen;
+
+  const pageSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) => {
+          if (!pageSwipeEnabled) return false;
+          const horizontal = Math.abs(gesture.dx);
+          const vertical = Math.abs(gesture.dy);
+          return (
+            horizontal > PAGE_SWIPE_CLAIM_DISTANCE &&
+            horizontal > vertical * 1.5
+          );
+        },
+        onPanResponderRelease: (_, gesture) => {
+          if (!pageSwipeEnabled) return;
+          const force =
+            Math.abs(gesture.dx) >= PAGE_SWIPE_DISTANCE ||
+            Math.abs(gesture.vx) >= PAGE_SWIPE_VELOCITY;
+          if (!force) return;
+          const currentIndex = bottomTabOrder.indexOf(tab as BottomTabKey);
+          if (currentIndex < 0) return;
+          const nextIndex = gesture.dx < 0 ? currentIndex + 1 : currentIndex - 1;
+          const nextTab = bottomTabOrder[nextIndex];
+          if (nextTab) setTab(nextTab);
+        },
+        onPanResponderTerminate: () => undefined,
+      }),
+    [pageSwipeEnabled, tab],
+  );
+
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
         <StatusBar barStyle="light-content" backgroundColor={palette.bg} />
         <View style={styles.shell}>
           {tab === 'chat' ? null : (
@@ -608,12 +733,18 @@ export default function App() {
                 onChoose={project => {
                   setAddedProjects(current => {
                     const next = upsertProjectOption(current, project);
-                    AsyncStorage.setItem(ADDED_PROJECTS_KEY, JSON.stringify(next)).catch(() => undefined);
+                    AsyncStorage.setItem(
+                      ADDED_PROJECTS_KEY,
+                      JSON.stringify(next),
+                    ).catch(() => undefined);
                     return next;
                   });
                   setRemovedProjectPaths(current => {
                     const next = current.filter(path => path !== project.path);
-                    AsyncStorage.setItem(REMOVED_PROJECTS_KEY, JSON.stringify(next)).catch(() => undefined);
+                    AsyncStorage.setItem(
+                      REMOVED_PROJECTS_KEY,
+                      JSON.stringify(next),
+                    ).catch(() => undefined);
                     return next;
                   });
                   setSelectedProjectPath(project.path);
@@ -634,7 +765,7 @@ export default function App() {
               />
             </>
           )}
-          <View style={styles.content}>
+          <View style={styles.content} {...pageSwipeResponder.panHandlers}>
             {showOnboarding ? (
               <OnboardingScreen
                 bridgeUrl={bridgeSettings.bridgeUrl}
@@ -681,6 +812,7 @@ export default function App() {
                 loading={auth.loading || sessions.loading}
                 authReady={Boolean(auth.auth)}
                 sessions={sessions.sessions}
+                usage={usage.usage}
                 connectivity={sessions.connectivity}
                 error={sessions.error}
                 attentionItems={attentionItems}
@@ -729,6 +861,9 @@ export default function App() {
                   await sessions.clearCache();
                   await AsyncStorage.clear();
                   await bridgeSettings.resetBridgeUrl();
+                  auth.setError(null);
+                  bridgeSettings.setError(null);
+                  setErrorHistory([]);
                   setAttentionItems([]);
                   setActiveSessionId(null);
                   setTransientSession(null);
@@ -748,7 +883,12 @@ export default function App() {
                 setTab('chat');
                 return;
               }
-              setTab(notification.kind === 'approval' || notification.kind === 'question' ? 'inbox' : 'sessions');
+              setTab(
+                notification.kind === 'approval' ||
+                  notification.kind === 'question'
+                  ? 'inbox'
+                  : 'sessions',
+              );
             }}
           />
           {keyboardVisible || tab === 'chat' || showOnboarding ? null : (
@@ -785,7 +925,6 @@ function getStatus(input: {
   return { label: 'ready', kind: 'idle' };
 }
 
-
 function OnboardingScreen({
   bridgeUrl,
   onScanQr,
@@ -800,14 +939,21 @@ function OnboardingScreen({
   return (
     <View style={styles.onboardingShell}>
       <Text style={styles.onboardingKicker}>dexyd setup</Text>
-      <Text style={styles.onboardingTitle}>Connect this phone to your bridge.</Text>
+      <Text style={styles.onboardingTitle}>
+        Connect this phone to your bridge.
+      </Text>
       <Text style={styles.onboardingBody}>
-        Start the bridge/TUI on your computer, generate a pairing QR, then scan it here.
-        Pairing saves the bridge profile so you can switch between PCs later.
+        Start the bridge/TUI on your computer, generate a pairing QR, then scan
+        it here. Pairing saves the bridge profile so you can switch between PCs
+        later.
       </Text>
       <View style={styles.onboardingSteps}>
-        <Text style={styles.onboardingStep}>1 · Run dexyd --tui on your computer</Text>
-        <Text style={styles.onboardingStep}>2 · Open Pairing and generate QR</Text>
+        <Text style={styles.onboardingStep}>
+          1 · Run dexyd --tui on your computer
+        </Text>
+        <Text style={styles.onboardingStep}>
+          2 · Open Pairing and generate QR
+        </Text>
         <Text style={styles.onboardingStep}>3 · Scan from this app</Text>
       </View>
       {bridgeUrl ? (
@@ -873,7 +1019,10 @@ function TopBar({
         accessibilityRole="button"
         accessibilityLabel="Open dexyd help chat"
         onPress={onHelpChat}
-        style={({ pressed }) => [styles.helpChatButton, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.helpChatButton,
+          pressed && styles.pressed,
+        ]}
       >
         <Text style={styles.helpChatIcon}>⌕</Text>
       </Pressable>
@@ -1062,7 +1211,9 @@ function AddSessionModal({
         <View style={styles.pickerHeader}>
           <View style={styles.pickerTitleBlock}>
             <Text style={styles.pickerTitle}>New session</Text>
-            <Text style={styles.pickerPath} numberOfLines={1}>{project.detail}</Text>
+            <Text style={styles.pickerPath} numberOfLines={1}>
+              {project.detail}
+            </Text>
           </View>
           <Pressable onPress={onClose} hitSlop={10}>
             <Text style={styles.pickerClose}>×</Text>
@@ -1076,7 +1227,10 @@ function AddSessionModal({
           autoCapitalize="sentences"
         />
         <Text style={styles.inputLabel}>Project</Text>
-        <ScrollView style={styles.projectPickList} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          style={styles.projectPickList}
+          keyboardShouldPersistTaps="handled"
+        >
           {projects.map(item => (
             <Pressable
               key={item.path}
@@ -1088,16 +1242,26 @@ function AddSessionModal({
               ]}
             >
               <View style={styles.projectMenuText}>
-                <Text style={styles.projectMenuName} numberOfLines={1}>{item.label}</Text>
-                <Text style={styles.projectMenuDetail} numberOfLines={1}>{item.detail}</Text>
+                <Text style={styles.projectMenuName} numberOfLines={1}>
+                  {item.label}
+                </Text>
+                <Text style={styles.projectMenuDetail} numberOfLines={1}>
+                  {item.detail}
+                </Text>
               </View>
-              {item.path === project.path ? <Text style={styles.projectSelected}>✓</Text> : null}
+              {item.path === project.path ? (
+                <Text style={styles.projectSelected}>✓</Text>
+              ) : null}
             </Pressable>
           ))}
         </ScrollView>
         <View style={styles.settingsActions}>
           <TextButton label="Browse" onPress={onNewProject} />
-          <TextButton label="Create" variant="primary" onPress={() => onCreate(project, title)} />
+          <TextButton
+            label="Create"
+            variant="primary"
+            onPress={() => onCreate(project, title)}
+          />
         </View>
       </View>
     </View>
@@ -1128,10 +1292,13 @@ function ProjectPicker({
   useEffect(() => {
     if (!visible) return undefined;
     setCustomPath(browse?.currentPath || '~');
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      onClose();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        onClose();
+        return true;
+      },
+    );
     return () => subscription.remove();
   }, [browse?.currentPath, onClose, visible]);
 
@@ -1204,7 +1371,9 @@ function ProjectPicker({
           {browse?.parentPath ? (
             <TextButton
               label="Up"
-              onPress={() => onBrowse(browse.parentPath || '~').catch(() => undefined)}
+              onPress={() =>
+                onBrowse(browse.parentPath || '~').catch(() => undefined)
+              }
             />
           ) : null}
           <TextButton label="Go" onPress={browseCustomPath} />
@@ -1223,7 +1392,10 @@ function ProjectPicker({
           <ActivityIndicator color={palette.text} size="small" />
         ) : null}
 
-        <ScrollView style={styles.pickerList} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          style={styles.pickerList}
+          keyboardShouldPersistTaps="handled"
+        >
           {browse?.entries.length === 0 ? (
             <Text style={styles.settingHint}>No child directories.</Text>
           ) : null}
@@ -1258,6 +1430,13 @@ function ProjectPicker({
   );
 }
 
+const EMPTY_DIFF: DiffSummary = {
+  status: '',
+  stat: '',
+  diff: '',
+  truncated: false,
+};
+
 function ChatScreen({
   authReady,
   activeSession,
@@ -1278,7 +1457,11 @@ function ChatScreen({
   const [text, setText] = useState('');
   const [showLatestButton, setShowLatestButton] = useState(false);
   const [diffViewerOpen, setDiffViewerOpen] = useState(false);
+  const [selectedDiffTurnId, setSelectedDiffTurnId] = useState<string | null>(
+    null,
+  );
   const [composerHeight, setComposerHeight] = useState(54);
+  const [steeringQueueId, setSteeringQueueId] = useState<string | null>(null);
   const scrollRef = useRef<FlatList<ChatMessage> | null>(null);
   const nearBottomRef = useRef(true);
   const latestButtonVisibleRef = useRef(false);
@@ -1287,23 +1470,10 @@ function ChatScreen({
   const composerSpacer = composerHeight + keyboardLift + 12;
   const usageBlockMessage = usageSendBlockMessage(usage);
   const renderedMessages = useMemo(
-    () => [...chat.messages].reverse(),
-    [chat.messages],
-  );
-  const latestCompletedAssistantId = useMemo(
     () =>
-      chat.messages
-        .filter(message => message.role === 'assistant' && message.status === 'sent')
-        .sort((left, right) => right.sequence - left.sequence)[0]?.id ?? null,
+      chat.messages.filter(message => message.status !== 'queued').reverse(),
     [chat.messages],
   );
-  const hasDiff = Boolean(
-    diff.diff &&
-      [diff.diff.diff, diff.diff.stat, diff.diff.status].some(value =>
-        Boolean(value.trim()),
-      ),
-  );
-  const refreshDiff = diff.refresh;
 
   const setLatestButtonVisible = useCallback((visible: boolean) => {
     if (latestButtonVisibleRef.current === visible) return;
@@ -1311,13 +1481,16 @@ function ChatScreen({
     setShowLatestButton(visible);
   }, []);
 
-  const scrollToLatest = useCallback((animated = true) => {
-    nearBottomRef.current = true;
-    setLatestButtonVisible(false);
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollToOffset({ offset: 0, animated });
-    });
-  }, [setLatestButtonVisible]);
+  const scrollToLatest = useCallback(
+    (animated = true) => {
+      nearBottomRef.current = true;
+      setLatestButtonVisible(false);
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollToOffset({ offset: 0, animated });
+      });
+    },
+    [setLatestButtonVisible],
+  );
 
   const updateScrollPosition = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -1349,13 +1522,9 @@ function ChatScreen({
     nearBottomRef.current = true;
     setLatestButtonVisible(false);
     setDiffViewerOpen(false);
+    setSelectedDiffTurnId(null);
+    setSteeringQueueId(null);
   }, [activeSession?.id, setLatestButtonVisible]);
-
-  useEffect(() => {
-    if (latestCompletedAssistantId) {
-      refreshDiff().catch(() => undefined);
-    }
-  }, [latestCompletedAssistantId, refreshDiff]);
 
   useEffect(() => {
     if (keyboardLift > 0 && nearBottomRef.current) {
@@ -1363,7 +1532,20 @@ function ChatScreen({
     }
   }, [keyboardLift, scrollToLatest]);
 
-  const workingInfo = workingStatusText(chat.messages, activeSession, chat.sending);
+  const openMessageDiff = useCallback(
+    (turnId: string) => {
+      setSelectedDiffTurnId(turnId);
+      setDiffViewerOpen(true);
+      diff.refresh(turnId).catch(() => undefined);
+    },
+    [diff],
+  );
+
+  const workingInfo = workingStatusText(
+    chat.messages,
+    activeSession,
+    chat.sending,
+  );
 
   const send = async () => {
     const message = text.trim();
@@ -1376,14 +1558,25 @@ function ChatScreen({
       chat.setError(usageBlockMessage);
       return;
     }
-    const ok = await chat.send(message);
+    const ok = steeringQueueId
+      ? await chat.steerQueued(steeringQueueId, message)
+      : await chat.send(message);
     if (ok) {
       setText('');
+      setSteeringQueueId(null);
       scrollToLatest();
     }
   };
 
-  const sendDisabled = !text.trim() || chat.sending || !activeSession || Boolean(usageBlockMessage);
+  const sendDisabled =
+    !text.trim() ||
+    chat.sending ||
+    !activeSession ||
+    Boolean(usageBlockMessage);
+  const steeringTarget = steeringQueueId
+    ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
+      null)
+    : null;
 
   const header = (
     <View style={styles.chatHeader}>
@@ -1440,19 +1633,30 @@ function ChatScreen({
           <MessageRow
             message={item}
             showDiffButton={
-              item.id === latestCompletedAssistantId &&
               item.role === 'assistant' &&
               item.status === 'sent' &&
-              hasDiff
+              Boolean(item.turnId)
             }
-            diffLoading={diff.loading}
-            onViewDiff={() => setDiffViewerOpen(true)}
+            diffLoading={
+              diff.loading && diff.loadingTurnId === item.turnId
+            }
+            onViewDiff={() => openMessageDiff(item.turnId)}
           />
         )}
         ListHeaderComponent={
           <View>
             <View style={{ height: composerSpacer }} />
-            {workingInfo ? <WorkingState text={workingInfo} /> : null}
+            {chat.queuedMessages.length ? (
+              <QueuedMessagesPanel
+                items={chat.queuedMessages}
+                activeQueueId={steeringQueueId}
+                onSteer={item => {
+                  setSteeringQueueId(item.queueId);
+                  setText('');
+                }}
+                onRemove={queueId => chat.removeQueued(queueId)}
+              />
+            ) : null}
             {chat.loading ? (
               <ActivityIndicator color={palette.text} size="small" />
             ) : null}
@@ -1488,6 +1692,17 @@ function ChatScreen({
           <Text style={styles.latestButtonText}>↓</Text>
         </Pressable>
       ) : null}
+      {workingInfo ? (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.workingStateDock,
+            { bottom: composerHeight + keyboardLift + 14 },
+          ]}
+        >
+          <WorkingState text={workingInfo} />
+        </View>
+      ) : null}
       <View
         onLayout={updateComposerHeight}
         style={[
@@ -1496,9 +1711,22 @@ function ChatScreen({
           { bottom: keyboardLift },
         ]}
       >
-        {usageBlockMessage ? (
+        {steeringTarget ? (
           <View style={styles.composerNotice}>
-            <Text style={styles.composerNoticeText} numberOfLines={2}>{usageBlockMessage}</Text>
+            <View style={styles.steeringNoticeRow}>
+              <Text style={styles.composerNoticeText} numberOfLines={2}>
+                Steering queued message: {previewText(steeringTarget.content)}
+              </Text>
+              <Pressable onPress={() => setSteeringQueueId(null)} hitSlop={8}>
+                <Text style={styles.steeringCancel}>cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : usageBlockMessage ? (
+          <View style={styles.composerNotice}>
+            <Text style={styles.composerNoticeText} numberOfLines={2}>
+              {usageBlockMessage}
+            </Text>
           </View>
         ) : null}
         <View style={styles.composerRow}>
@@ -1506,7 +1734,11 @@ function ChatScreen({
             value={text}
             onChangeText={setText}
             placeholder={
-              activeSession ? 'Message' : 'Select a Codex session first'
+              activeSession
+                ? steeringQueueId
+                  ? 'Add steering for queued message'
+                  : 'Message'
+                : 'Select a Codex session first'
             }
             placeholderTextColor={palette.dim}
             style={styles.composerInput}
@@ -1523,23 +1755,28 @@ function ChatScreen({
               pressed && !sendDisabled && styles.pressed,
             ]}
           >
-            <Text style={[styles.sendText, sendDisabled && styles.sendTextDisabled]}>↑</Text>
+            <Text
+              style={[styles.sendText, sendDisabled && styles.sendTextDisabled]}
+            >
+              {steeringQueueId ? '↪' : '↑'}
+            </Text>
           </Pressable>
         </View>
       </View>
-      {diffViewerOpen && diff.diff ? (
+      {diffViewerOpen ? (
         <DiffViewer
-          diff={diff.diff}
+          diff={diff.diff ?? EMPTY_DIFF}
           loading={diff.loading}
           error={diff.error}
           onClose={() => setDiffViewerOpen(false)}
-          onRefresh={() => diff.refresh().catch(() => undefined)}
+          onRefresh={() =>
+            diff.refresh(selectedDiffTurnId).catch(() => undefined)
+          }
         />
       ) : null}
     </KeyboardAvoidingView>
   );
 }
-
 
 const WORKING_PHRASES = [
   'scouting',
@@ -1561,8 +1798,13 @@ function workingStatusText(
     .find(message => message.role === 'tool' && message.status === 'running');
   const isWorking = activeSession?.status === 'running' || Boolean(running);
   if (!isWorking) return null;
-  const phrase = WORKING_PHRASES[Math.abs(hashString(activeSession?.id ?? running?.turnId ?? 'dexyd')) % WORKING_PHRASES.length];
-  const detail = running?.content.replace(/…+$/, '').trim() || 'Codex is working';
+  const phrase =
+    WORKING_PHRASES[
+      Math.abs(hashString(activeSession?.id ?? running?.turnId ?? 'dexyd')) %
+        WORKING_PHRASES.length
+    ];
+  const detail =
+    running?.content.replace(/…+$/, '').trim() || 'Codex is working';
   return `${phrase} · ${detail}`;
 }
 
@@ -1578,9 +1820,84 @@ function WorkingState({ text }: { text: string }) {
   return (
     <View style={styles.workingState}>
       <ActivityIndicator color={palette.muted} size="small" />
-      <Text style={styles.workingText} numberOfLines={1}>{text}</Text>
+      <Text style={styles.workingText} numberOfLines={2}>
+        {text}
+      </Text>
     </View>
   );
+}
+
+function QueuedMessagesPanel({
+  items,
+  activeQueueId,
+  onSteer,
+  onRemove,
+}: {
+  items: QueuedChatMessage[];
+  activeQueueId: string | null;
+  onSteer: (item: QueuedChatMessage) => void;
+  onRemove: (queueId: string) => Promise<boolean> | boolean;
+}) {
+  return (
+    <View style={styles.queuePanel}>
+      <View style={styles.queueHeader}>
+        <Text style={styles.queueTitle}>Queued messages</Text>
+        <Text style={styles.queueCount}>{items.length}</Text>
+      </View>
+      {items.map((item, index) => {
+        const active = item.queueId === activeQueueId;
+        return (
+          <View
+            key={item.queueId}
+            style={[styles.queueItem, active && styles.queueItemActive]}
+          >
+            <View style={styles.queueItemText}>
+              <Text style={styles.queueItemTitle}>
+                #{index + 1} · will send next
+              </Text>
+              <Text style={styles.queueItemBody} numberOfLines={3}>
+                {item.content}
+              </Text>
+            </View>
+            <View style={styles.queueActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Steer queued message"
+                onPress={() => onSteer(item)}
+                style={({ pressed }) => [
+                  styles.queueActionButton,
+                  active && styles.queueActionButtonActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.queueActionText}>
+                  {active ? 'steering' : 'steer'}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Remove queued message"
+                onPress={() => {
+                  onRemove(item.queueId);
+                }}
+                style={({ pressed }) => [
+                  styles.queueActionButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.queueRemoveText}>remove</Text>
+              </Pressable>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function previewText(value: string): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return compact.length > 80 ? `${compact.slice(0, 77)}…` : compact;
 }
 
 function InboxScreen({
@@ -1684,7 +2001,9 @@ function InboxScreen({
           ]}
         >
           <View style={styles.inboxItemTop}>
-            <Text style={styles.inboxKind}>{attentionKindLabel(item.kind)}</Text>
+            <Text style={styles.inboxKind}>
+              {attentionKindLabel(item.kind)}
+            </Text>
             <Text style={styles.inboxTime}>{formatDate(item.timestamp)}</Text>
           </View>
           <Text style={styles.inboxTitle} numberOfLines={1}>
@@ -1696,7 +2015,7 @@ function InboxScreen({
           <InboxActions
             item={item}
             pending={pendingId === item.id}
-            onRespond={(response) =>
+            onRespond={response =>
               respond(item, response).catch(() => undefined)
             }
           />
@@ -1734,9 +2053,7 @@ function InboxActions({
           label={pending ? 'Sending…' : 'Approve'}
           variant="primary"
           disabled={pending}
-          onPress={() =>
-            onRespond({ kind: 'approval', decision: 'approved' })
-          }
+          onPress={() => onRespond({ kind: 'approval', decision: 'approved' })}
         />
         <InboxActionButton
           label="Deny"
@@ -1859,7 +2176,7 @@ const MessageRow = React.memo(function MessageRow({
               styles.progressText,
               message.status === 'failed' && styles.progressTextError,
             ]}
-            numberOfLines={1}
+            numberOfLines={2}
           >
             {message.content}
           </Text>
@@ -1893,7 +2210,7 @@ const MessageRow = React.memo(function MessageRow({
           ]}
         >
           <Text style={styles.diffButtonText}>
-            {diffLoading ? 'Loading diff…' : 'View code diff'}
+            {diffLoading ? 'Loading diff…' : 'View message diff'}
           </Text>
         </Pressable>
       ) : null}
@@ -1914,52 +2231,197 @@ function DiffViewer({
   onClose: () => void;
   onRefresh: () => void;
 }) {
-  const body = diff.diff.trim() || diff.stat.trim() || diff.status.trim() || 'No code changes.';
+  const files = useMemo(
+    () => parseUnifiedDiff(diff.diff, diff.stat),
+    [diff.diff, diff.stat],
+  );
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const { height: windowHeight } = useWindowDimensions();
+  const dropdownMaxHeight = Math.max(180, windowHeight - 92);
+  const selectedFile =
+    files.find(file => file.id === selectedFileId) ?? files[0] ?? null;
+  const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
+  const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
+  const fallbackBody =
+    diff.diff.trim() ||
+    diff.stat.trim() ||
+    diff.status.trim() ||
+    'No code changes were captured for this message.';
+
+  useEffect(() => {
+    setSelectedFileId(files[0]?.id ?? null);
+    setFileMenuOpen(false);
+  }, [files]);
 
   return (
     <View style={styles.diffOverlay}>
-      <View style={styles.diffPanel}>
-        <View style={styles.diffHeader}>
-          <View style={styles.diffHeaderText}>
-            <Text style={styles.diffTitle}>Code diff</Text>
-            <Text style={styles.diffMeta} numberOfLines={1}>
-              {diff.truncated ? 'Truncated · current workspace changes' : 'Current workspace changes'}
-            </Text>
+      <SafeAreaView style={styles.diffSafeArea} edges={['top']}>
+        <View style={styles.diffPanel}>
+          <View style={styles.diffHeader}>
+            <View style={styles.diffHeaderText}>
+              <Text style={styles.diffTitle}>Code diff</Text>
+              <Text style={styles.diffMeta} numberOfLines={1}>
+                {files.length
+                  ? `${files.length} file${files.length === 1 ? '' : 's'} · +${totalAdditions} -${totalDeletions}${diff.truncated ? ' · truncated' : ''}`
+                  : diff.truncated
+                    ? 'Truncated · message changes'
+                    : 'Message changes'}
+              </Text>
+            </View>
+            {loading ? (
+              <ActivityIndicator color={palette.text} size="small" />
+            ) : null}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Refresh code diff"
+              onPress={onRefresh}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.diffHeaderButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.diffHeaderButtonText}>↻</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close code diff"
+              onPress={onClose}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.diffHeaderButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.diffHeaderButtonText}>×</Text>
+            </Pressable>
           </View>
-          {loading ? <ActivityIndicator color={palette.text} size="small" /> : null}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Refresh code diff"
-            onPress={onRefresh}
-            hitSlop={8}
-            style={({ pressed }) => [styles.diffHeaderButton, pressed && styles.pressed]}
+          {error ? <Text style={styles.diffError}>{error}</Text> : null}
+          {selectedFile ? (
+            <View style={styles.diffFileSelectorWrap}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Select changed file"
+                disabled={files.length <= 1}
+                onPress={() => setFileMenuOpen(open => !open)}
+                style={({ pressed }) => [
+                  styles.diffFileSelector,
+                  files.length <= 1 && styles.diffFileSelectorSingle,
+                  pressed && files.length > 1 && styles.pressed,
+                ]}
+              >
+                <Text style={styles.diffFileName} numberOfLines={1}>
+                  {selectedFile.path}
+                </Text>
+                <Text style={styles.diffFileCounts}>
+                  +{selectedFile.additions} -{selectedFile.deletions}
+                </Text>
+                {files.length > 1 ? (
+                  <Text style={styles.diffDropdownIcon}>
+                    {fileMenuOpen ? '⌃' : '⌄'}
+                  </Text>
+                ) : null}
+              </Pressable>
+              {fileMenuOpen && files.length > 1 ? (
+                <View style={[styles.diffDropdown, { maxHeight: dropdownMaxHeight }]}>
+                  <ScrollView
+                    nestedScrollEnabled
+                    showsVerticalScrollIndicator
+                    keyboardShouldPersistTaps="handled"
+                    style={styles.diffDropdownScroll}
+                    contentContainerStyle={styles.diffDropdownContent}
+                  >
+                    {files.map(file => {
+                      const selected = file.id === selectedFile.id;
+                      return (
+                        <Pressable
+                          key={file.id}
+                          accessibilityRole="button"
+                          accessibilityLabel={`View diff for ${file.path}`}
+                          onPress={() => {
+                            setSelectedFileId(file.id);
+                            setFileMenuOpen(false);
+                          }}
+                          style={({ pressed }) => [
+                            styles.diffDropdownItem,
+                            selected && styles.diffDropdownItemActive,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.diffDropdownText,
+                              selected && styles.diffDropdownTextActive,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {file.path}
+                          </Text>
+                          <Text style={styles.diffDropdownMeta}>
+                            +{file.additions} -{file.deletions}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+          <ScrollView
+            style={styles.diffScroll}
+            horizontal
+            nestedScrollEnabled
+            contentContainerStyle={styles.diffHorizontalContent}
           >
-            <Text style={styles.diffHeaderButtonText}>↻</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close code diff"
-            onPress={onClose}
-            hitSlop={8}
-            style={({ pressed }) => [styles.diffHeaderButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.diffHeaderButtonText}>×</Text>
-          </Pressable>
-        </View>
-        {error ? <Text style={styles.diffError}>{error}</Text> : null}
-        {diff.stat.trim() ? (
-          <Text style={styles.diffStat} numberOfLines={4}>
-            {diff.stat.trim()}
-          </Text>
-        ) : null}
-        <ScrollView style={styles.diffScroll} horizontal>
-          <ScrollView nestedScrollEnabled>
-            <Text selectable style={styles.diffCode}>
-              {body}
-            </Text>
+            <ScrollView
+              nestedScrollEnabled
+              style={styles.diffVerticalScroll}
+              contentContainerStyle={styles.diffVerticalContent}
+            >
+              {selectedFile ? (
+                <View style={styles.diffLineList}>
+                  {selectedFile.lines.map(line => (
+                    <DiffLineRow key={line.id} line={line} />
+                  ))}
+                </View>
+              ) : (
+                <Text selectable style={styles.diffCode}>
+                  {fallbackBody}
+                </Text>
+              )}
+            </ScrollView>
           </ScrollView>
-        </ScrollView>
-      </View>
+        </View>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+function DiffLineRow({ line }: { line: ParsedDiffLine }) {
+  return (
+    <View
+      style={[
+        styles.diffLine,
+        line.type === 'addition' && styles.diffLineAddition,
+        line.type === 'deletion' && styles.diffLineDeletion,
+        line.type === 'hunk' && styles.diffLineHunk,
+        line.type === 'meta' && styles.diffLineMeta,
+      ]}
+    >
+      <Text
+        selectable
+        style={[
+          styles.diffLineText,
+          line.type === 'addition' && styles.diffLineTextAddition,
+          line.type === 'deletion' && styles.diffLineTextDeletion,
+          line.type === 'hunk' && styles.diffLineTextHunk,
+          line.type === 'meta' && styles.diffLineTextMeta,
+        ]}
+      >
+        {line.text || ' '}
+      </Text>
     </View>
   );
 }
@@ -2011,7 +2473,7 @@ function MessageBlockView({
         ? styles.messageTextSystem
         : tone === 'tool'
           ? styles.messageTextSystem
-        : null;
+          : null;
 
   if (block.type === 'code') {
     return (
@@ -2052,11 +2514,7 @@ function MessageBlockView({
 
   return (
     <Text
-      style={[
-        styles.messageText,
-        textToneStyle,
-        !last && styles.messageBlock,
-      ]}
+      style={[styles.messageText, textToneStyle, !last && styles.messageBlock]}
     >
       {renderInlineText(block.text)}
     </Text>
@@ -2109,7 +2567,17 @@ function parseMessageBlocks(content: string): MessageBlock[] {
     const bullet = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+)$/);
     if (bullet) {
       flushParagraph();
-      blocks.push({ type: 'bullet', text: bullet[1].trim() });
+      const itemLines = [bullet[1].trim()];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1] ?? '';
+        if (!next.trim()) break;
+        if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(next)) break;
+        if (/^\s*#{1,6}\s+/.test(next) || /^\s*```/.test(next)) break;
+        if (!/^\s{2,}\S/.test(next)) break;
+        itemLines.push(next.trim());
+        index += 1;
+      }
+      blocks.push({ type: 'bullet', text: itemLines.join(' ') });
       continue;
     }
 
@@ -2148,6 +2616,7 @@ function SessionsScreen({
   loading,
   authReady,
   sessions,
+  usage,
   connectivity,
   error,
   attentionItems,
@@ -2160,6 +2629,7 @@ function SessionsScreen({
   loading: boolean;
   authReady: boolean;
   sessions: DexydSession[];
+  usage: UsageStatus | null;
   connectivity: 'idle' | 'online' | 'offline' | 'error';
   error: string | null;
   attentionItems: AttentionItem[];
@@ -2200,14 +2670,18 @@ function SessionsScreen({
           style={styles.emptyTapArea}
           onPress={() => onRefresh().catch(() => undefined)}
         >
-          <Text style={styles.quietText}>No Codex sessions found. Pull or tap to refresh.</Text>
+          <Text style={styles.quietText}>
+            No Codex sessions found. Pull or tap to refresh.
+          </Text>
           {error ? <Text style={styles.errorLine}>{error}</Text> : null}
         </Pressable>
       </ScrollView>
     );
   }
 
-  const visibleSessions = sessions.filter(session => !isHiddenDexydSession(session));
+  const visibleSessions = sessions.filter(
+    session => !isHiddenDexydSession(session),
+  );
   const hiddenSessions = sessions.filter(isHiddenDexydSession);
   const projectGroups = groupSessionsByProject(visibleSessions);
   const pendingBySession = pendingAttentionBySession(attentionItems);
@@ -2219,18 +2693,24 @@ function SessionsScreen({
       refreshControl={refreshControl}
     >
       {connectivity === 'offline' ? (
-        <Text style={styles.offlineBanner}>Bridge offline · showing saved sessions</Text>
+        <Text style={styles.offlineBanner}>
+          Bridge offline · showing saved sessions
+        </Text>
       ) : connectivity === 'error' ? (
-        <Text style={styles.errorLine}>Could not refresh sessions. Showing saved data.</Text>
+        <Text style={styles.errorLine}>
+          Could not refresh sessions. Showing saved data.
+        </Text>
       ) : null}
       {error ? <Text style={styles.errorLine}>{error}</Text> : null}
+      {usage ? <SessionUsageSummary usage={usage} /> : null}
       {projectGroups.map(group => (
         <View key={group.projectPath} style={styles.sessionProjectGroup}>
           <Text style={styles.sessionProjectName} numberOfLines={1}>
             {group.projectName}
           </Text>
           <Text style={styles.sessionProjectPath} numberOfLines={1}>
-            {group.sessions.length} session{group.sessions.length === 1 ? '' : 's'} · {group.projectPath}
+            {group.sessions.length} session
+            {group.sessions.length === 1 ? '' : 's'} · {group.projectPath}
           </Text>
           <Text style={styles.sessionProjectStatus} numberOfLines={1}>
             {projectStatusSummary(group.sessions, pendingBySession)}
@@ -2253,28 +2733,62 @@ function SessionsScreen({
           <Pressable
             accessibilityRole="button"
             onPress={() => setShowHidden(open => !open)}
-            style={({ pressed }) => [styles.hiddenSessionsHeader, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.hiddenSessionsHeader,
+              pressed && styles.pressed,
+            ]}
           >
             <Text style={styles.hiddenSessionsTitle}>Hidden sessions</Text>
-            <Text style={styles.hiddenSessionsCount}>{hiddenSessions.length} · {showHidden ? 'hide' : 'show'}</Text>
+            <Text style={styles.hiddenSessionsCount}>
+              {hiddenSessions.length} · {showHidden ? 'hide' : 'show'}
+            </Text>
           </Pressable>
-          {showHidden ? hiddenSessions.map(session => (
-            <SessionListRow
-              key={session.id}
-              session={session}
-              pendingAttention={pendingBySession.get(session.id) ?? []}
-              active={activeSessionId === session.id}
-              onSelect={onSelect}
-              onCancel={onCancel}
-              onDelete={onDelete}
-            />
-          )) : null}
+          {showHidden
+            ? hiddenSessions.map(session => (
+                <SessionListRow
+                  key={session.id}
+                  session={session}
+                  pendingAttention={pendingBySession.get(session.id) ?? []}
+                  active={activeSessionId === session.id}
+                  onSelect={onSelect}
+                  onCancel={onCancel}
+                  onDelete={onDelete}
+                />
+              ))
+            : null}
         </View>
       ) : null}
     </ScrollView>
   );
 }
 
+function SessionUsageSummary({ usage }: { usage: UsageStatus }) {
+  const remaining = accountRemainingPercent(usage);
+  const accountText = accountUsageLabel(usage);
+  const tone = usage.limits.status;
+
+  return (
+    <View
+      style={[
+        styles.sessionUsageSummary,
+        tone === 'warn' && styles.sessionUsageSummaryWarn,
+        tone === 'error' && styles.sessionUsageSummaryError,
+      ]}
+    >
+      <View style={styles.sessionUsageSummaryText}>
+        <Text style={styles.sessionUsageTitle}>Account usage</Text>
+        <Text style={styles.sessionUsageMeta} numberOfLines={1}>
+          {accountText}
+        </Text>
+      </View>
+      {remaining !== null ? (
+        <Text style={styles.sessionUsagePercent}>
+          {Math.max(0, Math.round(remaining))}% left
+        </Text>
+      ) : null}
+    </View>
+  );
+}
 
 function SessionListRow({
   session,
@@ -2292,6 +2806,7 @@ function SessionListRow({
   onDelete: (sessionId: string) => Promise<void> | void;
 }) {
   const status = sessionUiStatus(session, pendingAttention);
+  const contextLabel = sessionContextLabel(session);
 
   return (
     <Pressable
@@ -2307,12 +2822,26 @@ function SessionListRow({
           {session.title || shortId(session.id)}
         </Text>
         <Text style={styles.terminalMeta}>
-          {session.omx ? 'omx' : session.source || 'codex'} · {formatDate(session.updatedAt)}
+          {session.omx ? 'omx' : session.source || 'codex'} ·{' '}
+          {formatDate(session.updatedAt)}
+          {contextLabel ? ` · ${contextLabel}` : ''}
         </Text>
       </View>
       <View style={styles.sessionActions}>
-        <View style={[styles.sessionStatusPill, status.kind === 'ok' && styles.sessionStatusOk, status.kind === 'warn' && styles.sessionStatusWarn, status.kind === 'error' && styles.sessionStatusError]}>
-          <View style={[styles.sessionStatusDot, { backgroundColor: statusColor(status.kind) }]} />
+        <View
+          style={[
+            styles.sessionStatusPill,
+            status.kind === 'ok' && styles.sessionStatusOk,
+            status.kind === 'warn' && styles.sessionStatusWarn,
+            status.kind === 'error' && styles.sessionStatusError,
+          ]}
+        >
+          <View
+            style={[
+              styles.sessionStatusDot,
+              { backgroundColor: statusColor(status.kind) },
+            ]}
+          />
           <Text style={styles.sessionStatusText}>{status.label}</Text>
         </View>
         {session.status === 'running' ? (
@@ -2341,7 +2870,22 @@ function SessionListRow({
 }
 
 function isHiddenDexydSession(session: DexydSession): boolean {
-  return session.profile === 'dexyd-help' || session.workspacePath.includes('.dexyd-help');
+  return (
+    session.profile === 'dexyd-help' ||
+    session.workspacePath.includes('.dexyd-help')
+  );
+}
+
+function sessionContextLabel(session: DexydSession): string | null {
+  const context = session.usageContext;
+  if (!context) return null;
+  if (context.percent !== null && context.percent !== undefined) {
+    return `ctx ${context.percent}%`;
+  }
+  if (context.usedTokens !== null && context.usedTokens !== undefined) {
+    return `ctx ${formatCompactNumber(context.usedTokens)}`;
+  }
+  return null;
 }
 
 function groupSessionsByProject(sessions: DexydSession[]) {
@@ -2367,7 +2911,9 @@ function groupSessionsByProject(sessions: DexydSession[]) {
     });
 }
 
-function pendingAttentionBySession(items: AttentionItem[]): Map<string, AttentionItem[]> {
+function pendingAttentionBySession(
+  items: AttentionItem[],
+): Map<string, AttentionItem[]> {
   const grouped = new Map<string, AttentionItem[]>();
   for (const item of items) {
     if (!item.sessionId || item.responded) continue;
@@ -2417,11 +2963,22 @@ function projectStatusSummary(
 ): string {
   const counts = new Map<string, number>();
   for (const session of sessions) {
-    const status = sessionUiStatus(session, pendingBySession.get(session.id) ?? []);
+    const status = sessionUiStatus(
+      session,
+      pendingBySession.get(session.id) ?? [],
+    );
     counts.set(status.label, (counts.get(status.label) ?? 0) + 1);
   }
 
-  const order = ['approval', 'question', 'error', 'busy', 'idle', 'done', 'stopped'];
+  const order = [
+    'approval',
+    'question',
+    'error',
+    'busy',
+    'idle',
+    'done',
+    'stopped',
+  ];
   const parts = order
     .map(label => {
       const count = counts.get(label) ?? 0;
@@ -2454,7 +3011,13 @@ function buildProjectOptions(
   }
 
   for (const session of sessions) {
-    if (!session.workspacePath || options.has(session.workspacePath) || removed.has(session.workspacePath) || isHiddenDexydSession(session)) continue;
+    if (
+      !session.workspacePath ||
+      options.has(session.workspacePath) ||
+      removed.has(session.workspacePath) ||
+      isHiddenDexydSession(session)
+    )
+      continue;
     options.set(session.workspacePath, {
       path: session.workspacePath,
       label: projectNameFromPath(session.workspacePath),
@@ -2477,7 +3040,9 @@ function buildProjectOptions(
   });
 }
 
-function projectOptionFromBrowse(projects: ProjectBrowseResponse): ProjectOption {
+function projectOptionFromBrowse(
+  projects: ProjectBrowseResponse,
+): ProjectOption {
   const path = projects.currentPath || '.';
   return {
     path,
@@ -2490,10 +3055,10 @@ function upsertProjectOption(
   current: ProjectOption[],
   next: ProjectOption,
 ): ProjectOption[] {
-  return [
-    next,
-    ...current.filter(project => project.path !== next.path),
-  ].slice(0, 20);
+  return [next, ...current.filter(project => project.path !== next.path)].slice(
+    0,
+    20,
+  );
 }
 
 function projectNameFromPath(projectPath: string): string {
@@ -2521,7 +3086,7 @@ function SettingsScreen({
   auth: ReturnType<typeof useAuth>;
   bridgeSettings: ReturnType<typeof useBridgeSettings>;
   bridgeHealth: string;
-  refreshHealth: () => Promise<void>;
+  refreshHealth: (bridgeUrl?: string) => Promise<void>;
   scannerOpen: boolean;
   setScannerOpen: (open: boolean) => void;
   socketState: string;
@@ -2544,13 +3109,15 @@ function SettingsScreen({
   const [activePane, setActivePane] = useState<SettingsPaneKey | null>(null);
   useEffect(() => {
     if (Platform.OS !== 'android' || !activePane) return undefined;
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      setActivePane(null);
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        setActivePane(null);
+        return true;
+      },
+    );
     return () => subscription.remove();
   }, [activePane]);
-
 
   const pair = async (value: string) => {
     const trimmed = value.trim();
@@ -2558,10 +3125,13 @@ function SettingsScreen({
 
     setPairing(true);
     try {
-      await auth.pairFromUri(trimmed, deviceLabel.trim() || 'phone');
+      const pairedBridgeUrl = await auth.pairFromUri(
+        trimmed,
+        deviceLabel.trim() || 'phone',
+      );
       setPairingUri('');
       setScannerOpen(false);
-      await refreshHealth();
+      await refreshHealth(pairedBridgeUrl);
       await devices.refresh();
     } catch (err) {
       auth.setError(errorMessage(err, 'pairing failed'));
@@ -2581,9 +3151,9 @@ function SettingsScreen({
   };
 
   const connectionTone =
-    bridgeHealth === 'ready'
+    bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
-      : bridgeHealth === 'degraded'
+      : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
         ? 'warn'
         : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
@@ -2623,15 +3193,16 @@ function SettingsScreen({
       key: 'account',
       icon: '%',
       title: 'Account & usage',
-      subtitle: 'Codex account, context, and limit status.',
+      subtitle: 'Codex account and account usage limits.',
       detail: accountPaneDetail(codexAuth.status, usage.usage),
-      tone: usage.usage?.status === 'error'
-        ? 'error'
-        : usage.usage?.status === 'warn'
-          ? 'warn'
-          : codexAuth.status?.installed === false
+      tone:
+        usage.usage?.limits.status === 'error'
+          ? 'error'
+          : usage.usage?.limits.status === 'warn'
             ? 'warn'
-            : 'ok',
+            : codexAuth.status?.installed === false
+              ? 'warn'
+              : 'ok',
     },
     {
       key: 'security',
@@ -2656,23 +3227,30 @@ function SettingsScreen({
       icon: '!',
       title: 'Error history',
       subtitle: 'Recent warnings and errors without repeated popups.',
-      detail: errorHistory.length === 0
-        ? 'no recent issues'
-        : `${errorHistory.length} event${errorHistory.length === 1 ? '' : 's'}`,
-      tone: errorHistory.some(item => item.level === 'error') ? 'error' : errorHistory.length ? 'warn' : 'idle',
+      detail:
+        errorHistory.length === 0
+          ? 'no recent issues'
+          : `${errorHistory.length} event${errorHistory.length === 1 ? '' : 's'}`,
+      tone: errorHistory.some(item => item.level === 'error')
+        ? 'error'
+        : errorHistory.length
+          ? 'warn'
+          : 'idle',
     },
     {
       key: 'diagnostics',
       icon: '⌬',
       title: 'Diagnostics',
       subtitle: 'State useful when pairing or realtime fails.',
-      detail: errors.length === 0
-        ? 'no current errors'
-        : `${errors.length} error${errors.length === 1 ? '' : 's'}`,
+      detail:
+        errors.length === 0
+          ? 'no current errors'
+          : `${errors.length} error${errors.length === 1 ? '' : 's'}`,
       tone: errors.length === 0 ? 'idle' : 'error',
     },
   ];
-  const selectedPane = settingsPanes.find(pane => pane.key === activePane) ?? null;
+  const selectedPane =
+    settingsPanes.find(pane => pane.key === activePane) ?? null;
 
   const renderSelectedPane = () => {
     switch (selectedPane?.key) {
@@ -2682,8 +3260,16 @@ function SettingsScreen({
             title="Connection"
             subtitle="Bridge address used for API and realtime traffic."
           >
-            <StatusRow label="Bridge" value={bridgeHealth} tone={connectionTone} />
-            <StatusRow label="Realtime" value={socketState} tone={realtimeTone} />
+            <StatusRow
+              label="Bridge"
+              value={bridgeHealth}
+              tone={connectionTone}
+            />
+            <StatusRow
+              label="Realtime"
+              value={socketState}
+              tone={realtimeTone}
+            />
             <SettingLine
               label="Active URL"
               value={bridgeSettings.bridgeUrl || 'not configured'}
@@ -2720,8 +3306,8 @@ function SettingsScreen({
               />
             </View>
             <Text style={styles.settingHint}>
-              Pairing QR codes from the TUI set this automatically. For Cloudflare,
-              set up the named tunnel first, then scan the QR.
+              Pairing QR codes from the TUI set this automatically. For
+              Cloudflare, set up the named tunnel first, then scan the QR.
             </Text>
           </SettingsSection>
         );
@@ -2906,8 +3492,8 @@ function SettingsScreen({
               tone={sessionsCount > 0 ? 'ok' : 'idle'}
             />
             <Text style={styles.settingHint}>
-              Refresh and select Codex/OMX sessions from Sessions. Chat resumes the
-              selected Codex session.
+              Refresh and select Codex/OMX sessions from Sessions. Chat resumes
+              the selected Codex session.
             </Text>
           </SettingsSection>
         );
@@ -2919,18 +3505,33 @@ function SettingsScreen({
             subtitle="Repeated connection failures are stored here and shown as status after the first alert."
           >
             <View style={styles.settingsActions}>
-              <TextButton label="Clear history" onPress={onClearErrorHistory} disabled={errorHistory.length === 0} />
+              <TextButton
+                label="Clear history"
+                onPress={onClearErrorHistory}
+                disabled={errorHistory.length === 0}
+              />
             </View>
             {errorHistory.length === 0 ? (
-              <Text style={styles.settingHint}>No warnings or errors recorded.</Text>
+              <Text style={styles.settingHint}>
+                No warnings or errors recorded.
+              </Text>
             ) : (
               errorHistory.map(item => (
                 <View key={item.id} style={styles.historyItem}>
                   <View style={styles.historyTopRow}>
-                    <Text style={[styles.historyLevel, item.level === 'error' ? styles.historyError : styles.historyWarning]}>
+                    <Text
+                      style={[
+                        styles.historyLevel,
+                        item.level === 'error'
+                          ? styles.historyError
+                          : styles.historyWarning,
+                      ]}
+                    >
                       {item.level}
                     </Text>
-                    <Text style={styles.historyTime}>{formatDate(item.timestamp)}</Text>
+                    <Text style={styles.historyTime}>
+                      {formatDate(item.timestamp)}
+                    </Text>
                   </View>
                   <Text style={styles.historyTitle}>{item.title}</Text>
                   <Text style={styles.historyBody}>{item.body}</Text>
@@ -2977,7 +3578,11 @@ function SettingsScreen({
               </>
             ) : null}
             <View style={styles.settingsActions}>
-              <TextButton label="Full app reset" variant="danger" onPress={() => onFullReset().catch(() => undefined)} />
+              <TextButton
+                label="Full app reset"
+                variant="danger"
+                onPress={() => onFullReset().catch(() => undefined)}
+              />
             </View>
           </SettingsSection>
         );
@@ -3138,7 +3743,11 @@ function BridgeProfilesPanel({
   bridgeSettings: ReturnType<typeof useBridgeSettings>;
 }) {
   if (bridgeSettings.bridges.length === 0) {
-    return <Text style={styles.settingHint}>No saved bridge profiles yet. Pair with a bridge to save it here.</Text>;
+    return (
+      <Text style={styles.settingHint}>
+        No saved bridge profiles yet. Pair with a bridge to save it here.
+      </Text>
+    );
   }
   return (
     <View style={styles.inlinePanel}>
@@ -3146,18 +3755,31 @@ function BridgeProfilesPanel({
       {bridgeSettings.bridges.map(bridge => (
         <Pressable
           key={bridge.id}
-          onPress={() => bridgeSettings.switchBridge(bridge.id).catch(() => undefined)}
+          onPress={() =>
+            bridgeSettings.switchBridge(bridge.id).catch(() => undefined)
+          }
           style={({ pressed }) => [
             styles.accountRow,
-            bridge.id === bridgeSettings.activeBridgeId && styles.accountRowActive,
+            bridge.id === bridgeSettings.activeBridgeId &&
+              styles.accountRowActive,
             pressed && styles.pressed,
           ]}
         >
           <View style={styles.accountTextBlock}>
-            <Text style={styles.deviceName} numberOfLines={1}>{bridge.label}</Text>
-            <Text style={styles.deviceMeta} numberOfLines={1}>{bridge.bridgeUrl}</Text>
+            <Text style={styles.deviceName} numberOfLines={1}>
+              {bridge.label}
+            </Text>
+            <Text style={styles.deviceMeta} numberOfLines={1}>
+              {bridge.bridgeUrl}
+            </Text>
           </View>
-          <Text style={bridge.id === bridgeSettings.activeBridgeId ? styles.currentDeviceText : styles.projectRefresh}>
+          <Text
+            style={
+              bridge.id === bridgeSettings.activeBridgeId
+                ? styles.currentDeviceText
+                : styles.projectRefresh
+            }
+          >
             {bridge.id === bridgeSettings.activeBridgeId ? 'active' : 'switch'}
           </Text>
         </Pressable>
@@ -3175,7 +3797,7 @@ function UsagePanel({
   loading: boolean;
   onRefresh: () => Promise<void>;
 }) {
-  const tone = usage?.status ?? 'unknown';
+  const tone = usage?.limits.status ?? 'unknown';
   return (
     <View style={styles.inlinePanel}>
       <View style={styles.inlinePanelHeader}>
@@ -3188,12 +3810,16 @@ function UsagePanel({
       </View>
       <StatusRow
         label="Context"
-        value={usage?.context.percent !== null && usage?.context.percent !== undefined
-          ? `${usage.context.percent}% (${formatCompactNumber(usage.context.usedTokens ?? 0)} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
-          : usage?.context.usedTokens !== null && usage?.context.usedTokens !== undefined
-            ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-            : 'unknown'}
-        tone={usageStatusTone(usage?.context.status)}
+        value={
+          usage?.context.percent !== null &&
+          usage?.context.percent !== undefined
+            ? `${usage.context.percent}% (${formatCompactNumber(usage.context.usedTokens ?? 0)} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
+            : usage?.context.usedTokens !== null &&
+                usage?.context.usedTokens !== undefined
+              ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+              : 'unknown'
+        }
+        tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
       <StatusRow
         label="Limits"
@@ -3203,11 +3829,19 @@ function UsagePanel({
       {usage?.limits.detail ? (
         <Text style={styles.settingHint}>{usage.limits.detail}</Text>
       ) : null}
-      <View style={[styles.usageMeter, tone === 'warn' && styles.usageMeterWarn, tone === 'error' && styles.usageMeterError]}>
+      <View
+        style={[
+          styles.usageMeter,
+          tone === 'warn' && styles.usageMeterWarn,
+          tone === 'error' && styles.usageMeterError,
+        ]}
+      >
         <View
           style={[
             styles.usageMeterFill,
-            { width: `${Math.min(100, Math.max(0, usage?.context.percent ?? 0))}%` },
+            {
+              width: `${Math.min(100, Math.max(0, usage?.context.percent ?? 0))}%`,
+            },
             tone === 'warn' && styles.usageMeterFillWarn,
             tone === 'error' && styles.usageMeterFillError,
           ]}
@@ -3235,7 +3869,9 @@ function CodexAuthPanel({
         />
       </View>
       {!status ? (
-        <Text style={styles.settingHint}>Account status has not loaded yet.</Text>
+        <Text style={styles.settingHint}>
+          Account status has not loaded yet.
+        </Text>
       ) : status.installed ? (
         <>
           <StatusRow
@@ -3243,16 +3879,32 @@ function CodexAuthPanel({
             value={status.activeAccount?.label ?? 'none'}
             tone={status.activeAccount ? 'ok' : 'warn'}
           />
-          <StatusRow label="Auto switch" value={status.autoSwitch} tone={status.autoSwitch === 'ON' ? 'ok' : 'idle'} />
-          <StatusRow label="Usage API" value={status.usageApi} tone={status.usageApi === 'api' || status.usageApi === 'ON' ? 'ok' : 'warn'} />
+          <StatusRow
+            label="Auto switch"
+            value={status.autoSwitch}
+            tone={status.autoSwitch === 'ON' ? 'ok' : 'idle'}
+          />
+          <StatusRow
+            label="Usage API"
+            value={status.usageApi}
+            tone={
+              status.usageApi === 'api' || status.usageApi === 'ON'
+                ? 'ok'
+                : 'warn'
+            }
+          />
           {status.accounts.length === 0 ? (
-            <Text style={styles.settingHint}>No codex-auth accounts found.</Text>
+            <Text style={styles.settingHint}>
+              No codex-auth accounts found.
+            </Text>
           ) : (
             status.accounts.map(account => (
               <Pressable
                 key={`${account.index}-${account.label}`}
                 disabled={account.active || Boolean(codexAuth.switching)}
-                onPress={() => codexAuth.switchAccount(account.index).catch(() => undefined)}
+                onPress={() =>
+                  codexAuth.switchAccount(account.index).catch(() => undefined)
+                }
                 style={({ pressed }) => [
                   styles.accountRow,
                   account.active && styles.accountRowActive,
@@ -3261,13 +3913,21 @@ function CodexAuthPanel({
               >
                 <View style={styles.accountTextBlock}>
                   <Text style={styles.deviceName} numberOfLines={1}>
-                    {account.active ? '● ' : ''}{account.label}
+                    {account.active ? '● ' : ''}
+                    {account.label}
                   </Text>
                   <Text style={styles.deviceMeta} numberOfLines={1}>
-                    {account.plan} · 5h {account.usage5h} · weekly {account.usageWeekly}
+                    {account.plan} · 5h {account.usage5h} · weekly{' '}
+                    {account.usageWeekly}
                   </Text>
                 </View>
-                <Text style={account.active ? styles.currentDeviceText : styles.projectRefresh}>
+                <Text
+                  style={
+                    account.active
+                      ? styles.currentDeviceText
+                      : styles.projectRefresh
+                  }
+                >
                   {account.active
                     ? 'active'
                     : codexAuth.switching === account.index
@@ -3291,14 +3951,20 @@ function CodexAuthPanel({
   );
 }
 
-
-function usageStatusTone(status: UsageStatus['status'] | undefined): StatusKind {
+function usageStatusTone(
+  status: UsageStatus['status'] | undefined,
+): StatusKind {
   if (status === 'ok' || status === 'warn' || status === 'error') return status;
   return 'idle';
 }
 
-function accountPaneDetail(status: CodexAuthStatus | null, usage: UsageStatus | null): string {
-  const account = status?.activeAccount?.label ?? (status?.installed === false ? 'codex-auth missing' : 'account unknown');
+function accountPaneDetail(
+  status: CodexAuthStatus | null,
+  usage: UsageStatus | null,
+): string {
+  const account =
+    status?.activeAccount?.label ??
+    (status?.installed === false ? 'codex-auth missing' : 'account unknown');
   const usageText = usage ? usageSummary(usage) : 'usage unknown';
   return `${account} · ${usageText}`;
 }
@@ -3316,8 +3982,8 @@ function SettingsAppInfo({
     <View style={styles.settingsAppInfo}>
       <Text style={styles.settingsAppInfoText}>dexyd mobile</Text>
       <Text style={styles.settingsAppInfoSubtext}>
-        bridge {bridgeHealth} · realtime {socketState} · {sessionsCount}{' '}
-        session{sessionsCount === 1 ? '' : 's'}
+        bridge {bridgeHealth} · realtime {socketState} · {sessionsCount} session
+        {sessionsCount === 1 ? '' : 's'}
       </Text>
     </View>
   );
@@ -3541,7 +4207,13 @@ function interactionRequestId(
   payload: Record<string, unknown>,
   event: EventEnvelope,
 ): string {
-  for (const key of ['interactionId', 'requestId', 'approvalId', 'questionId', 'id']) {
+  for (const key of [
+    'interactionId',
+    'requestId',
+    'approvalId',
+    'questionId',
+    'id',
+  ]) {
     if (typeof payload[key] === 'string' && payload[key].trim()) {
       return payload[key].trim();
     }
@@ -3562,7 +4234,14 @@ function attentionTitle(
 }
 
 function attentionBody(payload: Record<string, unknown>): string {
-  for (const key of ['message', 'content', 'text', 'prompt', 'question', 'detail']) {
+  for (const key of [
+    'message',
+    'content',
+    'text',
+    'prompt',
+    'question',
+    'detail',
+  ]) {
     if (typeof payload[key] === 'string' && payload[key].trim()) {
       return payload[key].trim();
     }
@@ -3627,13 +4306,102 @@ function usageSummary(usage: UsageStatus): string {
       : usage.context.usedTokens !== null
         ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
         : 'context unknown';
-  return `${context} · ${usage.limits.label}`;
+  return `${accountUsageLabel(usage)} · ${context}`;
+}
+
+function accountUsageLabel(usage: UsageStatus): string {
+  const remaining = accountRemainingPercent(usage);
+  if (remaining !== null) {
+    return `account ${Math.max(0, Math.round(remaining))}% left`;
+  }
+  if (usage.limits.label && usage.limits.label !== 'limits unknown') {
+    return usage.limits.label;
+  }
+  return 'account usage unknown';
+}
+
+function accountUsageWarningThreshold(usage: UsageStatus | null): number | null {
+  const remaining = accountRemainingPercent(usage);
+  if (remaining === null) return null;
+  if (remaining <= 10) return 10;
+  if (remaining <= 25) return 25;
+  if (remaining <= 50) return 50;
+  return null;
+}
+
+function accountUsageWarningBody(
+  usage: UsageStatus,
+  threshold: number,
+): string {
+  const remaining = accountRemainingPercent(usage);
+  const remainingText =
+    remaining === null
+      ? `below ${threshold}% remaining`
+      : `${Math.max(0, Math.round(remaining))}% remaining`;
+  const label = usage.limits.label ? ` · ${usage.limits.label}` : '';
+  return `Account usage is ${remainingText}${label}`;
+}
+
+function accountRemainingPercent(usage: UsageStatus | null): number | null {
+  if (!usage) return null;
+  const rawRemaining = lowestRemainingPercent(usage.limits.raw);
+  if (rawRemaining !== null) return rawRemaining;
+  const match = usage.limits.detail.match(/(\d+(?:\.\d+)?)%\s+remaining/i);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function lowestRemainingPercent(value: unknown): number | null {
+  if (Array.isArray(value)) {
+    return value.reduce<number | null>((lowest, item) => {
+      const percent = lowestRemainingPercent(item);
+      if (percent === null) return lowest;
+      return lowest === null ? percent : Math.min(lowest, percent);
+    }, null);
+  }
+
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const usedPercent =
+    numericField(record, 'used_percent') ?? numericField(record, 'usedPercentage');
+  const percent =
+    numericField(record, 'remaining_percent') ??
+    numericField(record, 'remainingPercentage') ??
+    (usedPercent !== null ? Math.max(0, 100 - usedPercent) : null);
+  if (percent !== null) return percent;
+
+  const remaining = numericField(record, 'remaining');
+  const limit = numericField(record, 'limit');
+  if (remaining !== null && limit !== null && limit > 0) {
+    return (remaining / limit) * 100;
+  }
+
+  return Object.values(record).reduce<number | null>((lowest, item) => {
+    const nested = lowestRemainingPercent(item);
+    if (nested === null) return lowest;
+    return lowest === null ? nested : Math.min(lowest, nested);
+  }, null);
+}
+
+function numericField(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function usageSendBlockMessage(usage: UsageStatus | null): string | null {
   if (usage?.limits.status !== 'error') return null;
   const detail =
-    usage.limits.detail && usage.limits.detail !== 'Rate-limit telemetry is available from Codex.'
+    usage.limits.detail &&
+    usage.limits.detail !== 'Rate-limit telemetry is available from Codex.'
       ? usage.limits.detail
       : 'Wait for the limit to reset or switch Codex account.';
   return `Usage limit reached · ${detail}`;
@@ -3661,10 +4429,7 @@ function ToggleRow({
       accessibilityRole="switch"
       accessibilityState={{ checked: value }}
       onPress={() => onValueChange(!value)}
-      style={({ pressed }) => [
-        styles.toggleRow,
-        pressed && styles.pressed,
-      ]}
+      style={({ pressed }) => [styles.toggleRow, pressed && styles.pressed]}
     >
       <View style={styles.toggleTextBlock}>
         <Text style={styles.settingLabel}>{label}</Text>
@@ -4324,7 +5089,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
-    maxWidth: '86%',
+    maxWidth: '92%',
     marginTop: 6,
     marginBottom: 10,
     paddingHorizontal: 12,
@@ -4334,11 +5099,94 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: palette.line,
   },
+  workingStateDock: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    alignItems: 'center',
+    zIndex: 5,
+  },
   workingText: {
     color: palette.muted,
     fontSize: 12,
     fontWeight: '700',
     marginLeft: 8,
+  },
+  queuePanel: {
+    marginHorizontal: 12,
+    marginBottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderRadius: 14,
+    backgroundColor: '#222224',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3b3b3e',
+  },
+  queueHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  queueTitle: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  queueCount: {
+    color: palette.dim,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  queueItem: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#363639',
+  },
+  queueItemActive: {
+    backgroundColor: '#2a2924',
+  },
+  queueItemText: {
+    flex: 1,
+  },
+  queueItemTitle: {
+    color: palette.muted,
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  queueItemBody: {
+    color: palette.text,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  queueActions: {
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  queueActionButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 10,
+    backgroundColor: '#303033',
+  },
+  queueActionButtonActive: {
+    backgroundColor: '#4a412b',
+  },
+  queueActionText: {
+    color: palette.text,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  queueRemoveText: {
+    color: '#f0a5a0',
+    fontSize: 11,
+    fontWeight: '800',
   },
   progressRow: {
     marginBottom: 8,
@@ -4381,6 +5229,7 @@ const styles = StyleSheet.create({
   },
   messageBubble: {
     maxWidth: '88%',
+    flexShrink: 1,
   },
   messageBubbleUser: {
     backgroundColor: '#2b2b2d',
@@ -4466,15 +5315,20 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   bulletRow: {
+    width: '100%',
+    alignSelf: 'stretch',
     flexDirection: 'row',
     marginBottom: 4,
   },
   bulletMarker: {
     width: 14,
+    flexShrink: 0,
     color: palette.muted,
   },
   bulletText: {
     flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   latestButton: {
     position: 'absolute',
@@ -4524,6 +5378,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     lineHeight: 16,
+  },
+  steeringNoticeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  steeringCancel: {
+    color: '#f0c58c',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
   },
   composerRow: {
     flexDirection: 'row',
@@ -4575,26 +5440,24 @@ const styles = StyleSheet.create({
     left: 0,
     zIndex: 20,
     elevation: 20,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.48)',
+    backgroundColor: '#161617',
+  },
+  diffSafeArea: {
+    flex: 1,
+    backgroundColor: '#161617',
   },
   diffPanel: {
-    maxHeight: '82%',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: '#1f1f20',
-    paddingTop: 10,
-    paddingHorizontal: 12,
-    paddingBottom: 16,
+    flex: 1,
+    backgroundColor: '#161617',
+    paddingTop: 4,
   },
   diffHeader: {
-    minHeight: 42,
+    minHeight: 40,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: 6,
+    marginBottom: 4,
+    paddingHorizontal: 8,
   },
   diffHeaderText: {
     flex: 1,
@@ -4602,53 +5465,180 @@ const styles = StyleSheet.create({
   },
   diffTitle: {
     color: palette.text,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '900',
   },
   diffMeta: {
     color: palette.dim,
-    fontSize: 11,
-    marginTop: 2,
+    fontSize: 10,
+    marginTop: 1,
   },
   diffHeaderButton: {
-    width: 34,
-    height: 34,
+    width: 32,
+    height: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 12,
-    backgroundColor: '#2b2b2d',
+    borderRadius: 10,
+    backgroundColor: '#252527',
   },
   diffHeaderButtonText: {
     color: palette.text,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '800',
   },
   diffError: {
     color: '#ff9d97',
     fontSize: 12,
     fontWeight: '700',
-    marginBottom: 8,
+    marginBottom: 6,
+    marginHorizontal: 8,
   },
-  diffStat: {
-    color: palette.muted,
-    fontFamily: Platform.select({ android: 'monospace', default: undefined }),
+  diffFileSelectorWrap: {
+    position: 'relative',
+    zIndex: 30,
+    marginBottom: 4,
+    marginHorizontal: 8,
+  },
+  diffFileSelector: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#343438',
+    backgroundColor: '#202022',
+  },
+  diffFileSelectorSingle: {
+    borderColor: '#27272a',
+  },
+  diffFileName: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
     fontSize: 12,
-    lineHeight: 17,
-    marginBottom: 8,
+    fontWeight: '900',
   },
-  diffScroll: {
-    maxHeight: 520,
+  diffFileCounts: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: Platform.select({ android: 'monospace', default: undefined }),
+  },
+  diffDropdownIcon: {
+    color: palette.muted,
+    fontSize: 16,
+    fontWeight: '900',
+    marginLeft: -2,
+  },
+  diffDropdown: {
+    position: 'absolute',
+    top: 38,
+    left: 0,
+    right: 0,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: '#171718',
+    borderColor: '#37373b',
+    overflow: 'hidden',
+    backgroundColor: '#202022',
+    zIndex: 40,
+    elevation: 40,
+  },
+  diffDropdownScroll: {
+    flex: 1,
+  },
+  diffDropdownContent: {
+    paddingVertical: 2,
+  },
+  diffDropdownItem: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#303034',
+  },
+  diffDropdownItemActive: {
+    backgroundColor: '#293129',
+  },
+  diffDropdownText: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.muted,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  diffDropdownTextActive: {
+    color: palette.text,
+  },
+  diffDropdownMeta: {
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: Platform.select({ android: 'monospace', default: undefined }),
+  },
+  diffScroll: {
+    flex: 1,
+    backgroundColor: '#161617',
+  },
+  diffHorizontalContent: {
+    flexGrow: 1,
+  },
+  diffVerticalScroll: {
+    flexGrow: 1,
+  },
+  diffVerticalContent: {
+    flexGrow: 1,
   },
   diffCode: {
     color: '#e7e3dc',
     fontFamily: Platform.select({ android: 'monospace', default: undefined }),
     fontSize: 12,
     lineHeight: 17,
-    padding: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  diffLineList: {
+    paddingVertical: 2,
+    minWidth: Math.max(560, Dimensions.get('window').width),
+  },
+  diffLine: {
+    minHeight: 19,
+    paddingHorizontal: 8,
+    justifyContent: 'center',
+  },
+  diffLineAddition: {
+    backgroundColor: 'rgba(58, 132, 82, 0.18)',
+  },
+  diffLineDeletion: {
+    backgroundColor: 'rgba(181, 76, 70, 0.18)',
+  },
+  diffLineHunk: {
+    backgroundColor: 'rgba(102, 116, 182, 0.18)',
+  },
+  diffLineMeta: {
+    backgroundColor: 'rgba(255,255,255,0.025)',
+  },
+  diffLineText: {
+    color: '#ddd8cf',
+    fontFamily: Platform.select({ android: 'monospace', default: undefined }),
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  diffLineTextAddition: {
+    color: '#9be3aa',
+  },
+  diffLineTextDeletion: {
+    color: '#ffaaa3',
+  },
+  diffLineTextHunk: {
+    color: '#bfc8ff',
+    fontWeight: '800',
+  },
+  diffLineTextMeta: {
+    color: palette.dim,
   },
   inboxList: {
     paddingHorizontal: 12,
@@ -4789,6 +5779,47 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     marginBottom: 7,
+  },
+  sessionUsageSummary: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: palette.line,
+    borderRadius: 12,
+    backgroundColor: '#202021',
+  },
+  sessionUsageSummaryWarn: {
+    borderColor: '#5a4a31',
+    backgroundColor: '#312a20',
+  },
+  sessionUsageSummaryError: {
+    borderColor: '#5a3431',
+    backgroundColor: '#312220',
+  },
+  sessionUsageSummaryText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  sessionUsageTitle: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  sessionUsageMeta: {
+    marginTop: 2,
+    color: palette.dim,
+    fontSize: 11,
+  },
+  sessionUsagePercent: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '800',
   },
   terminalRow: {
     minHeight: 48,
@@ -5375,17 +6406,18 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   bottomTabs: {
-    height: 56,
+    height: 60,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
+    paddingBottom: 6,
     borderTopWidth: 1,
     borderTopColor: palette.line,
     backgroundColor: palette.bg2,
   },
   tabItem: {
     width: 78,
-    height: 46,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },

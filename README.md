@@ -8,8 +8,9 @@ Dexyd lets you control Codex and OMX sessions from your phone. It runs a small b
 - See Codex/OMX sessions grouped by project.
 - Open a session as a focused chat.
 - Send messages and see responses in real time.
+- Queue follow-up messages while a session is already working.
 - Answer approval requests and multiple-choice questions from the app.
-- Review changed code diffs after an assistant response completes.
+- Review per-message code diffs after assistant responses complete.
 - Receive in-app notifications for replies, alerts, approvals, and questions.
 - Check account and usage status.
 - Configure LAN, domain, Caddy, or Cloudflare named-tunnel access through the bridge TUI.
@@ -31,12 +32,18 @@ On Linux, install Dexyd with one command:
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
-The installer puts Dexyd in the XDG app data directory, normally `~/.local/share/dexyd`, checks bridge dependencies, creates configuration with your home directory as the workspace root, installs TUI dependencies, builds the bridge, links the `dexyd` command, and installs or restarts the user service. It does not build or install the Android app.
+The installer puts Dexyd in the XDG app data directory, normally `~/.local/share/dexyd`, cleans/replaces old Dexyd service and command links, checks bridge dependencies, creates configuration with your home directory as the workspace root, installs TUI dependencies, builds the bridge, links the `dexyd` command, verifies the install, and installs or restarts the user service. It does not build or install the Android app.
 
 After installation, open the bridge TUI:
 
 ```bash
 dexyd --tui
+```
+
+To remove an installed bridge before reinstalling:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
 ```
 
 The TUI is the main setup surface. Use it to start or inspect the bridge, configure connection settings, generate pairing QR codes, manage trusted devices, and set up Cloudflare named tunnels.
@@ -80,7 +87,7 @@ Inbox is only for things that need attention, such as new messages, agent questi
 
 ### Chat
 
-The chat view shows your messages, assistant responses, compact work status, and completed response actions. When a response changes files, use **View code diff** under the completed message to inspect the diff.
+The chat view shows your messages, queued follow-ups, assistant responses, compact work status, and completed response actions. When a response changes files, use **View message diff** under that completed message to inspect the code changed by that turn.
 
 ### Settings
 

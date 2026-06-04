@@ -8,7 +8,7 @@ import { emitEventRequestSchema } from '../domain/events.js';
 import { interactionIdParamsSchema, interactionResponseSchema } from '../domain/interaction.js';
 import { fileQuerySchema, readFileQuerySchema } from '../domain/file.js';
 import { createPairingRequestSchema } from '../domain/pairing.js';
-import { createSessionRequestSchema, patchSessionRequestSchema } from '../domain/session.js';
+import { createSessionRequestSchema, patchSessionRequestSchema, type SessionRecord, type SessionStatus } from '../domain/session.js';
 import { AppContext } from '../runtime/app-context.js';
 
 const sessionIdSchema = z
@@ -18,6 +18,7 @@ const sessionIdSchema = z
   .max(180)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const sessionIdParamsSchema = z.object({ sessionId: sessionIdSchema });
+const queueIdParamsSchema = z.object({ sessionId: sessionIdSchema, queueId: z.string().uuid() });
 
 const deviceIdParamsSchema = z.object({ deviceId: z.string().uuid() });
 const listSessionsQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) });
@@ -40,8 +41,20 @@ const replayQuerySchema = z.object({
 const usageStatusQuerySchema = z.object({
   sessionId: sessionIdSchema.optional()
 });
+const diffQuerySchema = z.object({
+  turnId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(180)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/)
+    .optional()
+});
 const codexAuthSwitchRequestSchema = z.object({
   query: z.string().trim().min(1).max(120)
+});
+const queueSteerRequestSchema = z.object({
+  message: z.string().trim().min(1).max(12000)
 });
 
 export async function registerRoutes(
@@ -356,13 +369,8 @@ export async function registerRoutes(
     const hidden = context.db.listHiddenSessionIds();
     const localSessions = context.db.listSessions(limit).filter((session) => !hidden.has(session.id));
     const codexSessions = context.codexSessionService.listSessions(limit).filter((session) => !hidden.has(session.id));
-    const seen = new Set<string>();
-    const sessions = [...localSessions, ...codexSessions]
-      .filter((session) => {
-        if (seen.has(session.id)) return false;
-        seen.add(session.id);
-        return true;
-      })
+    const sessions = mergeSessions([...localSessions, ...codexSessions]
+      .map((session) => context.codexChatService.applyRuntimeStatus(session)))
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
       .slice(0, limit);
     return { sessions };
@@ -541,6 +549,92 @@ export async function registerRoutes(
     };
   });
 
+  app.get('/sessions/:sessionId/queue', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    return { queue: context.codexChatService.getQueue(params.data.sessionId) };
+  });
+
+  app.post('/sessions/:sessionId/queue/:queueId/steer', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = queueIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_queue_id', issues: params.error.issues });
+    }
+
+    const body = queueSteerRequestSchema.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    const queued = context.codexChatService.steerQueuedMessage({
+      sessionId: params.data.sessionId,
+      queueId: params.data.queueId,
+      steering: body.data.message
+    });
+    if (!queued) {
+      return reply.code(404).send({ error: 'queued_message_not_found' });
+    }
+
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'chat.queue.steered',
+      target: params.data.sessionId,
+      metadata: { queueId: params.data.queueId }
+    });
+
+    return { queued };
+  });
+
+  app.delete('/sessions/:sessionId/queue/:queueId', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = queueIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_queue_id', issues: params.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    const removed = context.codexChatService.removeQueuedMessage({
+      sessionId: params.data.sessionId,
+      queueId: params.data.queueId
+    });
+
+    if (removed) {
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'chat.queue.removed',
+        target: params.data.sessionId,
+        metadata: { queueId: params.data.queueId }
+      });
+    }
+
+    return { removed };
+  });
+
   app.post('/sessions/:sessionId/chat', async (request, reply) => {
     const auth = requireAuth(request.headers.authorization, context, reply);
     if (!auth) return;
@@ -676,9 +770,25 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
+    const query = diffQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
+    }
+
     const session = getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    if (query.data.turnId) {
+      return (
+        context.codexChatService.getTurnDiff(params.data.sessionId, query.data.turnId) ?? {
+          status: '',
+          stat: '',
+          diff: '',
+          truncated: false
+        }
+      );
     }
 
     return context.diffService.summarize(session);
@@ -814,7 +924,45 @@ export async function registerRoutes(
 
 
 function getSession(context: AppContext, sessionId: string) {
-  return context.db.getSession(sessionId) ?? context.codexSessionService.getSession(sessionId);
+  const sessions = [context.db.getSession(sessionId), context.codexSessionService.getSession(sessionId)]
+    .filter((session): session is SessionRecord => session !== null)
+    .map((session) => context.codexChatService.applyRuntimeStatus(session));
+  return mergeSessions(sessions)[0] ?? null;
+}
+
+function mergeSessions<T extends SessionRecord>(sessions: T[]): T[] {
+  const merged = new Map<string, T>();
+  for (const session of sessions) {
+    const existing = merged.get(session.id);
+    merged.set(session.id, existing ? mergeSession(existing, session) : session);
+  }
+  return [...merged.values()];
+}
+
+function mergeSession<T extends SessionRecord>(left: T, right: T): T {
+  const leftScore = sessionStatusPriority(left.status);
+  const rightScore = sessionStatusPriority(right.status);
+  const rightNewer = Date.parse(right.updatedAt) > Date.parse(left.updatedAt);
+  const primary = rightScore > leftScore || (rightScore === leftScore && rightNewer) ? right : left;
+  const secondary = primary === right ? left : right;
+
+  return {
+    ...secondary,
+    ...primary,
+    title: primary.title ?? secondary.title,
+    omx: primary.omx ?? secondary.omx,
+    usageContext: primary.usageContext ?? secondary.usageContext,
+    updatedAt: rightNewer ? right.updatedAt : left.updatedAt
+  };
+}
+
+function sessionStatusPriority(status: SessionStatus): number {
+  if (status === 'running') return 50;
+  if (status === 'failed') return 40;
+  if (status === 'cancelled') return 30;
+  if (status === 'created') return 20;
+  if (status === 'completed') return 10;
+  return 0;
 }
 
 function requireAuth(authorizationHeader: string | undefined, context: AppContext, reply: FastifyReply) {

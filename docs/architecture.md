@@ -97,7 +97,7 @@ The database is local to the bridge host.
 5. Bridge launches Codex/OMX for the session workspace.
 6. Output is parsed into compact status, assistant/system messages, and events.
 7. Mobile updates chat through WebSocket and/or polling/replay.
-8. Completed message may expose a session diff.
+8. On mobile-started turns, the bridge compares a bounded pre-turn snapshot with the completed workspace state and emits a per-turn diff event for the completed message.
 
 ## Event model
 
@@ -116,7 +116,7 @@ Session deletion removes local Dexyd sessions. External sessions are hidden from
 
 ## File and diff model
 
-File and diff APIs operate relative to the session workspace and remain confined to `codex.workspaceRoot`. Diff summaries are used by the mobile chat's **View code diff** action.
+File and diff APIs operate relative to the session workspace and remain confined to `codex.workspaceRoot`. The bridge supports both current workspace/session diffs and per-turn diffs captured for mobile-started chat turns. Per-turn summaries power the mobile chat's **View message diff** action.
 
 ## Harness model
 

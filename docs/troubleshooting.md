@@ -19,6 +19,29 @@ curl http://10.0.0.88:4242/health/live
 
 If local works but LAN does not, check bind address and firewall.
 
+## Installer uses the wrong location
+
+The installed bridge should run from the XDG app directory, normally:
+
+```text
+~/.local/share/dexyd
+```
+
+Check the command link:
+
+```bash
+readlink -f ~/.local/bin/dexyd
+```
+
+If it points into an old development checkout or `dexyd` looks for `~/.local/package.json`, clean and reinstall:
+
+```bash
+bash scripts/install.sh --clean
+bash scripts/install.sh --use-current
+```
+
+The first command removes the old app directory, user service, and command link. The second copies the current checkout into the app directory and installs from there.
+
 ## Phone cannot connect on LAN
 
 Check:
@@ -104,7 +127,7 @@ The app should optimistically show your message immediately. If it does not:
 
 ## Chat status is cut off or keyboard hides input
 
-The app is designed to dock the composer above the keyboard. If layout is wrong:
+The app is designed to dock the composer above the keyboard and float working status above the composer. If layout is wrong:
 
 1. Update to the latest app build.
 2. Restart the app.
@@ -139,13 +162,14 @@ Dexyd can show account switching only if `codex-auth` is installed and available
 
 ## Diff button does not appear
 
-The **View code diff** button appears under a completed assistant message when the bridge can detect changed files for that session/workspace.
+The **View message diff** button appears under a completed assistant message when the bridge captured changes for that turn.
 
 It may not appear if:
 
 - no files changed;
+- the turn was created before per-message diff capture existed;
+- the turn was not started from the mobile app;
 - the run failed before changes completed;
-- the workspace is not a git repository and diff detection cannot summarize changes;
 - the session is external and has no resolvable workspace.
 
 ## Android app cannot load script
