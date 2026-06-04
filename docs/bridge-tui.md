@@ -72,7 +72,37 @@ dexyd --tui
 
 Home is the operational dashboard. It shows bridge/storage/security status and the next useful action. Use it to confirm the bridge is reachable before pairing.
 
-Home can also install a Linux user service so the bridge starts without manually running a terminal command.
+Home stays read-only except for refresh/reload actions. Use **Connection** for bridge service and tunnel setup.
+
+### Connection
+
+Connection is the main setup screen. It keeps all reachability settings together:
+
+- local bridge host/port;
+- public bridge URL for domain/Caddy/tunnel use;
+- bridge user-service autostart;
+- Cloudflare named-tunnel hostname/name;
+- cloudflared install/login/setup/start/stop actions;
+- tunnel service autostart;
+- current bridge and tunnel status.
+
+Connection modes:
+
+- **LAN** — set host to `0.0.0.0`, leave public URL empty, then pair on the LAN URL.
+- **Domain/Caddy** — set public URL to your HTTPS reverse proxy URL, save, then pair.
+- **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL.
+
+The named-tunnel flow can:
+
+1. detect `cloudflared`;
+2. install it user-locally on supported Linux systems if missing;
+3. run Cloudflare login;
+4. create or reuse a named tunnel;
+5. route DNS to the selected hostname;
+6. write tunnel config;
+7. start the tunnel;
+8. save `server.publicBaseUrl`;
+9. regenerate pairing with the correct URL.
 
 ### Pair
 
@@ -86,44 +116,20 @@ Pair creates a short-lived QR payload containing:
 
 Always configure LAN/domain/tunnel first, then generate the QR. Pairing uses the current advertised URL, so old QR codes may point to stale addresses.
 
-### Connect
+### Work
 
-Connect manages how the phone reaches the bridge.
+Work shows projects and sessions. It is not meant to replace the mobile chat, but it is useful for confirming the bridge can see local Dexyd sessions and for inspecting recent chat/diff snippets.
 
-Connection modes:
+### Advanced
 
-- **LAN** — phone connects to the computer's LAN IP and port.
-- **Domain/Caddy** — phone connects through a HTTPS reverse proxy.
-- **Cloudflare named tunnel** — phone connects through a named Cloudflare tunnel and managed hostname.
+Advanced edits less common local bridge configuration:
 
-The TUI named-tunnel flow can:
-
-1. detect `cloudflared`;
-2. install it user-locally on supported Linux systems if missing;
-3. run Cloudflare login;
-4. create or reuse a named tunnel;
-5. route DNS to the selected hostname;
-6. write tunnel config;
-7. start the tunnel;
-8. save `server.publicBaseUrl`;
-9. regenerate pairing with the correct URL.
-
-### Settings
-
-Settings edits local bridge configuration. Important settings:
-
-- host/port;
-- public URL;
 - workspace root;
 - Codex runtime;
 - Codex/OMX/custom harness mode;
 - token and stream settings.
 
 Use a narrower workspace root when you want the app to see fewer files.
-
-### Sessions
-
-Sessions shows recent sessions and allows inspection from the bridge side. The mobile app is still the main chat interface, but the TUI is useful for confirming whether sessions exist and whether the bridge can see Codex/OMX history.
 
 ### Devices
 

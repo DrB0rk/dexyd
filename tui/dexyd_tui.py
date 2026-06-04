@@ -954,16 +954,16 @@ class DexydTextualApp(App[None]):
 
     CSS = """
     Screen {
-      background: #1e1e1f;
+      background: #171719;
       color: #f2f2f2;
       layout: vertical;
     }
     Header {
-      background: #202021;
+      background: #1f1f22;
       color: #f2f2f2;
     }
     Footer {
-      background: #202021;
+      background: #1f1f22;
     }
     TabbedContent {
       height: 1fr;
@@ -971,22 +971,31 @@ class DexydTextualApp(App[None]):
     TabPane {
       padding: 1 2;
     }
+    .page {
+      height: 1fr;
+    }
     .hero {
-      border: round #2a2a2b;
-      background: #202021;
+      border-left: thick #64d98b;
+      background: #202024;
       padding: 1 2;
       margin-bottom: 1;
       height: auto;
     }
-    .card {
-      border: round #2a2a2b;
-      background: #202021;
+    .panel {
+      border: round #323238;
+      background: #202024;
       padding: 1 2;
       margin: 0 1 1 0;
       height: auto;
     }
-    .card_title {
-      color: #f2f2f2;
+    .soft_panel {
+      background: #1b1b1f;
+      padding: 1 2;
+      margin: 0 1 1 0;
+      height: auto;
+    }
+    .section_title {
+      color: #f7faff;
       text-style: bold;
       margin-bottom: 1;
     }
@@ -996,11 +1005,11 @@ class DexydTextualApp(App[None]):
       margin-top: 1;
     }
     .field_help {
-      color: #aaa8ae;
+      color: #a7a7ad;
       margin-bottom: 1;
     }
     .muted {
-      color: #aaa8ae;
+      color: #a7a7ad;
     }
     .success {
       color: #64d98b;
@@ -1011,10 +1020,10 @@ class DexydTextualApp(App[None]):
       text-style: bold;
     }
     .danger {
-      color: #ff493f;
+      color: #ff6b61;
       text-style: bold;
     }
-    .two_col {
+    .row {
       height: auto;
     }
     .col {
@@ -1029,25 +1038,30 @@ class DexydTextualApp(App[None]):
     }
     #qr_output {
       border: round #64d98b;
-      background: #1e1e1f;
+      background: #111113;
       padding: 1;
       width: 1fr;
       height: auto;
       min-height: 24;
       overflow: auto auto;
     }
-    #device_output {
-      border: round #2a2a2b;
+    #device_output, #session_output, #chat_output, #diff_output, #cloudflare_output {
+      border: round #323238;
       padding: 1;
-      height: 1fr;
       overflow: auto auto;
+    }
+    #device_output, #session_output {
+      min-height: 12;
+    }
+    #cloudflare_output {
+      min-height: 18;
     }
     #status_line {
       dock: bottom;
       height: 3;
       padding: 1 2;
       color: #f7faff;
-      background: #202021;
+      background: #202024;
     }
     """
 
@@ -1062,131 +1076,100 @@ class DexydTextualApp(App[None]):
         yield Header(show_clock=True)
         with TabbedContent(id="main"):
             with TabPane("Home", id="dashboard"):
-                with VerticalScroll():
+                with VerticalScroll(classes="page"):
                     yield Static("", id="dashboard_hero", classes="hero")
-                    with Horizontal(classes="two_col"):
-                        yield Static("", id="bridge_card", classes="card col")
-                        yield Static("", id="storage_card", classes="card col")
-                    with Horizontal(classes="two_col"):
-                        yield Static("", id="security_card", classes="card col")
-                        yield Static("", id="next_steps_card", classes="card col")
+                    with Horizontal(classes="row"):
+                        yield Static("", id="bridge_card", classes="panel col")
+                        yield Static("", id="storage_card", classes="panel col")
+                    with Horizontal(classes="row"):
+                        yield Static("", id="security_card", classes="panel col")
+                        yield Static("", id="next_steps_card", classes="panel col")
                     with Horizontal():
-                        yield Button("Refresh dashboard", id="refresh_dashboard", variant="primary")
+                        yield Button("Refresh", id="refresh_dashboard", variant="primary")
                         yield Button("Reload config", id="reload_config")
-                        yield Button("Install service", id="install_service")
 
-            with TabPane("Pair", id="pairing"):
-                with VerticalScroll():
-                    yield Static("PAIR PHONE\n\nGenerate a short-lived QR for the selected LAN/domain/tunnel URL.", classes="card")
-                    yield Input(placeholder="Pairing expiry seconds", id="pairing_expiry", type="integer", value="300")
-                    with Horizontal():
-                        yield Button("Generate QR", id="generate_pairing", variant="success")
-                        yield Button("Clear", id="clear_qr")
-                    yield Static("Generate a QR to pair the mobile app.", id="qr_output")
+            with TabPane("Connection", id="connection"):
+                with VerticalScroll(classes="page"):
+                    yield Static(
+                        "CONNECTION\n\nSet how your phone reaches this bridge. Local bridge, public URL, Cloudflare tunnel, and autostart live here so pairing always uses the right address.",
+                        classes="hero",
+                    )
+                    yield Static("", id="bridge_config_status", classes="panel")
 
-            with TabPane("Bridge config", id="connection"):
-                with VerticalScroll():
-                    yield Static("BRIDGE CONFIG\n\nCheck the local bridge, configure autostart, and manage the named Cloudflare Tunnel used for pairing.", classes="hero")
-                    yield Static("", id="bridge_config_status", classes="card")
-                    with Horizontal():
-                        yield Button("Refresh status", id="bridge_config_refresh", variant="primary")
-                        yield Button("Enable bridge autostart", id="install_service")
-                        yield Button("Enable tunnel autostart", id="cf_install_service")
-                    with Horizontal(classes="two_col"):
-                        with Vertical(classes="card col"):
-                            yield Static("CLOUDFLARE TUNNEL", classes="card_title")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("LOCAL BRIDGE", classes="section_title")
+                            yield Static("Server host", classes="field_label")
+                            yield Static("Use 0.0.0.0 for LAN phone access. Use 127.0.0.1 behind a local tunnel/proxy.", classes="field_help")
+                            yield Input(placeholder="0.0.0.0", id="cfg_server_host")
+                            yield Static("Server port", classes="field_label")
+                            yield Static("Bridge HTTP/WebSocket port.", classes="field_help")
+                            yield Input(placeholder="4242", id="cfg_server_port", type="integer")
+                            yield Static("Public bridge URL", classes="field_label")
+                            yield Static("Leave empty for LAN. Set HTTPS domain/tunnel before generating a QR.", classes="field_help")
+                            yield Input(placeholder="https://dexyd.example.com", id="cfg_server_public_base_url")
+                            with Horizontal():
+                                yield Button("Save connection", id="save_connection", variant="success")
+                                yield Button("Enable bridge service", id="install_service")
+                                yield Button("Refresh", id="bridge_config_refresh", variant="primary")
+
+                        with Vertical(classes="panel col"):
+                            yield Static("CLOUDFLARE NAMED TUNNEL", classes="section_title")
                             yield Static("Public hostname", classes="field_label")
-                            yield Static("Cloudflare-managed hostname, e.g. dexyd.example.com.", classes="field_help")
+                            yield Static("Hostname routed in Cloudflare, e.g. dexyd.example.com.", classes="field_help")
                             yield Input(placeholder="dexyd.example.com", id="cf_hostname")
                             yield Static("Tunnel name", classes="field_label")
-                            yield Static("Named tunnel label.", classes="field_help")
+                            yield Static("Reusable named tunnel label.", classes="field_help")
                             yield Input(placeholder="dexyd", id="cf_tunnel_name", value="dexyd")
                             with Horizontal():
                                 yield Button("Check", id="cf_check", variant="primary")
-                                yield Button("Install", id="cf_install")
+                                yield Button("Install cloudflared", id="cf_install")
                             with Horizontal():
                                 yield Button("Login", id="cf_login")
-                                yield Button("Auto named setup", id="cf_start_named", variant="success")
+                                yield Button("Setup/start named tunnel", id="cf_start_named", variant="success")
                             with Horizontal():
-                                yield Button("Start tunnel service", id="cf_service_start", variant="success")
+                                yield Button("Enable tunnel service", id="cf_install_service")
+                                yield Button("Start service", id="cf_service_start", variant="success")
                                 yield Button("Stop tunnel", id="cf_stop", variant="error")
-                        yield Static("", id="cloudflare_output", classes="card col")
 
-            with TabPane("Settings", id="settings"):
-                with VerticalScroll():
-                    yield Static("Local bridge settings. Save, then restart the bridge.", classes="hero")
-                    with Horizontal(classes="two_col"):
-                        with Vertical(classes="card col"):
-                            yield Static("SERVER", classes="card_title")
-                            yield Static("Server host", classes="field_label")
-                            yield Static("Bind address. 0.0.0.0 enables LAN.", classes="field_help")
-                            yield Input(placeholder="Server host", id="cfg_server_host")
-                            yield Static("Server port", classes="field_label")
-                            yield Static("HTTP/WebSocket port.", classes="field_help")
-                            yield Input(placeholder="Server port", id="cfg_server_port", type="integer")
-                            yield Static("Log level", classes="field_label")
-                            yield Static("One of: fatal, error, warn, info, debug, trace.", classes="field_help")
-                            yield Input(placeholder="Log level", id="cfg_server_log_level")
-                            yield Static("Public bridge URL / domain", classes="field_label")
-                            yield Static("Caddy/tunnel URL used by QR pairing.", classes="field_help")
-                            yield Input(placeholder="https://dexyd.example.com", id="cfg_server_public_base_url")
-                        with Vertical(classes="card col"):
-                            yield Static("SECURITY", classes="card_title")
-                            yield Static("Access token TTL", classes="field_label")
-                            yield Static("Access token lifetime.", classes="field_help")
-                            yield Input(placeholder="Access token TTL seconds", id="cfg_auth_access_ttl", type="integer")
-                            yield Static("Refresh token TTL", classes="field_label")
-                            yield Static("Refresh token lifetime.", classes="field_help")
-                            yield Input(placeholder="Refresh token TTL seconds", id="cfg_auth_refresh_ttl", type="integer")
-                            yield Static("Signing key", classes="field_label")
-                            yield Static("Minimum 16 characters.", classes="field_help")
-                            yield Input(placeholder="Signing key", id="cfg_auth_signing_key", password=True)
-                    with Horizontal(classes="two_col"):
-                        with Vertical(classes="card col"):
-                            yield Static("STREAM", classes="card_title")
-                            yield Static("Replay window", classes="field_label")
-                            yield Static("Recent event replay window.", classes="field_help")
-                            yield Input(placeholder="Replay window seconds", id="cfg_stream_replay", type="integer")
-                            yield Static("Idle heartbeat", classes="field_label")
-                            yield Static("Idle websocket heartbeat.", classes="field_help")
-                            yield Input(placeholder="Idle heartbeat seconds", id="cfg_stream_idle", type="integer")
-                        with Vertical(classes="card col"):
-                            yield Static("CODEX / HARNESS", classes="card_title")
-                            yield Static("Codex runtime", classes="field_label")
-                            yield Static("Codex CLI command.", classes="field_help")
-                            yield Input(placeholder="codex", id="cfg_codex_runtime_path")
-                            yield Static("Workspace root", classes="field_label")
-                            yield Static("Project/session root.", classes="field_help")
-                            yield Input(placeholder="/path/to/workspace", id="cfg_codex_workspace_root")
-                            yield Static("Harness mode", classes="field_label")
-                            yield Static("direct, omx, or custom.", classes="field_help")
-                            yield Input(placeholder="direct | omx | custom", id="cfg_codex_harness_mode")
-                            yield Static("Harness command", classes="field_label")
-                            yield Static("Wrapper command, e.g. omx.", classes="field_help")
-                            yield Input(placeholder="omx", id="cfg_codex_harness_command")
-                            yield Static("Harness args", classes="field_label")
-                            yield Static("Optional args before exec.", classes="field_help")
-                            yield Input(placeholder="--direct", id="cfg_codex_harness_args")
-                    yield Static("", id="settings_summary", classes="card")
-                    with Horizontal():
-                        yield Button("Save settings", id="save_settings", variant="success")
-                        yield Button("Reset form", id="reset_settings")
+                    yield Static("", id="cloudflare_output")
 
-            with TabPane("Sessions", id="sessions"):
-                with VerticalScroll():
-                    yield Static("Manage local Dexyd projects/sessions and inspect recent chat/diff.", classes="hero")
-                    with Horizontal(classes="two_col"):
-                        with Vertical(classes="card col"):
-                            yield Static("PROJECTS", classes="card_title")
+            with TabPane("Pair", id="pairing"):
+                with VerticalScroll(classes="page"):
+                    yield Static(
+                        "PAIR PHONE\n\nGenerate the QR only after Connection shows the URL you want to use. If you change LAN/domain/tunnel settings, generate a fresh QR.",
+                        classes="hero",
+                    )
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("PAIRING SETTINGS", classes="section_title")
+                            yield Static("Expiry seconds", classes="field_label")
+                            yield Static("Short-lived pairing challenge. 300 seconds is usually enough.", classes="field_help")
+                            yield Input(placeholder="300", id="pairing_expiry", type="integer", value="300")
+                            with Horizontal():
+                                yield Button("Generate pairing QR", id="generate_pairing", variant="success")
+                                yield Button("Clear", id="clear_qr")
+                        yield Static(
+                            "PAIRING CHECKLIST\n\n1. Connection tab: choose LAN, domain, or tunnel.\n2. Save connection if you changed host/port/public URL.\n3. Generate QR here.\n4. Scan from the mobile app.\n\nOld QR screenshots become stale after URL changes.",
+                            classes="soft_panel col",
+                        )
+                    yield Static("Generate a QR to pair the mobile app.", id="qr_output")
+
+            with TabPane("Work", id="sessions"):
+                with VerticalScroll(classes="page"):
+                    yield Static("WORKSPACES & SESSIONS\n\nCreate local helper sessions, inspect recent sessions, and view chat/diff snippets from the bridge side.", classes="hero")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("PROJECT", classes="section_title")
                             yield Static("Project path", classes="field_label")
-                            yield Static("Absolute path, or relative to the configured workspace root.", classes="field_help")
+                            yield Static("Absolute path or relative to the configured workspace root.", classes="field_help")
                             yield Input(placeholder="my-project or /home/me/project", id="project_path")
                             with Horizontal():
                                 yield Button("Create project", id="create_project", variant="success")
                                 yield Button("Refresh projects", id="refresh_projects")
                             yield Static("", id="project_output")
-                        with Vertical(classes="card col"):
-                            yield Static("SESSIONS", classes="card_title")
+                        with Vertical(classes="panel col"):
+                            yield Static("SESSION", classes="section_title")
                             yield Static("Session id", classes="field_label")
                             yield Input(placeholder="Session id to inspect/manage", id="chat_session_id")
                             yield Static("New session title", classes="field_label")
@@ -1197,32 +1180,88 @@ class DexydTextualApp(App[None]):
                                 yield Button("Create session", id="create_session", variant="success")
                                 yield Button("Set status", id="set_session_status")
                             with Horizontal():
-                                yield Button("Delete/hide session", id="delete_session", variant="error")
-                                yield Button("Dexyd chat", id="open_dexyd_chat")
+                                yield Button("Delete/hide", id="delete_session", variant="error")
+                                yield Button("Dexyd help chat", id="open_dexyd_chat")
                     with Horizontal():
                         yield Button("Refresh sessions", id="refresh_sessions", variant="primary")
                         yield Button("Show chat", id="show_chat")
                     yield Static("", id="session_output")
-                    yield Static("", id="chat_output", classes="card")
-                    yield Static("", id="diff_output", classes="card")
+                    yield Static("", id="chat_output")
+                    yield Static("", id="diff_output")
 
             with TabPane("Devices", id="devices"):
-                with VerticalScroll():
-                    yield Static("Trusted devices. Revoke from the mobile Security screen.", classes="hero")
+                with VerticalScroll(classes="page"):
+                    yield Static("TRUSTED DEVICES\n\nPhones paired with this bridge. Revoke from the mobile Security screen when a phone is lost or replaced.", classes="hero")
                     with Horizontal():
                         yield Button("Refresh devices", id="refresh_devices", variant="primary")
                     yield Static("", id="device_output")
 
+            with TabPane("Advanced", id="settings"):
+                with VerticalScroll(classes="page"):
+                    yield Static("ADVANCED SETTINGS\n\nLess common runtime, security, stream, and harness settings. Save here after editing, then restart the bridge/service.", classes="hero")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("SECURITY", classes="section_title")
+                            yield Static("Access token TTL", classes="field_label")
+                            yield Static("Short-lived mobile API token lifetime.", classes="field_help")
+                            yield Input(placeholder="900", id="cfg_auth_access_ttl", type="integer")
+                            yield Static("Refresh token TTL", classes="field_label")
+                            yield Static("Trusted device refresh lifetime.", classes="field_help")
+                            yield Input(placeholder="2592000", id="cfg_auth_refresh_ttl", type="integer")
+                            yield Static("Signing key", classes="field_label")
+                            yield Static("Minimum 16 characters. Changing it invalidates access tokens.", classes="field_help")
+                            yield Input(placeholder="Signing key", id="cfg_auth_signing_key", password=True)
+                        with Vertical(classes="panel col"):
+                            yield Static("STREAM", classes="section_title")
+                            yield Static("Replay window", classes="field_label")
+                            yield Static("How long recent events remain replayable after disconnects.", classes="field_help")
+                            yield Input(placeholder="600", id="cfg_stream_replay", type="integer")
+                            yield Static("Idle heartbeat", classes="field_label")
+                            yield Static("Idle websocket heartbeat seconds.", classes="field_help")
+                            yield Input(placeholder="50", id="cfg_stream_idle", type="integer")
+                            yield Static("Log level", classes="field_label")
+                            yield Static("fatal, error, warn, info, debug, or trace.", classes="field_help")
+                            yield Input(placeholder="info", id="cfg_server_log_level")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("CODEX / HARNESS", classes="section_title")
+                            yield Static("Codex runtime", classes="field_label")
+                            yield Static("Codex CLI command for direct mode.", classes="field_help")
+                            yield Input(placeholder="codex", id="cfg_codex_runtime_path")
+                            yield Static("Workspace root", classes="field_label")
+                            yield Static("Project/session root visible to paired devices.", classes="field_help")
+                            yield Input(placeholder="/path/to/workspace", id="cfg_codex_workspace_root")
+                            yield Static("Harness mode", classes="field_label")
+                            yield Static("direct, omx, or custom.", classes="field_help")
+                            yield Input(placeholder="direct | omx | custom", id="cfg_codex_harness_mode")
+                            yield Static("Harness command", classes="field_label")
+                            yield Static("Wrapper command, e.g. omx.", classes="field_help")
+                            yield Input(placeholder="omx", id="cfg_codex_harness_command")
+                            yield Static("Harness args", classes="field_label")
+                            yield Static("Optional args before exec.", classes="field_help")
+                            yield Input(placeholder="--profile mobile", id="cfg_codex_harness_args")
+                        yield Static("", id="settings_summary", classes="panel col")
+                    with Horizontal():
+                        yield Button("Save advanced settings", id="save_settings", variant="success")
+                        yield Button("Reset form", id="reset_settings")
+
             with TabPane("Help", id="help"):
-                with VerticalScroll():
+                with VerticalScroll(classes="page"):
                     yield Static(
-                        "DEXYD QUICK HELP\n\n"
-                        "Open this TUI:\n  dexyd --tui\n\n"
-                        "Run bridge only:\n  dexyd\n  npm run dev\n\n"
-                        "Pairing path:\n  TUI Pairing tab → Generate QR → mobile Pairing screen → Scan QR\n\n"
-                        "Cloudflare path:\n  Bridge config tab → enter hostname → Auto named setup → generate a new pairing QR.\n\n"
-                        "Keyboard:\n  q = quit, r = refresh current dashboard/device data",
-                        classes="card",
+                        "DEXYD HELP\n\n"
+                        "Recommended setup:\n"
+                        "  1. Connection: choose LAN/domain/Cloudflare and save.\n"
+                        "  2. Pair: generate a fresh QR and scan it in the mobile app.\n"
+                        "  3. Work: verify sessions/projects are visible.\n\n"
+                        "Commands:\n"
+                        "  dexyd --tui          open this console\n"
+                        "  dexyd                run bridge in foreground\n"
+                        "  systemctl --user status dexyd.service\n\n"
+                        "Keyboard:\n"
+                        "  r refresh · q quit\n\n"
+                        "Safety:\n"
+                        "  Pairing QRs are short-lived. Regenerate after changing URLs. Keep workspaceRoot scoped to files you trust paired devices to access.",
+                        classes="panel",
                     )
 
         yield Static("Ready", id="status_line")
@@ -1334,7 +1373,7 @@ class DexydTextualApp(App[None]):
         next_steps = (
             "ACTIONS\n\n"
             "Pair → generate QR\n"
-            "Bridge config → autostart/tunnel\n"
+            "Connection → bridge/tunnel/autostart\n"
             "Sessions → inspect chat"
         )
         self.query_one("#dashboard_hero", Static).update(hero)
@@ -1751,11 +1790,12 @@ class DexydTextualApp(App[None]):
                 self.set_status(f"Session {'deleted' if deleted else 'hidden'}: {session_id} ({'hidden' if hidden else 'visible'})")
             elif button_id == "open_dexyd_chat":
                 self.open_dexyd_help_session()
-            elif button_id == "save_settings":
+            elif button_id in {"save_settings", "save_connection"}:
                 self._save_settings()
                 self.refresh_dashboard()
                 self.refresh_settings_summary()
-                self.set_status("Settings saved. Restart bridge to apply runtime changes.")
+                self.refresh_bridge_config_status()
+                self.set_status("Settings saved. Restart bridge/service to apply runtime changes.")
             elif button_id == "reset_settings":
                 self._load_settings_inputs()
                 self.set_status("Settings form reset")

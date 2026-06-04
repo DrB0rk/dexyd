@@ -1467,13 +1467,34 @@ function ChatScreen({
   const latestButtonVisibleRef = useRef(false);
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
-  const composerSpacer = composerHeight + keyboardLift + 12;
   const usageBlockMessage = usageSendBlockMessage(usage);
   const renderedMessages = useMemo(
     () =>
       chat.messages.filter(message => message.status !== 'queued').reverse(),
     [chat.messages],
   );
+  const promptDiffTurnIds = useMemo(() => {
+    const assistantCompletedTurns = new Set(
+      chat.messages
+        .filter(
+          message =>
+            message.role === 'assistant' &&
+            message.status === 'sent' &&
+            Boolean(message.turnId),
+        )
+        .map(message => message.turnId),
+    );
+    return new Set(
+      chat.messages
+        .filter(
+          message =>
+            message.role === 'user' &&
+            message.status === 'sent' &&
+            assistantCompletedTurns.has(message.turnId),
+        )
+        .map(message => message.turnId),
+    );
+  }, [chat.messages]);
 
   const setLatestButtonVisible = useCallback((visible: boolean) => {
     if (latestButtonVisibleRef.current === visible) return;
@@ -1546,6 +1567,8 @@ function ChatScreen({
     activeSession,
     chat.sending,
   );
+  const workingStateReserve = workingInfo ? 62 : 0;
+  const composerSpacer = composerHeight + keyboardLift + 12 + workingStateReserve;
 
   const send = async () => {
     const message = text.trim();
@@ -1633,9 +1656,9 @@ function ChatScreen({
           <MessageRow
             message={item}
             showDiffButton={
-              item.role === 'assistant' &&
+              item.role === 'user' &&
               item.status === 'sent' &&
-              Boolean(item.turnId)
+              promptDiffTurnIds.has(item.turnId)
             }
             diffLoading={
               diff.loading && diff.loadingTurnId === item.turnId
@@ -2199,7 +2222,7 @@ const MessageRow = React.memo(function MessageRow({
       {showDiffButton ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="View changed code diff"
+          accessibilityLabel="View code diff for this prompt"
           onPress={onViewDiff}
           disabled={diffLoading}
           style={({ pressed }) => [
@@ -2210,7 +2233,7 @@ const MessageRow = React.memo(function MessageRow({
           ]}
         >
           <Text style={styles.diffButtonText}>
-            {diffLoading ? 'Loading diff…' : 'View message diff'}
+            {diffLoading ? 'Loading diff…' : 'View prompt diff'}
           </Text>
         </Pressable>
       ) : null}
