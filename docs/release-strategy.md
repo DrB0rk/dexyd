@@ -76,11 +76,11 @@ v0.0.2-b
 
 Current artifact focus:
 
-- Android release APK attached to published GitHub Releases.
+- Android APK manually attached to published GitHub Releases.
 - Source archive.
 - Documentation.
 
-The GitHub Actions APK workflow runs only when a GitHub Release is published. It does not build APKs for branch pushes, pull requests, or tag pushes by themselves. A published beta release such as `v0.0.2-b` should produce an attached APK named like `dexyd-v0.0.2-b.apk`.
+APKs are built locally by the maintainer and uploaded to the GitHub Release. Published releases should include an APK named like `dexyd-v0.0.2.apk` or `dexyd-v0.0.2-b.apk`.
 
 Planned/future:
 
@@ -100,7 +100,7 @@ Planned/future:
 8. Test beta against LAN and selected remote mode.
 9. For stable releases, promote `beta` to `main`. For beta releases, keep the release target on `beta`.
 10. Create and publish GitHub Release `vX.Y.Z` or prerelease `vX.Y.Z-b`.
-11. Confirm the release workflow built and attached `dexyd-vX.Y.Z.apk` or `dexyd-vX.Y.Z-b.apk`.
+11. Manually upload `dexyd-vX.Y.Z.apk` or `dexyd-vX.Y.Z-b.apk` to the GitHub Release.
 
 ## Rollback strategy
 

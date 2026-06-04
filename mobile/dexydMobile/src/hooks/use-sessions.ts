@@ -48,6 +48,27 @@ function mergeSession(
   );
 }
 
+function patchSessionActivity(
+  items: DexydSession[],
+  sessionId: string,
+  status: DexydSession['status'],
+): DexydSession[] {
+  const now = new Date().toISOString();
+  const found = items.some(session => session.id === sessionId);
+  if (!found) return items;
+  return items
+    .map(session =>
+      session.id === sessionId
+        ? {
+            ...session,
+            status,
+            updatedAt: now,
+          }
+        : session,
+    )
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
 export function useSessions(
   bridgeUrl: string,
   tokens: AuthTokens | null,
@@ -223,33 +244,60 @@ export function useSessions(
       isDexydSession(lastEvent.payload)
     ) {
       const next = lastEvent.payload;
-      setSessions(current => mergeSession(current, next));
-      AsyncStorage.setItem(
-        cacheKeyForBridge(bridgeUrl),
-        JSON.stringify(mergeSession(sessions, next).slice(0, 100)),
-      ).catch(() => undefined);
+      setSessions(current => {
+        const merged = mergeSession(current, next);
+        AsyncStorage.setItem(
+          cacheKeyForBridge(bridgeUrl),
+          JSON.stringify(merged.slice(0, 100)),
+        ).catch(() => undefined);
+        return merged;
+      });
       return;
     }
     if (lastEvent.eventType === 'session.deleted' && lastEvent.sessionId) {
-      const next = sessions.filter(
-        session => session.id !== lastEvent.sessionId,
-      );
-      setSessions(next);
-      AsyncStorage.setItem(
-        cacheKeyForBridge(bridgeUrl),
-        JSON.stringify(next.slice(0, 100)),
-      ).catch(() => undefined);
+      setSessions(current => {
+        const next = current.filter(
+          session => session.id !== lastEvent.sessionId,
+        );
+        AsyncStorage.setItem(
+          cacheKeyForBridge(bridgeUrl),
+          JSON.stringify(next.slice(0, 100)),
+        ).catch(() => undefined);
+        return next;
+      });
+      return;
+    }
+    if (
+      (lastEvent.eventType === 'chat.turn.started' ||
+        lastEvent.eventType === 'chat.output.delta') &&
+      lastEvent.sessionId
+    ) {
+      setSessions(current => {
+        const next = patchSessionActivity(
+          current,
+          lastEvent.sessionId!,
+          'running',
+        );
+        AsyncStorage.setItem(
+          cacheKeyForBridge(bridgeUrl),
+          JSON.stringify(next.slice(0, 100)),
+        ).catch(() => undefined);
+        return next;
+      });
+      if (lastEvent.eventType === 'chat.turn.started') {
+        refresh({ silent: true }).catch(() => undefined);
+      }
       return;
     }
     if (
       lastEvent.eventType === 'session.created' ||
-      lastEvent.eventType === 'chat.turn.started' ||
+      lastEvent.eventType === 'chat.message.assistant' ||
       lastEvent.eventType === 'chat.turn.failed' ||
       lastEvent.eventType === 'chat.turn.cancelled'
     ) {
       refresh({ silent: true }).catch(() => undefined);
     }
-  }, [bridgeUrl, lastEvent, refresh, sessions, tokens]);
+  }, [bridgeUrl, lastEvent, refresh, tokens]);
 
   return {
     sessions,

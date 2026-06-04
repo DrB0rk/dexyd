@@ -4,8 +4,8 @@ import { EventEnvelope } from '../types/dexyd';
 
 type SocketState = 'idle' | 'connecting' | 'open' | 'polling' | 'closed' | 'error';
 
-const MAX_RECONNECT_ATTEMPTS = 8;
 const POLL_INTERVAL_MS = 2500;
+const MAX_RECONNECT_DELAY_MS = 15000;
 
 type ReplayResponse = {
   events: EventEnvelope[];
@@ -26,14 +26,36 @@ export function useBridgeStream(
   const lastSeenSequenceRef = useRef(0);
   const reconnectAttemptsRef = useRef(0);
   const pollingRef = useRef(false);
+  const onUnauthorizedRef = useRef(onUnauthorized);
 
   useEffect(() => {
-    if (!accessToken || !wsBaseUrl.trim() || !httpBaseUrl.trim()) {
+    onUnauthorizedRef.current = onUnauthorized;
+  }, [onUnauthorized]);
+
+  useEffect(() => {
+    if (!accessToken) {
       setSocketState('idle');
       setLastEvent(null);
       setSocketError(null);
       lastSeenSequenceRef.current = 0;
       reconnectAttemptsRef.current = 0;
+      pollingRef.current = false;
+      return;
+    }
+
+    if (!httpBaseUrl.trim()) {
+      setSocketState('error');
+      setSocketError('Bridge URL is not configured. Re-pair or choose a bridge profile.');
+      pollingRef.current = false;
+      return;
+    }
+
+    let normalizedHttpUrl = '';
+    try {
+      normalizedHttpUrl = normalizeBridgeHttpUrl(httpBaseUrl);
+    } catch (err) {
+      setSocketState('error');
+      setSocketError(err instanceof Error ? err.message : 'Bridge URL is invalid.');
       pollingRef.current = false;
       return;
     }
@@ -48,13 +70,13 @@ export function useBridgeStream(
 
       try {
         const response = await fetch(
-          `${normalizeBridgeHttpUrl(httpBaseUrl)}/events/replay?lastSeenSequence=${lastSeenSequenceRef.current}`,
+          `${normalizedHttpUrl}/events/replay?lastSeenSequence=${lastSeenSequenceRef.current}`,
           { headers: { Authorization: `Bearer ${accessToken}` } }
         );
 
         if (response.status === 401) {
           setSocketError('Realtime polling unauthorized. Refreshing credentials…');
-          onUnauthorized?.();
+          onUnauthorizedRef.current?.();
           return;
         }
 
@@ -93,13 +115,13 @@ export function useBridgeStream(
 
     const scheduleReconnect = (reason: string) => {
       startPollingFallback();
-      if (closedByCleanup || reconnectScheduled || reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      if (closedByCleanup || reconnectScheduled) {
         return;
       }
 
       reconnectScheduled = true;
       reconnectAttemptsRef.current += 1;
-      const delayMs = Math.min(1000 * 2 ** (reconnectAttemptsRef.current - 1), 10000);
+      const delayMs = Math.min(1000 * 2 ** (reconnectAttemptsRef.current - 1), MAX_RECONNECT_DELAY_MS);
       if (reconnectAttemptsRef.current >= 3) {
         setSocketError(`${reason} Using HTTP polling; retrying socket in ${Math.round(delayMs / 1000)}s…`);
       }
@@ -107,6 +129,16 @@ export function useBridgeStream(
     };
 
     setSocketState('connecting');
+
+    if (!wsBaseUrl.trim()) {
+      startPollingFallback();
+      return () => {
+        closedByCleanup = true;
+        pollingRef.current = false;
+        if (retryTimer) clearTimeout(retryTimer);
+        if (pollTimer) clearTimeout(pollTimer);
+      };
+    }
 
     const separator = wsBaseUrl.includes('?') ? '&' : '?';
     const wsUrl = `${wsBaseUrl}${separator}access_token=${encodeURIComponent(accessToken)}`;
@@ -129,7 +161,7 @@ export function useBridgeStream(
 
       if (event.code === 4401) {
         setSocketError('Realtime unauthorized. Refreshing credentials…');
-        onUnauthorized?.();
+        onUnauthorizedRef.current?.();
         return;
       }
 
@@ -162,7 +194,7 @@ export function useBridgeStream(
       if (pollTimer) clearTimeout(pollTimer);
       socket.close(1000, 'client reconnect/reset');
     };
-  }, [accessToken, httpBaseUrl, onUnauthorized, retryNonce, wsBaseUrl]);
+  }, [accessToken, httpBaseUrl, retryNonce, wsBaseUrl]);
 
   return useMemo(
     () => ({

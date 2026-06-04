@@ -63,7 +63,7 @@ Dexyd should be a small, robust, security-minded mobile control surface for loca
 
 - Linux installer with XDG app-directory deployment, service setup, verification, and clean removal.
 - Android all-in-one build/run script.
-- Android APK workflow that runs only for published GitHub Releases.
+- Manual Android APK build/upload process for releases.
 - Initial iOS native target.
 - End-user README.
 - Expanded docs set.

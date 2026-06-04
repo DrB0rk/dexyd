@@ -212,7 +212,7 @@ export function useAuth(
         tokensByBridge,
       });
 
-      if (key === bridgeKey) {
+      if (next || key === bridgeKey) {
         setState(next);
       }
     },
