@@ -6,4 +6,9 @@
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
     </style>
 
+    <style name="DexydNoDisplayTheme" parent="android:style/Theme.NoDisplay">
+        <item name="android:windowNoDisplay">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
+
 </resources>

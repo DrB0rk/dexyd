@@ -33,6 +33,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { getHealth, respondToInteraction } from './src/api/dexyd-client';
 import { useAppUpdater } from './src/hooks/use-app-updater';
+import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
@@ -117,11 +118,22 @@ type SystemNotification = {
   timestamp: string;
   sessionId: string | null;
 };
+type NotificationSettings = {
+  inApp: boolean;
+  system: boolean;
+  responses: boolean;
+  promptFinished: boolean;
+  approvals: boolean;
+  questions: boolean;
+  usage: boolean;
+  alerts: boolean;
+};
 type SettingsPaneKey =
   | 'connection'
   | 'pairing'
   | 'account'
   | 'security'
+  | 'notifications'
   | 'workspace'
   | 'history'
   | 'updates'
@@ -138,6 +150,17 @@ type SettingsPane = {
 const ONBOARDING_DISMISSED_KEY = 'dexyd.onboarding.dismissed.v1';
 const ADDED_PROJECTS_KEY = 'dexyd.projects.added.v1';
 const REMOVED_PROJECTS_KEY = 'dexyd.projects.removed.v1';
+const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
+const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  inApp: true,
+  system: true,
+  responses: true,
+  promptFinished: true,
+  approvals: true,
+  questions: true,
+  usage: true,
+  alerts: true,
+};
 
 function keyboardDockHeight(event: KeyboardEvent): number {
   const frame = event.endCoordinates;
@@ -189,6 +212,10 @@ export default function App() {
   const [addedProjects, setAddedProjects] = useState<ProjectOption[]>([]);
   const [removedProjectPaths, setRemovedProjectPaths] = useState<string[]>([]);
   const [errorHistory, setErrorHistory] = useState<ErrorHistoryItem[]>([]);
+  const [notificationSettings, setNotificationSettings] =
+    useState<NotificationSettings>(DEFAULT_NOTIFICATION_SETTINGS);
+  const [systemNotificationsEnabled, setSystemNotificationsEnabled] =
+    useState(false);
   const [transientSession, setTransientSession] = useState<DexydSession | null>(
     null,
   );
@@ -245,6 +272,54 @@ export default function App() {
       .then(value => setOnboardingDismissed(value === 'true'))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    AsyncStorage.getItem(NOTIFICATION_SETTINGS_KEY)
+      .then(raw => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as Partial<NotificationSettings>;
+        setNotificationSettings({
+          ...DEFAULT_NOTIFICATION_SETTINGS,
+          ...parsed,
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const refreshSystemNotificationPermission = useCallback(async () => {
+    if (!DexydNotifications.available) {
+      setSystemNotificationsEnabled(false);
+      return false;
+    }
+    const enabled = await DexydNotifications.areEnabled();
+    setSystemNotificationsEnabled(enabled);
+    return enabled;
+  }, []);
+
+  useEffect(() => {
+    refreshSystemNotificationPermission().catch(() => undefined);
+  }, [refreshSystemNotificationPermission]);
+
+  const updateNotificationSetting = useCallback(
+    (key: keyof NotificationSettings, value: boolean) => {
+      setNotificationSettings(current => {
+        const next = { ...current, [key]: value };
+        AsyncStorage.setItem(
+          NOTIFICATION_SETTINGS_KEY,
+          JSON.stringify(next),
+        ).catch(() => undefined);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const requestSystemNotifications = useCallback(async () => {
+    const enabled = await DexydNotifications.requestPermission();
+    setSystemNotificationsEnabled(enabled);
+    return enabled;
+  }, []);
+
 
   useEffect(() => {
     Promise.all([
@@ -432,6 +507,10 @@ export default function App() {
   const notify = useCallback(
     (input: Omit<SystemNotification, 'timestamp'> & { timestamp?: string }) => {
       const timestamp = input.timestamp ?? new Date().toISOString();
+      const notification = {
+        ...input,
+        timestamp,
+      };
       if (input.kind === 'alert' || input.kind === 'usage') {
         addErrorHistory({
           level:
@@ -444,12 +523,23 @@ export default function App() {
           timestamp,
         });
       }
-      setSystemNotification({
-        ...input,
-        timestamp,
-      });
+      if (notificationSettings.inApp) {
+        setSystemNotification(notification);
+      }
+      if (
+        notificationSettings.system &&
+        systemNotificationsEnabled &&
+        shouldSendSystemNotification(notification, notificationSettings)
+      ) {
+        DexydNotifications.show({
+          title: notification.title,
+          body: notification.body || notification.title,
+          kind: notification.kind,
+          sessionId: notification.sessionId,
+        }).catch(() => undefined);
+      }
     },
-    [addErrorHistory],
+    [addErrorHistory, notificationSettings, systemNotificationsEnabled],
   );
 
   useEffect(() => {
@@ -894,6 +984,16 @@ export default function App() {
                 usage={usage}
                 codexAuth={codexAuth}
                 appUpdater={appUpdater}
+                notificationSettings={notificationSettings}
+                systemNotificationsEnabled={systemNotificationsEnabled}
+                onNotificationSettingChange={updateNotificationSetting}
+                onRequestSystemNotifications={requestSystemNotifications}
+                onOpenSystemNotificationSettings={() =>
+                  DexydNotifications.openSettings().catch(() => undefined)
+                }
+                onRefreshSystemNotificationPermission={
+                  refreshSystemNotificationPermission
+                }
                 errorHistory={errorHistory}
                 onClearErrorHistory={() => setErrorHistory([])}
                 onFullReset={async () => {
@@ -3173,6 +3273,12 @@ function SettingsScreen({
   usage,
   codexAuth,
   appUpdater,
+  notificationSettings,
+  systemNotificationsEnabled,
+  onNotificationSettingChange,
+  onRequestSystemNotifications,
+  onOpenSystemNotificationSettings,
+  onRefreshSystemNotificationPermission,
   errorHistory,
   onClearErrorHistory,
   onFullReset,
@@ -3190,6 +3296,12 @@ function SettingsScreen({
   usage: ReturnType<typeof useUsageStatus>;
   codexAuth: ReturnType<typeof useCodexAuth>;
   appUpdater: ReturnType<typeof useAppUpdater>;
+  notificationSettings: NotificationSettings;
+  systemNotificationsEnabled: boolean;
+  onNotificationSettingChange: (key: keyof NotificationSettings, value: boolean) => void;
+  onRequestSystemNotifications: () => Promise<boolean>;
+  onOpenSystemNotificationSettings: () => void;
+  onRefreshSystemNotificationPermission: () => Promise<boolean>;
   errorHistory: ErrorHistoryItem[];
   onClearErrorHistory: () => void;
   onFullReset: () => Promise<void>;
@@ -3317,6 +3429,20 @@ function SettingsScreen({
           }`
         : 'not paired',
       tone: auth.auth ? 'ok' : 'idle',
+    },
+    {
+      key: 'notifications',
+      icon: '◌',
+      title: 'Notifications',
+      subtitle: 'In-app and Android system notification behavior.',
+      detail: notificationSettings.system
+        ? systemNotificationsEnabled
+          ? 'system enabled'
+          : 'permission needed'
+        : notificationSettings.inApp
+        ? 'in-app only'
+        : 'disabled',
+      tone: notificationSettings.system && !systemNotificationsEnabled ? 'warn' : 'ok',
     },
     {
       key: 'workspace',
@@ -3599,6 +3725,113 @@ function SettingsScreen({
                 ))
               )
             ) : null}
+          </SettingsSection>
+        );
+
+      case 'notifications':
+        return (
+          <SettingsSection
+            title="Notifications"
+            subtitle="Choose which Dexyd events show in-app or as Android notifications."
+          >
+            <StatusRow
+              label="Android"
+              value={
+                DexydNotifications.available
+                  ? systemNotificationsEnabled
+                    ? 'allowed'
+                    : 'permission needed'
+                  : 'not available'
+              }
+              tone={
+                !DexydNotifications.available
+                  ? 'idle'
+                  : systemNotificationsEnabled
+                  ? 'ok'
+                  : 'warn'
+              }
+            />
+            <ToggleRow
+              label="In-app banners"
+              value={notificationSettings.inApp}
+              onValueChange={value =>
+                onNotificationSettingChange('inApp', value)
+              }
+              detail="Brief banners at the top of Dexyd."
+            />
+            <ToggleRow
+              label="Android notifications"
+              value={notificationSettings.system}
+              onValueChange={value =>
+                onNotificationSettingChange('system', value)
+              }
+              detail="System notifications when Android permission is allowed."
+            />
+            <ToggleRow
+              label="Prompt finished"
+              value={notificationSettings.promptFinished}
+              onValueChange={value =>
+                onNotificationSettingChange('promptFinished', value)
+              }
+              detail="Notify when an agent finishes the current prompt."
+            />
+            <ToggleRow
+              label="Agent messages"
+              value={notificationSettings.responses}
+              onValueChange={value =>
+                onNotificationSettingChange('responses', value)
+              }
+              detail="Notify for new assistant responses."
+            />
+            <ToggleRow
+              label="Approvals"
+              value={notificationSettings.approvals}
+              onValueChange={value =>
+                onNotificationSettingChange('approvals', value)
+              }
+              detail="Notify when the agent needs approval."
+            />
+            <ToggleRow
+              label="Questions"
+              value={notificationSettings.questions}
+              onValueChange={value =>
+                onNotificationSettingChange('questions', value)
+              }
+              detail="Notify for multiple-choice or text questions."
+            />
+            <ToggleRow
+              label="Usage and alerts"
+              value={notificationSettings.usage && notificationSettings.alerts}
+              onValueChange={value => {
+                onNotificationSettingChange('usage', value);
+                onNotificationSettingChange('alerts', value);
+              }}
+              detail="Notify for usage thresholds and connection/security alerts."
+            />
+            <View style={styles.settingsActions}>
+              <TextButton
+                label={systemNotificationsEnabled ? 'Permission OK' : 'Allow notifications'}
+                variant="primary"
+                disabled={!DexydNotifications.available}
+                onPress={() =>
+                  onRequestSystemNotifications().catch(() => undefined)
+                }
+              />
+              <TextButton
+                label="Android settings"
+                disabled={!DexydNotifications.available}
+                onPress={onOpenSystemNotificationSettings}
+              />
+              <TextButton
+                label="Refresh"
+                onPress={() =>
+                  onRefreshSystemNotificationPermission().catch(() => undefined)
+                }
+              />
+            </View>
+            <Text style={styles.settingHint}>
+              Android may still suppress notifications if app notifications are disabled in system settings or Do Not Disturb is active.
+            </Text>
           </SettingsSection>
         );
 
@@ -4383,6 +4616,20 @@ function notificationFromAttention(item: AttentionItem): SystemNotification {
     timestamp: item.timestamp,
     sessionId: item.sessionId,
   };
+}
+
+
+function shouldSendSystemNotification(
+  notification: SystemNotification,
+  settings: NotificationSettings,
+): boolean {
+  const title = notification.title.toLowerCase();
+  if (title.includes('prompt finished')) return settings.promptFinished;
+  if (notification.kind === 'approval') return settings.approvals;
+  if (notification.kind === 'question') return settings.questions;
+  if (notification.kind === 'usage') return settings.usage;
+  if (notification.kind === 'alert') return settings.alerts;
+  return settings.responses;
 }
 
 function notificationIcon(kind: SystemNotificationKind): string {

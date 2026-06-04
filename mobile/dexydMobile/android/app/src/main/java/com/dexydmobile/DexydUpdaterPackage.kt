@@ -11,7 +11,7 @@ import com.facebook.react.uimanager.ViewManager
 class DexydUpdaterPackage : ReactPackage {
   @Suppress("DEPRECATION")
   override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
-    listOf(DexydUpdaterModule(reactContext))
+    listOf(DexydUpdaterModule(reactContext), DexydNotificationsModule(reactContext))
 
   @Suppress("DEPRECATION")
   override fun createViewManagers(

@@ -120,11 +120,11 @@ class DexydUpdaterModule(
             }
           }
 
-          val callback = Intent(reactContext, DexydInstallReceiver::class.java).apply {
-            action = DexydInstallReceiver.ACTION_INSTALL_COMMIT
-            putExtra(DexydInstallReceiver.EXTRA_APK_NAME, safeFileName)
+          val callback = Intent(reactContext, DexydInstallActivity::class.java).apply {
+            action = DexydInstallActivity.ACTION_INSTALL_COMMIT
+            putExtra(DexydInstallActivity.EXTRA_APK_NAME, safeFileName)
           }
-          val pendingIntent = PendingIntent.getBroadcast(
+          val pendingIntent = PendingIntent.getActivity(
             reactContext,
             sessionId,
             callback,
