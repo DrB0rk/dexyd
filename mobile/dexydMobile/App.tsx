@@ -154,12 +154,12 @@ const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
   system: true,
-  responses: true,
+  responses: false,
   promptFinished: true,
-  approvals: true,
-  questions: true,
+  approvals: false,
+  questions: false,
   usage: true,
-  alerts: true,
+  alerts: false,
 };
 
 function keyboardDockHeight(event: KeyboardEvent): number {
@@ -556,13 +556,6 @@ export default function App() {
             : item,
         ),
       );
-      notify({
-        id: `interaction-response-${response.requestId}`,
-        kind: 'response',
-        title: 'Response sent',
-        body: response.label,
-        sessionId: null,
-      });
       return;
     }
 
@@ -574,27 +567,34 @@ export default function App() {
         50,
       ),
     );
-    notify(notificationFromAttention(item));
+    if (item.kind === 'update' && item.title.toLowerCase().includes('prompt finished')) {
+      notify(notificationFromAttention(item));
+    }
   }, [notify, sessions.sessions, stream.lastEvent]);
 
   useEffect(() => {
-    if (!stream.socketError) return;
+    if (!stream.socketError) {
+      if (stream.socketState === 'open') {
+        lastErrorNotificationRef.current = null;
+      }
+      return;
+    }
+    const pollingFallbackHealthy =
+      stream.socketState === 'polling' &&
+      !stream.socketError.toLowerCase().includes('polling also failed');
+    if (stream.socketState === 'open' || pollingFallbackHealthy) {
+      return;
+    }
     const key = `${stream.socketState}-${stream.socketError}`;
     addErrorHistory({
       level: 'error',
       title: 'Realtime alert',
       body: stream.socketError,
     });
-    if (lastErrorNotificationRef.current === key) return;
-    lastErrorNotificationRef.current = key;
-    notify({
-      id: `socket-${key}`,
-      kind: 'alert',
-      title: 'Realtime alert',
-      body: stream.socketError,
-      sessionId: null,
-    });
-  }, [addErrorHistory, notify, stream.socketError, stream.socketState]);
+    if (lastErrorNotificationRef.current !== key) {
+      lastErrorNotificationRef.current = key;
+    }
+  }, [addErrorHistory, stream.socketError, stream.socketState]);
 
   useEffect(() => {
     const current = usage.usage;
@@ -631,19 +631,10 @@ export default function App() {
       account5hUsageRef.current.set(key, sample);
       if (!previous || !isFiveHourLimitRefresh(previous, sample)) continue;
 
-      notify({
-        id: `account-5h-refreshed-${key}-${Math.round(
-          sample.remainingPercent,
-        )}`,
-        kind: 'usage',
-        title: '5h usage refreshed',
-        body: `${account.label} has ${Math.round(
-          sample.remainingPercent,
-        )}% 5h usage available again.`,
-        sessionId: null,
-      });
+      // Keep this state for diagnostics, but do not notify: the app only
+      // notifies for usage limit thresholds and completed prompts.
     }
-  }, [codexAuth.status, notify]);
+  }, [codexAuth.status]);
 
   const refreshCodexSessions = useCallback(async () => {
     if (!tokens) {
@@ -4633,11 +4624,8 @@ function shouldSendSystemNotification(
 ): boolean {
   const title = notification.title.toLowerCase();
   if (title.includes('prompt finished')) return settings.promptFinished;
-  if (notification.kind === 'approval') return settings.approvals;
-  if (notification.kind === 'question') return settings.questions;
   if (notification.kind === 'usage') return settings.usage;
-  if (notification.kind === 'alert') return settings.alerts;
-  return settings.responses;
+  return false;
 }
 
 function notificationIcon(kind: SystemNotificationKind): string {

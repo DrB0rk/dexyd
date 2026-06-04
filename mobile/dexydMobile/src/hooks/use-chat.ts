@@ -57,6 +57,15 @@ function isDexydPromptEnvelope(text: string): boolean {
   );
 }
 
+function normalizeChatMessageForDisplay(message: ChatMessage): ChatMessage | null {
+  const content =
+    message.role === 'user'
+      ? normalizeDisplayUserContent(message.content)
+      : stripEnvironmentContextBlocks(message.content);
+  if (!content) return null;
+  return content === message.content ? message : { ...message, content };
+}
+
 function eventToMessage(event: EventEnvelope): ChatMessage | null {
   if (!event.eventType.startsWith('chat.')) return null;
   const payload = (event.payload ?? {}) as Record<string, unknown>;
@@ -490,9 +499,10 @@ export function mergeFetchedChatMessages(
   activeQueueIds?: Set<string>,
   existingMessages: ChatMessage[] = [],
 ): ChatMessage[] {
-  const incoming = [...items, ...pendingUserMessages].map(message =>
-    preserveStableMessageFields(message, existingMessages),
-  );
+  const incoming = [...items, ...pendingUserMessages]
+    .map(normalizeChatMessageForDisplay)
+    .filter((message): message is ChatMessage => message !== null)
+    .map(message => preserveStableMessageFields(message, existingMessages));
   const incomingKeys = new Set(incoming.map(chatMessageKey));
   const transientExisting = existingMessages.filter(
     message =>
@@ -511,6 +521,8 @@ export function mergeFetchedChatMessages(
 
 export function visibleChatMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages
+    .map(normalizeChatMessageForDisplay)
+    .filter((message): message is ChatMessage => message !== null)
     .filter(message => message.status !== 'queued' && message.role !== 'tool')
     .slice()
     .reverse();
@@ -664,9 +676,12 @@ export function useChat(
           ),
         );
       } catch (err) {
+        if (requestId !== refreshRequestRef.current) return;
         setError(errorMessage(err, 'failed to load chat'));
       } finally {
-        if (!silent) setLoading(false);
+        if (requestId === refreshRequestRef.current && !silent) {
+          setLoading(false);
+        }
       }
     },
     [bridgeUrl, sessionId, tokens],
@@ -675,24 +690,51 @@ export function useChat(
   const send = useCallback(
     async (message: string, sessionOverride?: string) => {
       const targetSessionId = sessionOverride ?? sessionId;
-      if (!tokens || !targetSessionId || !message.trim()) return false;
+      const content = normalizeDisplayUserContent(message);
+      if (!tokens || !targetSessionId || !content) return false;
+      const optimistic: ChatMessage = {
+        id: `local-user-${Date.now()}`,
+        turnId: `local-${Date.now()}`,
+        role: 'user',
+        content,
+        createdAt: new Date().toISOString(),
+        sequence: Date.now(),
+        status: 'sent',
+      };
+      pendingUserMessagesRef.current = dedupeMessages([
+        ...pendingUserMessagesRef.current,
+        optimistic,
+      ]).filter(item => item.role === 'user');
+      setMessages(current =>
+        nextChatMessages(current, mergeMessage(current, optimistic)),
+      );
       setSending(true);
       setError(null);
       try {
         const response = await sendChatMessage(
           bridgeUrl,
           targetSessionId,
-          message.trim(),
+          content,
           tokens,
         );
         const sent = eventToMessage(response.userEvent);
         if (sent) {
+          pendingUserMessagesRef.current =
+            pendingUserMessagesRef.current.filter(
+              item => item.id !== optimistic.id,
+            );
           if (sent.status === 'queued') {
             const queued = eventToQueuedMessage(response.userEvent);
             if (queued)
               setQueuedMessages(current =>
                 mergeQueuedMessages(current, queued),
               );
+            setMessages(current =>
+              nextChatMessages(
+                current,
+                current.filter(item => item.id !== optimistic.id),
+              ),
+            );
           } else {
             pendingUserMessagesRef.current = dedupeMessages([
               ...pendingUserMessagesRef.current,
@@ -700,11 +742,27 @@ export function useChat(
             ]).filter(item => item.role === 'user');
           }
           setMessages(current =>
-            nextChatMessages(current, mergeMessage(current, sent)),
+            nextChatMessages(
+              current,
+              mergeMessage(
+                current.filter(item => item.id !== optimistic.id),
+                sent,
+              ),
+            ),
           );
         }
         return true;
       } catch (err) {
+        pendingUserMessagesRef.current =
+          pendingUserMessagesRef.current.filter(
+            item => item.id !== optimistic.id,
+          );
+        setMessages(current =>
+          nextChatMessages(
+            current,
+            current.filter(item => item.id !== optimistic.id),
+          ),
+        );
         setError(errorMessage(err, 'failed to send message'));
         return false;
       } finally {

@@ -157,6 +157,40 @@ describe('mergeFetchedChatMessages', () => {
       'assistant:Fixed.',
     ]);
   });
+
+  it('drops environment-context-only transcript rows', () => {
+    const environmentOnly = [
+      '<environment_context>',
+      '  <current_date>2026-06-04</current_date>',
+      '  <timezone>Europe/Amsterdam</timezone>',
+      '</environment_context>',
+    ].join('\n');
+
+    const merged = mergeFetchedChatMessages(
+      [
+        message({
+          id: 'environment-row',
+          role: 'user',
+          content: environmentOnly,
+          sequence: 1,
+        }),
+        message({
+          id: 'real-user',
+          role: 'user',
+          content: 'Only this should show.',
+          sequence: 2,
+        }),
+      ],
+      [],
+    );
+
+    expect(merged.map(item => item.content)).toEqual([
+      'Only this should show.',
+    ]);
+    expect(visibleChatMessages(merged).map(item => item.content)).toEqual([
+      'Only this should show.',
+    ]);
+  });
 });
 
 
