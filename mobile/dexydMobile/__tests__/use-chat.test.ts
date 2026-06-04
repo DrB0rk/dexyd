@@ -1,5 +1,7 @@
 import {
+  chatMessageKey,
   mergeFetchedChatMessages,
+  normalizeDisplayUserContent,
   visibleChatMessages,
 } from '../src/hooks/use-chat';
 import { ChatMessage } from '../src/types/dexyd';
@@ -62,6 +64,62 @@ describe('mergeFetchedChatMessages', () => {
     expect(merged.map(item => item.content)).toEqual(['answer']);
   });
 
+
+  it('preserves existing row identity when fetched transcript sequence changes', () => {
+    const existing = message({
+      id: 'existing-user-row',
+      role: 'user',
+      turnId: 'turn-stable',
+      content: 'keep this stable',
+      createdAt: '2026-06-04T08:00:00.000Z',
+      sequence: 5,
+    });
+    const fetched = message({
+      id: 'transcript-user-row-renumbered',
+      role: 'user',
+      turnId: 'turn-stable',
+      content: 'keep this stable',
+      createdAt: '2026-06-04T08:00:03.000Z',
+      sequence: 99,
+    });
+
+    const merged = mergeFetchedChatMessages([fetched], [], undefined, [existing]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.id).toBe('existing-user-row');
+    expect(merged[0]?.sequence).toBe(5);
+    expect(chatMessageKey(merged[0]!)).toBe(chatMessageKey(existing));
+  });
+
+  it('keeps recent realtime assistant messages while transcript refresh lags', () => {
+    const user = message({
+      id: 'user-1',
+      role: 'user',
+      turnId: 'turn-realtime',
+      content: 'start work',
+      createdAt: new Date(Date.now() - 10_000).toISOString(),
+      sequence: 1,
+    });
+    const realtimeAssistant = message({
+      id: 'assistant-realtime',
+      role: 'assistant',
+      turnId: 'turn-realtime',
+      content: 'I am working on it.',
+      createdAt: new Date(Date.now() - 5_000).toISOString(),
+      sequence: 20,
+    });
+
+    const merged = mergeFetchedChatMessages([user], [], undefined, [
+      user,
+      realtimeAssistant,
+    ]);
+
+    expect(merged.map(item => `${item.role}:${item.content}`)).toEqual([
+      'user:start work',
+      'assistant:I am working on it.',
+    ]);
+  });
+
   it('removes pending user echoes confirmed by transcript content with a different turn id', () => {
     const merged = mergeFetchedChatMessages(
       [
@@ -101,8 +159,31 @@ describe('mergeFetchedChatMessages', () => {
   });
 });
 
+
+describe('normalizeDisplayUserContent', () => {
+  it('extracts the real prompt from nested Dexyd environment wrappers', () => {
+    const content = [
+      '<environment_context>',
+      '  <current_date>2026-06-04</current_date>',
+      '</environment_context>',
+      '',
+      'USER: You are running inside dexyd as the assistant for a mobile chat session.',
+      '',
+      'Conversation so far:',
+      'ASSISTANT: an older answer that should not become user text',
+      '',
+      'Latest user message:',
+      'Make chat text copyable.',
+    ].join('\n');
+
+    expect(normalizeDisplayUserContent(content)).toBe(
+      'Make chat text copyable.',
+    );
+  });
+});
+
 describe('visibleChatMessages', () => {
-  it('keeps running tool state out of the visible message list', () => {
+  it('keeps tool progress rows out of the visible message list', () => {
     const visible = visibleChatMessages([
       message({ id: 'user-1', role: 'user', content: 'go', sequence: 1 }),
       message({
@@ -113,10 +194,17 @@ describe('visibleChatMessages', () => {
         sequence: 2,
       }),
       message({
+        id: 'tool-done-1',
+        role: 'tool',
+        status: 'sent',
+        content: 'Command finished.',
+        sequence: 3,
+      }),
+      message({
         id: 'assistant-1',
         role: 'assistant',
         content: 'done',
-        sequence: 3,
+        sequence: 4,
       }),
     ]);
 

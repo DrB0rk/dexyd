@@ -5,7 +5,8 @@ export const sessionStatusSchema = z.enum(['created', 'running', 'idle', 'comple
 export const createSessionRequestSchema = z.object({
   workspacePath: z.string().trim().min(1).default('.'),
   profile: z.string().trim().min(1).max(120).default('default'),
-  title: z.string().trim().max(160).optional()
+  title: z.string().trim().max(160).optional(),
+  source: z.enum(['dexyd', 'codex']).default('dexyd').optional()
 });
 
 export const patchSessionRequestSchema = z.object({

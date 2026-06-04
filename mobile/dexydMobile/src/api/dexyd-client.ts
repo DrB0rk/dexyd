@@ -175,7 +175,7 @@ export async function createSession(baseUrl: string, workspacePath: string, toke
     '/sessions',
     {
       method: 'POST',
-      body: JSON.stringify({ workspacePath, profile: 'default', ...(title?.trim() ? { title: title.trim() } : {}) })
+      body: JSON.stringify({ workspacePath, profile: 'default', source: 'codex', ...(title?.trim() ? { title: title.trim() } : {}) })
     },
     tokens
   );

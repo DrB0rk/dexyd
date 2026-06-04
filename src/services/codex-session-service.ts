@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ChatMessage } from '../domain/chat.js';
@@ -100,6 +101,61 @@ export class CodexSessionService {
     this.omxHome = resolve(process.env.OMX_HOME || join(homedir(), '.omx'));
   }
 
+  createSession(input: { workspacePath: string; title?: string | null }): CodexSessionRecord {
+    const workspacePath = realpathSync(resolve(input.workspacePath));
+    if (!isInsideWorkspace(this.workspaceRoot, workspacePath)) {
+      throw new Error('workspace_outside_root');
+    }
+
+    const id = randomUUID();
+    const now = new Date();
+    const timestamp = now.toISOString();
+    const sessionDir = join(
+      this.codexHome,
+      'sessions',
+      String(now.getUTCFullYear()),
+      pad2(now.getUTCMonth() + 1),
+      pad2(now.getUTCDate())
+    );
+    mkdirSync(sessionDir, { recursive: true });
+    mkdirSync(this.codexHome, { recursive: true });
+
+    const codexSessionPath = join(sessionDir, `rollout-${formatSessionFileTimestamp(now)}-${id}.jsonl`);
+    const title = cleanTitle(input.title ?? undefined) || basename(workspacePath) || 'Dexyd session';
+    const meta = {
+      timestamp,
+      type: 'session_meta',
+      payload: {
+        id,
+        timestamp,
+        cwd: workspacePath,
+        originator: 'dexyd',
+        source: 'dexyd-mobile',
+        thread_source: 'user'
+      }
+    };
+
+    writeFileSync(codexSessionPath, `${JSON.stringify(meta)}\n`, { flag: 'wx' });
+    appendJsonLine(join(this.codexHome, 'session_index.jsonl'), {
+      id,
+      thread_name: title,
+      updated_at: timestamp
+    });
+
+    return {
+      id,
+      status: 'idle',
+      profile: 'dexyd',
+      workspacePath,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      source: 'codex',
+      title,
+      codexSessionPath,
+      omx: false
+    };
+  }
+
   listSessions(limit = 100): CodexSessionRecord[] {
     const index = this.readSessionIndex();
     const history = this.readHistory();
@@ -150,7 +206,7 @@ export class CodexSessionService {
         createdAt: candidate.createdAt || candidate.updatedAt || new Date(0).toISOString(),
         updatedAt: candidate.updatedAt || candidate.createdAt || new Date(0).toISOString(),
         source: 'codex',
-        title: cleanTitle(candidate.title) || basename(candidate.cwd!) || candidate.id,
+        title: cleanTitle(candidate.title ? normalizeTranscriptUserMessage(candidate.title) : undefined) || cleanTitle(candidate.title) || basename(candidate.cwd!) || candidate.id,
         codexSessionPath: candidate.path,
         omx: Boolean(candidate.omx),
         ...(candidate.usageContext ? { usageContext: candidate.usageContext } : {})
@@ -557,16 +613,42 @@ function normalizeTranscriptUserMessage(content: string): string {
   const text = content.trim();
   if (!text) return '';
 
-  const latestMatch = text.match(/(?:^|\n)Latest user message:\s*\n([\s\S]*)$/i);
-  if (latestMatch?.[1]) {
-    return latestMatch[1].trim();
+  const latest = extractLatestDexydUserMessage(text);
+  if (latest !== null) return latest;
+
+  const withoutEnvironment = stripEnvironmentContextBlocks(text).trim();
+  if (!withoutEnvironment) return '';
+
+  if (isDexydPromptEnvelope(withoutEnvironment)) return '';
+
+  return withoutEnvironment;
+}
+
+function extractLatestDexydUserMessage(text: string): string | null {
+  if (!isDexydPromptEnvelope(text)) return null;
+
+  const marker = /(?:^|\n)Latest user message:\s*\n/gi;
+  let lastEnd = -1;
+  let match: RegExpExecArray | null;
+  while ((match = marker.exec(text)) !== null) {
+    lastEnd = match.index + match[0].length;
   }
 
-  if (/^You are running inside dexyd as the assistant for a mobile chat session\./i.test(text)) {
-    return '';
-  }
+  if (lastEnd < 0) return null;
+  return stripEnvironmentContextBlocks(text.slice(lastEnd)).trim();
+}
 
-  return text;
+function stripEnvironmentContextBlocks(text: string): string {
+  return text.replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, '').trim();
+}
+
+function isDexydPromptEnvelope(text: string): boolean {
+  return (
+    /You are running inside dexyd as the assistant for a mobile chat session\./i.test(text) ||
+    /<environment_context>[\s\S]*?<\/environment_context>/i.test(text) ||
+    /Conversation so far:\s*$/im.test(text) ||
+    /(?:^|\n)Latest user message:\s*\n/i.test(text)
+  );
 }
 
 function chatMessageFromResponseRole(
@@ -974,6 +1056,18 @@ function isInsideWorkspace(root: string, candidate: string): boolean {
 
 function cleanTitle(value: string | undefined): string {
   return (value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function formatSessionFileTimestamp(value: Date): string {
+  return value.toISOString().replace(/[:.]/g, '-');
+}
+
+function appendJsonLine(path: string, value: unknown): void {
+  appendFileSync(path, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
 function extractMessageText(content: unknown): string {

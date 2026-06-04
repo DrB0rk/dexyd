@@ -37,7 +37,7 @@ import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
-import { useChat, visibleChatMessages } from './src/hooks/use-chat';
+import { chatMessageKey, useChat, visibleChatMessages } from './src/hooks/use-chat';
 import { useCodexAuth } from './src/hooks/use-codex-auth';
 import { useDevices } from './src/hooks/use-devices';
 import { useDiff } from './src/hooks/use-diff';
@@ -1164,7 +1164,7 @@ function TopBar({
           pressed && styles.pressed,
         ]}
       >
-        <Text style={styles.helpChatIcon}>⌕</Text>
+        <Text style={styles.helpChatIcon}>?</Text>
       </Pressable>
       <Pressable
         accessibilityRole="button"
@@ -1801,7 +1801,7 @@ function ChatScreen({
         contentContainerStyle={styles.messages}
         data={renderedMessages}
         inverted
-        keyExtractor={message => `${message.id}-${message.sequence}`}
+        keyExtractor={chatMessageKey}
         renderItem={({ item }) => (
           <MessageRow
             message={item}
@@ -1982,14 +1982,17 @@ function workingStatusText(
     .find(message => message.role === 'tool' && message.status === 'running');
   const isWorking = activeSession?.status === 'running' || Boolean(running);
   if (!isWorking) return null;
+  const rawDetail = running?.content.replace(/…+$/, '').trim() ?? '';
+  if (!rawDetail || /^Codex is working$/i.test(rawDetail)) {
+    return 'Codex is working…';
+  }
+
   const phrase =
     WORKING_PHRASES[
       Math.abs(hashString(activeSession?.id ?? running?.turnId ?? 'dexyd')) %
         WORKING_PHRASES.length
     ];
-  const detail =
-    running?.content.replace(/…+$/, '').trim() || 'Codex is working';
-  return `${phrase} · ${detail}`;
+  return `${phrase} · ${rawDetail}`;
 }
 
 function hashString(value: string): number {
@@ -2671,7 +2674,7 @@ function MessageBlockView({
   if (block.type === 'code') {
     return (
       <View style={[styles.codeBlock, last && styles.messageBlockLast]}>
-        <Text style={styles.codeText}>{block.text}</Text>
+        <Text selectable style={styles.codeText}>{block.text}</Text>
       </View>
     );
   }
@@ -2679,6 +2682,7 @@ function MessageBlockView({
   if (block.type === 'heading') {
     return (
       <Text
+        selectable
         style={[
           styles.messageText,
           textToneStyle,
@@ -2695,10 +2699,13 @@ function MessageBlockView({
   if (block.type === 'bullet') {
     return (
       <View style={[styles.bulletRow, last && styles.messageBlockLast]}>
-        <Text style={[styles.messageText, textToneStyle, styles.bulletMarker]}>
+        <Text
+          selectable
+          style={[styles.messageText, textToneStyle, styles.bulletMarker]}
+        >
           •
         </Text>
-        <Text style={[styles.messageText, textToneStyle, styles.bulletText]}>
+        <Text selectable style={[styles.messageText, textToneStyle, styles.bulletText]}>
           {renderInlineText(block.text)}
         </Text>
       </View>
@@ -2707,6 +2714,7 @@ function MessageBlockView({
 
   return (
     <Text
+      selectable
       style={[styles.messageText, textToneStyle, !last && styles.messageBlock]}
     >
       {renderInlineText(block.text)}

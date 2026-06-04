@@ -347,15 +347,20 @@ export async function registerRoutes(
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'invalid_workspace' });
     }
 
-    const session = context.db.createSession({
-      workspacePath,
-      profile: parsed.data.profile,
-      ...(parsed.data.title ? { title: parsed.data.title } : {})
-    });
+    const session = parsed.data.source === 'codex'
+      ? context.codexSessionService.createSession({
+          workspacePath,
+          ...(parsed.data.title ? { title: parsed.data.title } : {})
+        })
+      : context.db.createSession({
+          workspacePath,
+          profile: parsed.data.profile,
+          ...(parsed.data.title ? { title: parsed.data.title } : {})
+        });
 
     context.eventService.emit({
       eventType: 'session.created',
-      source: 'session',
+      source: session.source === 'codex' ? 'codexAdapter' : 'session',
       sessionId: session.id,
       payload: session
     });

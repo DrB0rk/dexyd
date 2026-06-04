@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,6 +17,31 @@ afterEach(() => {
 });
 
 describe('codex session transcript chat projection', () => {
+  it('creates a Codex-backed session transcript that Dexyd can list and resume', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-create-'));
+    cleanupPaths.push(tempDir);
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    mkdirSync(workspace, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const service = new CodexSessionService(workspace, { warn: () => undefined });
+    const created = service.createSession({ workspacePath: workspace, title: 'Mobile session' });
+
+    expect(created.source).toBe('codex');
+    expect(created.workspacePath).toBe(workspace);
+    expect(created.title).toBe('Mobile session');
+    expect(existsSync(created.codexSessionPath)).toBe(true);
+
+    const transcript = readFileSync(created.codexSessionPath, 'utf8');
+    expect(transcript).toContain('"type":"session_meta"');
+    expect(transcript).toContain(`"id":"${created.id}"`);
+    expect(existsSync(join(codexHome, 'history.jsonl'))).toBe(false);
+    expect(readFileSync(join(codexHome, 'session_index.jsonl'), 'utf8')).toContain('Mobile session');
+    expect(service.listSessions()).toHaveLength(1);
+    expect(service.getSession(created.id)?.id).toBe(created.id);
+  });
+
   it('shows compact progress for active tool work without raw tool output', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-transcript-'));
     cleanupPaths.push(tempDir);
@@ -188,6 +213,58 @@ describe('codex session transcript chat projection', () => {
     expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
       'user:fix the chat flow',
       'assistant:Fixed.'
+    ]);
+  });
+
+  it('extracts the latest prompt from nested environment wrapper transcript messages', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-nested-wrapper-'));
+    cleanupPaths.push(tempDir);
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const sessionId = '91919191-9191-4919-8919-919191919191';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        entry('session_meta', { cwd: workspace, timestamp: '2026-06-01T10:00:00.000Z' }),
+        entry('event_msg', {
+          type: 'user_message',
+          turn_id: 'turn-nested-wrapper',
+          message: [
+            '<environment_context>',
+            '  <current_date>2026-06-04</current_date>',
+            '  <filesystem><workspace_roots><root>/home/drb0rk/Projects/dexyd</root></workspace_roots></filesystem>',
+            '</environment_context>',
+            '',
+            'USER: You are running inside dexyd as the assistant for a mobile chat session.',
+            '',
+            'Conversation so far:',
+            'ASSISTANT: older release details that must not appear as user text',
+            '',
+            'Latest user message:',
+            'Make text in the chat copyable.'
+          ].join('\n')
+        }),
+        entry('response_item', {
+          type: 'message',
+          role: 'assistant',
+          turn_id: 'turn-nested-wrapper',
+          content: [{ type: 'output_text', text: 'Done.' }]
+        }),
+        ''
+      ].join('\n')
+    );
+
+    const service = new CodexSessionService(workspace, { warn: () => undefined });
+    const messages = service.getMessages(sessionId);
+
+    expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      'user:Make text in the chat copyable.',
+      'assistant:Done.'
     ]);
   });
 

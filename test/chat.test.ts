@@ -91,6 +91,152 @@ describe('chat bridge', () => {
     }
   });
 
+  it('does not carry stale mobile chat history into later Dexyd-created prompts', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-no-history-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+
+    const argsFile = join(tempDir, 'codex-args.txt');
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env bash
+printf '%s\n' "$@" > "${argsFile}"
+echo "assistant response"
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const first = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'create a new release' }
+      });
+      expect(first.statusCode).toBe(202);
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const args = existsSync(argsFile) ? readFileSync(argsFile, 'utf8') : '';
+        if (args.includes('create a new release')) break;
+        await sleep(25);
+      }
+
+      const second = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'what is 2+2?' }
+      });
+      expect(second.statusCode).toBe(202);
+
+      let args = '';
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        args = existsSync(argsFile) ? readFileSync(argsFile, 'utf8') : '';
+        if (args.trim().endsWith('what is 2+2?')) break;
+        await sleep(25);
+      }
+
+      const lines = args.trim().split('\n');
+      expect(lines.at(-1)).toBe('what is 2+2?');
+      expect(lines.at(-1)).not.toContain('create a new release');
+      expect(args).not.toContain('Conversation so far');
+      expect(args).not.toContain('Latest user message');
+      expect(args).not.toContain('You are running inside dexyd');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('creates mobile sessions as Codex-backed sessions and resumes them without a local duplicate', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-codex-session-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    mkdirSync(workspace, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const argsFile = join(tempDir, 'codex-args.txt');
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env bash
+printf '%s\n' "$@" > "${argsFile}"
+echo "assistant response"
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default', source: 'codex', title: 'Mobile project chat' }
+      });
+      expect(created.statusCode).toBe(201);
+      const session = (created.json() as { session: { id: string; source: string; title: string } }).session;
+      expect(session.source).toBe('codex');
+      expect(session.title).toBe('Mobile project chat');
+
+      const listedBefore = await service.app.inject({ method: 'GET', url: '/sessions', headers: authHeader });
+      const sessionsBefore = (listedBefore.json() as { sessions: Array<{ id: string }> }).sessions;
+      expect(sessionsBefore.filter((item) => item.id === session.id)).toHaveLength(1);
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${session.id}/chat`,
+        headers: authHeader,
+        payload: { message: 'hello from mobile' }
+      });
+      expect(sent.statusCode).toBe(202);
+
+      let args = '';
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        args = existsSync(argsFile) ? readFileSync(argsFile, 'utf8') : '';
+        if (args.includes('hello from mobile')) break;
+        await sleep(25);
+      }
+
+      const lines = args.trim().split('\n');
+      expect(lines).toContain('exec');
+      expect(lines).toContain('resume');
+      expect(lines).toContain(session.id);
+      expect(lines.at(-1)).toBe('hello from mobile');
+      expect(args).not.toContain('-C');
+
+      const listedAfter = await service.app.inject({ method: 'GET', url: '/sessions', headers: authHeader });
+      const sessionsAfter = (listedAfter.json() as { sessions: Array<{ id: string; source: string }> }).sessions;
+      expect(sessionsAfter.filter((item) => item.id === session.id)).toHaveLength(1);
+      expect(sessionsAfter.filter((item) => item.source === 'dexyd')).toHaveLength(0);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it('reports a missing codex runtime once with actionable detail', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-missing-'));
     cleanupPaths.push(tempDir);

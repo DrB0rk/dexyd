@@ -497,24 +497,8 @@ export class CodexChatService {
     }
   }
 
-  private buildPrompt(session: SessionRecord, latestMessage: string): string {
-    const content = latestMessage.trim();
-    if (session.source === 'codex') return content;
-
-    const history = this.getMessages(session.id, 40)
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .slice(-20)
-      .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
-      .join('\n\n');
-
-    return [
-      'You are running inside dexyd as the assistant for a mobile chat session.',
-      'Answer concisely and directly. If code changes are needed, make them in the workspace.',
-      history ? `Conversation so far:\n${history}` : '',
-      `Latest user message:\n${content}`
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+  private buildPrompt(_session: SessionRecord, latestMessage: string): string {
+    return latestMessage.trim();
   }
 
   private acceptChunk(text: string, usedBytes: number, maxBytes: number): { text: string; truncated: boolean } {

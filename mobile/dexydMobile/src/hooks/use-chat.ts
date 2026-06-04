@@ -12,6 +12,50 @@ import { ChatMessage, EventEnvelope, QueuedChatMessage } from '../types/dexyd';
 import { errorMessage } from '../utils/error-message';
 
 const CHAT_POLL_INTERVAL_MS = 3500;
+const TRANSIENT_MESSAGE_KEEP_MS = 2 * 60 * 1000;
+
+export function normalizeDisplayUserContent(content: string): string {
+  const text = content.trim();
+  if (!text) return '';
+
+  const latest = extractLatestDexydUserMessage(text);
+  if (latest !== null) return latest;
+
+  const withoutEnvironment = stripEnvironmentContextBlocks(text).trim();
+  if (!withoutEnvironment) return '';
+
+  if (isDexydPromptEnvelope(withoutEnvironment)) return '';
+  return withoutEnvironment;
+}
+
+function extractLatestDexydUserMessage(text: string): string | null {
+  if (!isDexydPromptEnvelope(text)) return null;
+
+  const marker = /(?:^|\n)Latest user message:\s*\n/gi;
+  let lastEnd = -1;
+  let match: RegExpExecArray | null;
+  while ((match = marker.exec(text)) !== null) {
+    lastEnd = match.index + match[0].length;
+  }
+
+  if (lastEnd < 0) return null;
+  return stripEnvironmentContextBlocks(text.slice(lastEnd)).trim();
+}
+
+function stripEnvironmentContextBlocks(text: string): string {
+  return text
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, '')
+    .trim();
+}
+
+function isDexydPromptEnvelope(text: string): boolean {
+  return (
+    /You are running inside dexyd as the assistant for a mobile chat session\./i.test(text) ||
+    /<environment_context>[\s\S]*?<\/environment_context>/i.test(text) ||
+    /Conversation so far:\s*$/im.test(text) ||
+    /(?:^|\n)Latest user message:\s*\n/i.test(text)
+  );
+}
 
 function eventToMessage(event: EventEnvelope): ChatMessage | null {
   if (!event.eventType.startsWith('chat.')) return null;
@@ -25,11 +69,15 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
     event.eventType === 'chat.message.queued' ||
     event.eventType === 'chat.message.queued.updated'
   ) {
+    const content = normalizeDisplayUserContent(
+      typeof payload.content === 'string' ? payload.content : '',
+    );
+    if (!content) return null;
     return {
       id: typeof payload.id === 'string' ? payload.id : `${event.sequence}`,
       turnId,
       role: 'user',
-      content: typeof payload.content === 'string' ? payload.content : '',
+      content,
       createdAt: event.timestamp,
       sequence: event.sequence,
       status: 'queued',
@@ -43,11 +91,22 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
     event.eventType === 'chat.message.user' ||
     event.eventType === 'chat.message.assistant'
   ) {
+    const role =
+      event.eventType === 'chat.message.assistant' ? 'assistant' : 'user';
+    const content =
+      role === 'user'
+        ? normalizeDisplayUserContent(
+            typeof payload.content === 'string' ? payload.content : '',
+          )
+        : typeof payload.content === 'string'
+        ? payload.content
+        : '';
+    if (!content) return null;
     return {
       id: typeof payload.id === 'string' ? payload.id : `${event.sequence}`,
       turnId,
-      role: event.eventType === 'chat.message.assistant' ? 'assistant' : 'user',
-      content: typeof payload.content === 'string' ? payload.content : '',
+      role,
+      content,
       createdAt: event.timestamp,
       sequence: event.sequence,
       status: 'sent',
@@ -112,8 +171,10 @@ function eventToQueuedMessage(event: EventEnvelope): QueuedChatMessage | null {
       : '';
   const turnId = typeof payload.turnId === 'string' ? payload.turnId : '';
   const sessionId = typeof event.sessionId === 'string' ? event.sessionId : '';
-  const content = typeof payload.content === 'string' ? payload.content : '';
-  if (!queueId || !turnId || !sessionId) return null;
+  const content = normalizeDisplayUserContent(
+    typeof payload.content === 'string' ? payload.content : '',
+  );
+  if (!queueId || !turnId || !sessionId || !content) return null;
   return {
     queueId,
     turnId,
@@ -147,7 +208,7 @@ function mergeMessage(
   const found = withoutQueued.some(
     item =>
       item.id === next.id ||
-      item.sequence === next.sequence ||
+      sameMessageIdentity(item, next) ||
       (next.queueId &&
         item.queueId === next.queueId &&
         item.status === next.status),
@@ -156,11 +217,11 @@ function mergeMessage(
     return dedupeMessages(
       withoutQueued.map(item =>
         item.id === next.id ||
-        item.sequence === next.sequence ||
+        sameMessageIdentity(item, next) ||
         (next.queueId &&
           item.queueId === next.queueId &&
           item.status === next.status)
-          ? next
+          ? preserveStableMessageFields(next, [item])
           : item,
       ),
     );
@@ -186,13 +247,12 @@ function mergeDelta(
   const content = summarizeProgress(text);
   const found = existing.find(item => item.id === draftId);
   if (found) {
+    if (found.content === content) return existing;
     return existing.map(item =>
       item.id === draftId
         ? {
             ...item,
             content,
-            sequence: event.sequence,
-            createdAt: event.timestamp,
           }
         : item,
     );
@@ -250,6 +310,65 @@ function summarizeProgress(text: string): string {
   return 'Codex is working…';
 }
 
+export function chatMessageKey(message: ChatMessage): string {
+  const contentHash = hashStableText(message.content.trim());
+  const turnId = stableTurnId(message.turnId);
+  if (message.queueId) return `queue:${message.queueId}:${message.status}`;
+  if (turnId) {
+    return `${message.role}:${message.status}:${turnId}:${contentHash}`;
+  }
+  return `${message.role}:${message.status}:${contentHash}:${timeBucket(
+    message.createdAt,
+  )}`;
+}
+
+function sameMessageIdentity(left: ChatMessage, right: ChatMessage): boolean {
+  return chatMessageKey(left) === chatMessageKey(right);
+}
+
+function preserveStableMessageFields(
+  next: ChatMessage,
+  existingMessages: ChatMessage[],
+): ChatMessage {
+  const existing = existingMessages.find(message =>
+    sameMessageIdentity(message, next),
+  );
+  if (!existing) return next;
+
+  return {
+    ...next,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    sequence: existing.sequence,
+  };
+}
+
+function stableTurnId(turnId: string): string | null {
+  if (!turnId || /^sequence-/.test(turnId)) return null;
+  return turnId;
+}
+
+function timeBucket(value: string): string {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return 'unknown';
+  return `${Math.floor(time / 60_000)}`;
+}
+
+function hashStableText(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) % 2_147_483_647;
+  }
+  return hash.toString(36);
+}
+
+function isRecentTransientMessage(message: ChatMessage): boolean {
+  if (message.role === 'tool') return message.status === 'running';
+  if (message.status !== 'sent') return false;
+  const age = Date.now() - chatMessageTime(message);
+  return Number.isFinite(age) && age >= 0 && age <= TRANSIENT_MESSAGE_KEEP_MS;
+}
+
 function chatMessageTime(message: ChatMessage): number {
   const time = new Date(message.createdAt).getTime();
   return Number.isFinite(time) ? time : 0;
@@ -276,7 +395,10 @@ function pendingUserConfirmed(
   return fetchedUsers.some(fetched => {
     if (!sameUserContent(pending, fetched)) return false;
     if (pending.turnId === fetched.turnId) return true;
-    return Math.abs(chatMessageTime(pending) - chatMessageTime(fetched)) <= 10 * 60 * 1000;
+    return (
+      Math.abs(chatMessageTime(pending) - chatMessageTime(fetched)) <=
+      10 * 60 * 1000
+    );
   });
 }
 
@@ -315,6 +437,7 @@ function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
     }
 
     const duplicate = result.find(existing => {
+      if (sameMessageIdentity(existing, message)) return true;
       if (
         existing.role !== message.role ||
         existing.status !== message.status ||
@@ -365,9 +488,19 @@ export function mergeFetchedChatMessages(
   items: ChatMessage[],
   pendingUserMessages: ChatMessage[],
   activeQueueIds?: Set<string>,
+  existingMessages: ChatMessage[] = [],
 ): ChatMessage[] {
+  const incoming = [...items, ...pendingUserMessages].map(message =>
+    preserveStableMessageFields(message, existingMessages),
+  );
+  const incomingKeys = new Set(incoming.map(chatMessageKey));
+  const transientExisting = existingMessages.filter(
+    message =>
+      !incomingKeys.has(chatMessageKey(message)) &&
+      isRecentTransientMessage(message),
+  );
   const merged = dedupeMessages(
-    [...items, ...pendingUserMessages].sort(compareChatMessages),
+    [...incoming, ...transientExisting].sort(compareChatMessages),
   );
   if (!activeQueueIds) return merged;
   return merged.filter(
@@ -378,13 +511,68 @@ export function mergeFetchedChatMessages(
 
 export function visibleChatMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages
-    .filter(
-      message =>
-        message.status !== 'queued' &&
-        !(message.role === 'tool' && message.status === 'running'),
-    )
+    .filter(message => message.status !== 'queued' && message.role !== 'tool')
     .slice()
     .reverse();
+}
+
+function sameChatMessages(left: ChatMessage[], right: ChatMessage[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((message, index) => sameChatMessage(message, right[index]));
+}
+
+function sameChatMessage(left: ChatMessage, right: ChatMessage | undefined): boolean {
+  if (!right) return false;
+  return (
+    left.id === right.id &&
+    left.turnId === right.turnId &&
+    left.role === right.role &&
+    left.content === right.content &&
+    left.status === right.status &&
+    left.queueId === right.queueId &&
+    left.createdAt === right.createdAt &&
+    left.sequence === right.sequence
+  );
+}
+
+function nextChatMessages(
+  current: ChatMessage[],
+  next: ChatMessage[],
+): ChatMessage[] {
+  return sameChatMessages(current, next) ? current : next;
+}
+
+function sameQueuedMessages(
+  left: QueuedChatMessage[],
+  right: QueuedChatMessage[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => sameQueuedMessage(item, right[index]));
+}
+
+function sameQueuedMessage(
+  left: QueuedChatMessage,
+  right: QueuedChatMessage | undefined,
+): boolean {
+  if (!right) return false;
+  return (
+    left.queueId === right.queueId &&
+    left.turnId === right.turnId &&
+    left.sessionId === right.sessionId &&
+    left.content === right.content &&
+    left.actorDeviceId === right.actorDeviceId &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function nextQueuedMessages(
+  current: QueuedChatMessage[],
+  next: QueuedChatMessage[],
+): QueuedChatMessage[] {
+  return sameQueuedMessages(current, next) ? current : next;
 }
 
 function mergeQueuedMessages(
@@ -393,12 +581,17 @@ function mergeQueuedMessages(
 ): QueuedChatMessage[] {
   const found = current.some(item => item.queueId === next.queueId);
   const items = found
-    ? current.map(item => (item.queueId === next.queueId ? next : item))
+    ? current.map(item =>
+        item.queueId === next.queueId && !sameQueuedMessage(item, next)
+          ? next
+          : item,
+      )
     : [...current, next];
-  return items.sort(
+  const sorted = items.sort(
     (left, right) =>
       new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
   );
+  return nextQueuedMessages(current, sorted);
 }
 
 export function useChat(
@@ -413,28 +606,33 @@ export function useChat(
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pendingUserMessagesRef = useRef<ChatMessage[]>([]);
+  const refreshRequestRef = useRef(0);
 
   const refreshQueue = useCallback(async () => {
     if (!tokens || !sessionId) {
-      setQueuedMessages([]);
+      setQueuedMessages(current => nextQueuedMessages(current, []));
       return;
     }
-    setQueuedMessages(await getQueuedMessages(bridgeUrl, sessionId, tokens));
+    const queue = await getQueuedMessages(bridgeUrl, sessionId, tokens);
+    setQueuedMessages(current => nextQueuedMessages(current, queue));
   }, [bridgeUrl, sessionId, tokens]);
 
   const refresh = useCallback(
     async (silent = false) => {
       if (!tokens || !sessionId) {
-        setMessages([]);
-        setQueuedMessages([]);
+        refreshRequestRef.current += 1;
+        setMessages(current => nextChatMessages(current, []));
+        setQueuedMessages(current => nextQueuedMessages(current, []));
         setError(null);
         return;
       }
 
+      const requestId = ++refreshRequestRef.current;
       if (!silent) setLoading(true);
       setError(null);
       try {
         const items = await getChatMessages(bridgeUrl, sessionId, tokens);
+        if (requestId !== refreshRequestRef.current) return;
         const fetchedUsers = items.filter(message => message.role === 'user');
         pendingUserMessagesRef.current = pendingUserMessagesRef.current.filter(
           message => !pendingUserConfirmed(message, fetchedUsers),
@@ -443,17 +641,26 @@ export function useChat(
         let activeQueueIds: Set<string> | undefined;
         try {
           const queue = await getQueuedMessages(bridgeUrl, sessionId, tokens);
+          if (requestId !== refreshRequestRef.current) return;
           activeQueueIds = new Set(queue.map(item => item.queueId));
-          setQueuedMessages(queue);
-        } catch {
+          setQueuedMessages(current => nextQueuedMessages(current, queue));
+        } catch (queueErr) {
           activeQueueIds = undefined;
+          if (!silent) {
+            setError(errorMessage(queueErr, 'failed to load queued messages'));
+          }
         }
 
-        setMessages(
-          mergeFetchedChatMessages(
-            items,
-            pendingUserMessagesRef.current,
-            activeQueueIds,
+        if (requestId !== refreshRequestRef.current) return;
+        setMessages(current =>
+          nextChatMessages(
+            current,
+            mergeFetchedChatMessages(
+              items,
+              pendingUserMessagesRef.current,
+              activeQueueIds,
+              current,
+            ),
           ),
         );
       } catch (err) {
@@ -492,7 +699,9 @@ export function useChat(
               sent,
             ]).filter(item => item.role === 'user');
           }
-          setMessages(current => mergeMessage(current, sent));
+          setMessages(current =>
+            nextChatMessages(current, mergeMessage(current, sent)),
+          );
         }
         return true;
       } catch (err) {
@@ -519,13 +728,16 @@ export function useChat(
           tokens,
         );
         setQueuedMessages(current => mergeQueuedMessages(current, queued));
-        setMessages(current =>
-          current.map(message =>
-            message.queueId === queueId && message.status === 'queued'
+        setMessages(current => {
+          const next = current.map(message =>
+            message.queueId === queueId &&
+            message.status === 'queued' &&
+            message.content !== queued.content
               ? { ...message, content: queued.content }
               : message,
-          ),
-        );
+          );
+          return nextChatMessages(current, next);
+        });
         return true;
       } catch (err) {
         setError(errorMessage(err, 'failed to steer queued message'));
@@ -550,10 +762,16 @@ export function useChat(
         );
         if (result.removed) {
           setQueuedMessages(current =>
-            current.filter(item => item.queueId !== queueId),
+            nextQueuedMessages(
+              current,
+              current.filter(item => item.queueId !== queueId),
+            ),
           );
           setMessages(current =>
-            current.filter(message => message.queueId !== queueId),
+            nextChatMessages(
+              current,
+              current.filter(message => message.queueId !== queueId),
+            ),
           );
         }
         return result.removed;
@@ -570,9 +788,10 @@ export function useChat(
   }, [refresh]);
 
   useEffect(() => {
+    refreshRequestRef.current += 1;
     pendingUserMessagesRef.current = [];
-    setMessages([]);
-    setQueuedMessages([]);
+    setMessages(current => nextChatMessages(current, []));
+    setQueuedMessages(current => nextQueuedMessages(current, []));
     setError(null);
   }, [sessionId]);
 
@@ -596,7 +815,9 @@ export function useChat(
   useEffect(() => {
     if (!lastEvent || !sessionId || lastEvent.sessionId !== sessionId) return;
     if (lastEvent.eventType === 'chat.output.delta') {
-      setMessages(current => mergeDelta(current, lastEvent));
+      setMessages(current =>
+        nextChatMessages(current, mergeDelta(current, lastEvent)),
+      );
       return;
     }
     if (lastEvent.eventType === 'chat.message.queued.removed') {
@@ -605,12 +826,18 @@ export function useChat(
         typeof payload.queueId === 'string' ? payload.queueId : '';
       if (queueId) {
         setQueuedMessages(current =>
-          current.filter(item => item.queueId !== queueId),
+          nextQueuedMessages(
+            current,
+            current.filter(item => item.queueId !== queueId),
+          ),
         );
         setMessages(current =>
-          current.filter(
-            message =>
-              message.queueId !== queueId || message.status !== 'queued',
+          nextChatMessages(
+            current,
+            current.filter(
+              message =>
+                message.queueId !== queueId || message.status !== 'queued',
+            ),
           ),
         );
       }
@@ -629,11 +856,20 @@ export function useChat(
       );
       if (message.queueId) {
         setQueuedMessages(current =>
-          current.filter(item => item.queueId !== message.queueId),
+          nextQueuedMessages(
+            current,
+            current.filter(item => item.queueId !== message.queueId),
+          ),
         );
       }
+    } else if (message.role === 'assistant' && message.status === 'sent') {
+      pendingUserMessagesRef.current = pendingUserMessagesRef.current.filter(
+        pending => pending.turnId !== message.turnId,
+      );
     }
-    setMessages(current => mergeMessage(current, message));
+    setMessages(current =>
+      nextChatMessages(current, mergeMessage(current, message)),
+    );
   }, [lastEvent, refreshQueue, sessionId]);
 
   return useMemo(
