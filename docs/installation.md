@@ -259,3 +259,16 @@ systemctl --user disable --now dexyd.service
 Local Dexyd state is normally stored under `.dexyd/` in the repository or configured data directory. Removing that directory removes local bridge DB state, pairings, trusted devices, logs, and plugin data for that install.
 
 The mobile app also has **Settings → Diagnostics → Reset app** to clear local mobile state.
+
+
+## Updating
+
+Use the TUI for installed bridge/TUI updates:
+
+```bash
+dexyd --tui
+```
+
+Open **Updates**, choose **Check updates**, then **Install bridge update** when a newer release is available. The update flow reruns the official installer for the installed app directory and preserves configuration/data.
+
+Use the mobile app **Settings → Updates** to update the Android APK from GitHub Releases. Android requires final confirmation before installing the downloaded APK.

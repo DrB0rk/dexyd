@@ -60,6 +60,10 @@ CLOUDFLARE_LOG_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.log"
 CLOUDFLARE_CONFIG_FILE = CLOUDFLARE_LOG_DIR / "config.yml"
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+DEXYD_REPO_URL = "https://github.com/DrB0rk/dexyd.git"
+DEXYD_REPO_RELEASE_API = "https://api.github.com/repos/DrB0rk/dexyd/releases/latest"
+DEXYD_INSTALLER_URL = "https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh"
+DEXYD_RELEASES_URL = "https://github.com/DrB0rk/dexyd/releases/latest"
 
 
 @dataclass
@@ -87,6 +91,173 @@ class SessionRecord:
     workspace_path: str
     updated_at: str
     title: str | None = None
+
+
+@dataclass
+class UpdateInfo:
+    current_version: str
+    latest_version: str
+    release_name: str
+    release_url: str
+    apk_name: str | None
+    apk_url: str | None
+    update_available: bool
+
+
+def app_root() -> Path:
+    return Path.cwd().resolve()
+
+
+def default_install_dir() -> Path:
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    return (data_home / "dexyd").resolve()
+
+
+def installed_command_target() -> Path | None:
+    command = Path.home() / ".local" / "bin" / "dexyd"
+    try:
+        return command.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def read_package_version(root: Path | None = None) -> str:
+    package_json = (root or app_root()) / "package.json"
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+        return str(data.get("version") or "0.0.0")
+    except (OSError, json.JSONDecodeError):
+        return "0.0.0"
+
+
+def normalize_version(value: str) -> list[int]:
+    core = str(value or "0.0.0").strip().removeprefix("v").split("-", 1)[0]
+    parts: list[int] = []
+    for part in core.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return parts[:3]
+
+
+def version_is_newer(latest: str, current: str) -> bool:
+    return normalize_version(latest) > normalize_version(current)
+
+
+def latest_release_info() -> UpdateInfo:
+    req = request.Request(DEXYD_REPO_RELEASE_API, headers={"Accept": "application/vnd.github+json"})
+    with request.urlopen(req, timeout=20) as response:
+        release = json.loads(response.read().decode("utf-8"))
+
+    latest = str(release.get("tag_name") or "").strip()
+    if not latest:
+        raise RuntimeError("GitHub latest release has no tag.")
+
+    apk_name: str | None = None
+    apk_url: str | None = None
+    for asset in release.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if name.lower().endswith(".apk") and url.startswith("https://github.com/"):
+            apk_name = name
+            apk_url = url
+            break
+
+    current = read_package_version()
+    return UpdateInfo(
+        current_version=current,
+        latest_version=latest,
+        release_name=str(release.get("name") or latest),
+        release_url=str(release.get("html_url") or DEXYD_RELEASES_URL),
+        apk_name=apk_name,
+        apk_url=apk_url,
+        update_available=version_is_newer(latest, current),
+    )
+
+
+def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "") -> str:
+    if info is None:
+        lines = [
+            "UPDATES",
+            "",
+            f"Installed bridge/TUI: {read_package_version()}",
+            "Latest release: not checked",
+            "",
+            "Use Check updates to query GitHub Releases.",
+        ]
+    else:
+        lines = [
+            "UPDATES",
+            "",
+            f"Installed bridge/TUI: {info.current_version}",
+            f"Latest release:      {info.latest_version}",
+            f"Status:              {'update available' if info.update_available else 'up to date'}",
+            f"Release:             {info.release_url}",
+            f"Android APK:         {info.apk_name or 'not attached'}",
+        ]
+        if info.apk_url:
+            lines.append(f"APK URL:             {info.apk_url}")
+        lines.extend(
+            [
+                "",
+                "Install bridge update reruns the official installer for this app directory, preserving dexyd.config.yaml and .dexyd data.",
+                "The Android app updates from Settings → Updates on the phone; Android will ask before installing APKs.",
+            ]
+        )
+    if busy:
+        lines.extend(["", "Task: running"])
+    if log.strip():
+        lines.extend(["", "RECENT ACTIVITY", "", log.strip()])
+    return "\n".join(lines)
+
+
+def safe_update_root(root: Path) -> tuple[bool, str]:
+    expected_command = root / "bin" / "dexyd"
+    command_target = installed_command_target()
+    if root == default_install_dir():
+        return True, "default install directory"
+    if command_target == expected_command.resolve(strict=False):
+        return True, "installed dexyd command points here"
+    if (root / ".git").exists():
+        return False, "Refusing to update a development checkout from the TUI. Use git pull/merge and the release workflow instead."
+    return True, "non-git app directory"
+
+
+def download_installer_script(target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with request.urlopen(DEXYD_INSTALLER_URL, timeout=30) as response:
+        target.write_bytes(response.read())
+    target.chmod(0o755)
+    return target
+
+
+def install_latest_bridge_update(root: Path) -> str:
+    ok, reason = safe_update_root(root)
+    if not ok:
+        raise RuntimeError(reason)
+
+    temp_dir = root / ".dexyd" / "updates"
+    installer = download_installer_script(temp_dir / "install-latest.sh")
+    command = [
+        "bash",
+        str(installer),
+        "--repo",
+        DEXYD_REPO_URL,
+        "--branch",
+        "main",
+        "--dir",
+        str(root),
+    ]
+    result = run_capture(command, timeout=600, env={**os.environ, "DEXYD_INSTALL_DIR": str(root)})
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode != 0:
+        raise RuntimeError(f"Installer failed with exit {result.returncode}:\n{output[-4000:]}")
+    return f"Update installed into {root} ({reason}). Restart this TUI to load the new code.\n\n{output[-4000:]}"
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -1045,7 +1216,7 @@ class DexydTextualApp(App[None]):
       min-height: 24;
       overflow: auto auto;
     }
-    #device_output, #session_output, #chat_output, #diff_output, #cloudflare_output {
+    #device_output, #session_output, #chat_output, #diff_output, #cloudflare_output, #update_output {
       border: round #323238;
       padding: 1;
       overflow: auto auto;
@@ -1053,7 +1224,7 @@ class DexydTextualApp(App[None]):
     #device_output, #session_output {
       min-height: 12;
     }
-    #cloudflare_output {
+    #cloudflare_output, #update_output {
       min-height: 18;
     }
     #status_line {
@@ -1071,6 +1242,9 @@ class DexydTextualApp(App[None]):
         self.last_pairing_uri = ""
         self.cloudflare_log_text = ""
         self.cloudflare_busy = False
+        self.update_log_text = ""
+        self.update_busy = False
+        self.update_info: UpdateInfo | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1086,6 +1260,7 @@ class DexydTextualApp(App[None]):
                         yield Static("", id="next_steps_card", classes="panel col")
                     with Horizontal():
                         yield Button("Refresh", id="refresh_dashboard", variant="primary")
+                        yield Button("Check updates", id="check_updates")
                         yield Button("Reload config", id="reload_config")
 
             with TabPane("Connection", id="connection"):
@@ -1245,6 +1420,19 @@ class DexydTextualApp(App[None]):
                         yield Button("Save advanced settings", id="save_settings", variant="success")
                         yield Button("Reset form", id="reset_settings")
 
+            with TabPane("Updates", id="updates"):
+                with VerticalScroll(classes="page"):
+                    yield Static(
+                        "UPDATES\n\n"
+                        "Check GitHub Releases, update the installed bridge/TUI, and find the latest Android APK. "
+                        "Bridge updates preserve config and data.",
+                        classes="hero",
+                    )
+                    with Horizontal():
+                        yield Button("Check updates", id="check_updates", variant="primary")
+                        yield Button("Install bridge update", id="install_update", variant="success")
+                    yield Static("", id="update_output")
+
             with TabPane("Help", id="help"):
                 with VerticalScroll(classes="page"):
                     yield Static(
@@ -1252,7 +1440,8 @@ class DexydTextualApp(App[None]):
                         "Recommended setup:\n"
                         "  1. Connection: choose LAN/domain/Cloudflare and save.\n"
                         "  2. Pair: generate a fresh QR and scan it in the mobile app.\n"
-                        "  3. Work: verify sessions/projects are visible.\n\n"
+                        "  3. Work: verify sessions/projects are visible.\n"
+                        "  4. Updates: check bridge/TUI and APK releases.\n\n"
                         "Commands:\n"
                         "  dexyd --tui          open this console\n"
                         "  dexyd                run bridge in foreground\n"
@@ -1272,6 +1461,7 @@ class DexydTextualApp(App[None]):
         self.refresh_all()
         self.refresh_settings_summary()
         self.refresh_cloudflare()
+        self.refresh_updates()
 
     def action_refresh(self) -> None:
         self.refresh_all()
@@ -1284,6 +1474,7 @@ class DexydTextualApp(App[None]):
         self.refresh_projects()
         self.refresh_cloudflare()
         self.refresh_bridge_config_status()
+        self.refresh_updates()
 
     def reload_config(self) -> None:
         self.store = load_config_store(str(self.store.path))
@@ -1356,7 +1547,8 @@ class DexydTextualApp(App[None]):
             "BRIDGE\n\n"
             f"{config['server']['host']}:{config['server']['port']}\n"
             f"Log: {config['server']['logLevel']}\n"
-            f"Ready: {health}"
+            f"Ready: {health}\n"
+            f"Version: {read_package_version()}"
         )
         storage = (
             "DATA\n\n"
@@ -1374,13 +1566,77 @@ class DexydTextualApp(App[None]):
             "ACTIONS\n\n"
             "Pair → generate QR\n"
             "Connection → bridge/tunnel/autostart\n"
-            "Sessions → inspect chat"
+            "Sessions → inspect chat\n"
+            "Updates → check latest release"
         )
         self.query_one("#dashboard_hero", Static).update(hero)
         self.query_one("#bridge_card", Static).update(bridge)
         self.query_one("#storage_card", Static).update(storage)
         self.query_one("#security_card", Static).update(security)
         self.query_one("#next_steps_card", Static).update(next_steps)
+
+    def refresh_updates(self) -> None:
+        self.query_one("#update_output", Static).update(
+            format_update_info(self.update_info, busy=self.update_busy, log=self.update_log_text)
+        )
+
+    def append_update_output(self, message: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.call_from_thread(self.append_update_output, message)
+            return
+
+        line = message.strip()
+        if not line:
+            return
+        timestamp = time.strftime("%H:%M:%S")
+        self.update_log_text = f"{self.update_log_text}\n\n[{timestamp}] {line}".strip()
+        if len(self.update_log_text) > 12000:
+            self.update_log_text = self.update_log_text[-12000:]
+        self.refresh_updates()
+        self.set_status(line.splitlines()[0])
+
+    def run_update_task(self, label: str, action: Callable[[], Any]) -> None:
+        if self.update_busy:
+            self.set_status("Update task already running")
+            return
+
+        self.update_busy = True
+        self.append_update_output(f"{label} started.")
+        self.refresh_updates()
+
+        def worker() -> None:
+            try:
+                result = action()
+                if result:
+                    self.append_update_output(str(result))
+            except Exception as exc:  # pragma: no cover - interactive guard
+                self.append_update_output(f"Error: {exc}")
+            finally:
+                self.call_from_thread(self.finish_update_task, label)
+
+        threading.Thread(target=worker, name=f"dexyd-{label.lower().replace(' ', '-')}", daemon=True).start()
+
+    def finish_update_task(self, label: str) -> None:
+        self.update_busy = False
+        self.refresh_updates()
+        self.refresh_dashboard()
+        self.set_status(f"{label} finished")
+
+    def check_updates(self) -> str:
+        self.update_info = latest_release_info()
+        self.call_from_thread(self.refresh_updates)
+        return (
+            f"Latest release: {self.update_info.latest_version}. "
+            f"{'Update available.' if self.update_info.update_available else 'Already up to date.'}"
+        )
+
+    def install_update(self) -> str:
+        if self.update_info is None:
+            self.update_info = latest_release_info()
+            self.call_from_thread(self.refresh_updates)
+        if not self.update_info.update_available:
+            return f"Already up to date ({self.update_info.current_version})."
+        return install_latest_bridge_update(app_root())
 
     def refresh_settings_summary(self) -> None:
         harness = self.store.config["codex"]["harness"]
@@ -1756,6 +2012,10 @@ class DexydTextualApp(App[None]):
             if button_id in {"refresh_dashboard", "refresh_devices", "refresh_sessions", "refresh_projects", "bridge_config_refresh"}:
                 self.refresh_all()
                 self.set_status("Refreshed")
+            elif button_id == "check_updates":
+                self.run_update_task("Check updates", self.check_updates)
+            elif button_id == "install_update":
+                self.run_update_task("Install update", self.install_update)
             elif button_id == "reload_config":
                 self.reload_config()
                 self.set_status("Config reloaded")

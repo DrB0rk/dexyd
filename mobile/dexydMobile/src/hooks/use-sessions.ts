@@ -292,6 +292,7 @@ export function useSessions(
     if (
       lastEvent.eventType === 'session.created' ||
       lastEvent.eventType === 'chat.message.assistant' ||
+      lastEvent.eventType === 'chat.turn.completed' ||
       lastEvent.eventType === 'chat.turn.failed' ||
       lastEvent.eventType === 'chat.turn.cancelled'
     ) {

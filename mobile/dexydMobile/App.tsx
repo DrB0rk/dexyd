@@ -14,6 +14,7 @@ import {
   Keyboard,
   KeyboardEvent,
   KeyboardAvoidingView,
+  Linking,
   LayoutChangeEvent,
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -31,6 +32,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { getHealth, respondToInteraction } from './src/api/dexyd-client';
+import { useAppUpdater } from './src/hooks/use-app-updater';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
@@ -103,6 +105,10 @@ type SessionUiStatus = {
   detail: string;
   kind: StatusKind;
 };
+type AccountUsageSample = {
+  remainingPercent: number;
+  raw: string;
+};
 type SystemNotification = {
   id: string;
   kind: SystemNotificationKind;
@@ -118,6 +124,7 @@ type SettingsPaneKey =
   | 'security'
   | 'workspace'
   | 'history'
+  | 'updates'
   | 'diagnostics';
 type SettingsPane = {
   key: SettingsPaneKey;
@@ -228,7 +235,9 @@ export default function App() {
     stream.lastEvent,
   );
   const codexAuth = useCodexAuth(bridgeSettings.bridgeUrl, tokens);
+  const appUpdater = useAppUpdater();
   const usageAlertThresholdsRef = useRef<Set<number>>(new Set());
+  const account5hUsageRef = useRef<Map<string, AccountUsageSample>>(new Map());
   const lastErrorNotificationRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -517,6 +526,35 @@ export default function App() {
     });
   }, [notify, usage.usage]);
 
+  useEffect(() => {
+    const status = codexAuth.status;
+    if (!status?.accounts.length) {
+      account5hUsageRef.current.clear();
+      return;
+    }
+
+    for (const account of status.accounts) {
+      const sample = parseAccount5hUsage(account.usage5h);
+      if (!sample) continue;
+      const key = account.index || account.label;
+      const previous = account5hUsageRef.current.get(key);
+      account5hUsageRef.current.set(key, sample);
+      if (!previous || !isFiveHourLimitRefresh(previous, sample)) continue;
+
+      notify({
+        id: `account-5h-refreshed-${key}-${Math.round(
+          sample.remainingPercent,
+        )}`,
+        kind: 'usage',
+        title: '5h usage refreshed',
+        body: `${account.label} has ${Math.round(
+          sample.remainingPercent,
+        )}% 5h usage available again.`,
+        sessionId: null,
+      });
+    }
+  }, [codexAuth.status, notify]);
+
   const refreshCodexSessions = useCallback(async () => {
     if (!tokens) {
       setTab('settings');
@@ -680,7 +718,8 @@ export default function App() {
           if (!force) return;
           const currentIndex = bottomTabOrder.indexOf(tab as BottomTabKey);
           if (currentIndex < 0) return;
-          const nextIndex = gesture.dx < 0 ? currentIndex + 1 : currentIndex - 1;
+          const nextIndex =
+            gesture.dx < 0 ? currentIndex + 1 : currentIndex - 1;
           const nextTab = bottomTabOrder[nextIndex];
           if (nextTab) setTab(nextTab);
         },
@@ -854,6 +893,7 @@ export default function App() {
                 devices={devices}
                 usage={usage}
                 codexAuth={codexAuth}
+                appUpdater={appUpdater}
                 errorHistory={errorHistory}
                 onClearErrorHistory={() => setErrorHistory([])}
                 onFullReset={async () => {
@@ -1568,7 +1608,8 @@ function ChatScreen({
     chat.sending,
   );
   const workingStateReserve = workingInfo ? 62 : 0;
-  const composerSpacer = composerHeight + keyboardLift + 12 + workingStateReserve;
+  const composerSpacer =
+    composerHeight + keyboardLift + 12 + workingStateReserve;
 
   const send = async () => {
     const message = text.trim();
@@ -1597,8 +1638,7 @@ function ChatScreen({
     !activeSession ||
     Boolean(usageBlockMessage);
   const steeringTarget = steeringQueueId
-    ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
-      null)
+    ? chat.queuedMessages.find(item => item.queueId === steeringQueueId) ?? null
     : null;
 
   const header = (
@@ -1621,7 +1661,11 @@ function ChatScreen({
         </Text>
         <Text style={styles.chatHeaderMeta} numberOfLines={1}>
           {activeSession
-            ? `${activeSession.status} · ${usage ? usageSummary(usage) : activeSession.workspacePath || 'workspace'}`
+            ? `${activeSession.status} · ${
+                usage
+                  ? usageSummary(usage)
+                  : activeSession.workspacePath || 'workspace'
+              }`
             : 'Select a session'}
         </Text>
       </View>
@@ -1660,9 +1704,7 @@ function ChatScreen({
               item.status === 'sent' &&
               promptDiffTurnIds.has(item.turnId)
             }
-            diffLoading={
-              diff.loading && diff.loadingTurnId === item.turnId
-            }
+            diffLoading={diff.loading && diff.loadingTurnId === item.turnId}
             onViewDiff={() => openMessageDiff(item.turnId)}
           />
         )}
@@ -2286,10 +2328,14 @@ function DiffViewer({
               <Text style={styles.diffTitle}>Code diff</Text>
               <Text style={styles.diffMeta} numberOfLines={1}>
                 {files.length
-                  ? `${files.length} file${files.length === 1 ? '' : 's'} · +${totalAdditions} -${totalDeletions}${diff.truncated ? ' · truncated' : ''}`
+                  ? `${files.length} file${
+                      files.length === 1 ? '' : 's'
+                    } · +${totalAdditions} -${totalDeletions}${
+                      diff.truncated ? ' · truncated' : ''
+                    }`
                   : diff.truncated
-                    ? 'Truncated · message changes'
-                    : 'Message changes'}
+                  ? 'Truncated · message changes'
+                  : 'Message changes'}
               </Text>
             </View>
             {loading ? (
@@ -2347,7 +2393,12 @@ function DiffViewer({
                 ) : null}
               </Pressable>
               {fileMenuOpen && files.length > 1 ? (
-                <View style={[styles.diffDropdown, { maxHeight: dropdownMaxHeight }]}>
+                <View
+                  style={[
+                    styles.diffDropdown,
+                    { maxHeight: dropdownMaxHeight },
+                  ]}
+                >
                   <ScrollView
                     nestedScrollEnabled
                     showsVerticalScrollIndicator
@@ -2493,10 +2544,10 @@ function MessageBlockView({
     tone === 'user'
       ? styles.messageTextUser
       : tone === 'system'
-        ? styles.messageTextSystem
-        : tone === 'tool'
-          ? styles.messageTextSystem
-          : null;
+      ? styles.messageTextSystem
+      : tone === 'tool'
+      ? styles.messageTextSystem
+      : null;
 
   if (block.type === 'code') {
     return (
@@ -3102,6 +3153,7 @@ function SettingsScreen({
   devices,
   usage,
   codexAuth,
+  appUpdater,
   errorHistory,
   onClearErrorHistory,
   onFullReset,
@@ -3118,6 +3170,7 @@ function SettingsScreen({
   devices: ReturnType<typeof useDevices>;
   usage: ReturnType<typeof useUsageStatus>;
   codexAuth: ReturnType<typeof useCodexAuth>;
+  appUpdater: ReturnType<typeof useAppUpdater>;
   errorHistory: ErrorHistoryItem[];
   onClearErrorHistory: () => void;
   onFullReset: () => Promise<void>;
@@ -3141,6 +3194,13 @@ function SettingsScreen({
     );
     return () => subscription.remove();
   }, [activePane]);
+
+  useEffect(() => {
+    if (activePane !== 'updates' || appUpdater.info || appUpdater.checking) {
+      return;
+    }
+    appUpdater.check().catch(() => undefined);
+  }, [activePane, appUpdater]);
 
   const pair = async (value: string) => {
     const trimmed = value.trim();
@@ -3177,17 +3237,17 @@ function SettingsScreen({
     bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
       : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
-        ? 'warn'
-        : 'error';
+      ? 'warn'
+      : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
   const realtimeTone =
     socketState === 'open'
       ? 'ok'
       : socketState === 'polling'
-        ? 'warn'
-        : auth.auth
-          ? 'error'
-          : 'idle';
+      ? 'warn'
+      : auth.auth
+      ? 'error'
+      : 'idle';
   const errors = [
     bridgeSettings.error,
     auth.error,
@@ -3222,10 +3282,10 @@ function SettingsScreen({
         usage.usage?.limits.status === 'error'
           ? 'error'
           : usage.usage?.limits.status === 'warn'
-            ? 'warn'
-            : codexAuth.status?.installed === false
-              ? 'warn'
-              : 'ok',
+          ? 'warn'
+          : codexAuth.status?.installed === false
+          ? 'warn'
+          : 'ok',
     },
     {
       key: 'security',
@@ -3233,7 +3293,9 @@ function SettingsScreen({
       title: 'Security',
       subtitle: 'Local credentials and trusted devices.',
       detail: auth.auth
-        ? `${devices.devices.length} trusted device${devices.devices.length === 1 ? '' : 's'}`
+        ? `${devices.devices.length} trusted device${
+            devices.devices.length === 1 ? '' : 's'
+          }`
         : 'not paired',
       tone: auth.auth ? 'ok' : 'idle',
     },
@@ -3253,12 +3315,28 @@ function SettingsScreen({
       detail:
         errorHistory.length === 0
           ? 'no recent issues'
-          : `${errorHistory.length} event${errorHistory.length === 1 ? '' : 's'}`,
+          : `${errorHistory.length} event${
+              errorHistory.length === 1 ? '' : 's'
+            }`,
       tone: errorHistory.some(item => item.level === 'error')
         ? 'error'
         : errorHistory.length
-          ? 'warn'
-          : 'idle',
+        ? 'warn'
+        : 'idle',
+    },
+    {
+      key: 'updates',
+      icon: '⇧',
+      title: 'Updates',
+      subtitle: 'Check GitHub releases and install APK updates.',
+      detail: appUpdater.info?.updateAvailable
+        ? `new ${appUpdater.info.latestVersion}`
+        : appUpdater.message || 'GitHub releases',
+      tone: appUpdater.error
+        ? 'error'
+        : appUpdater.info?.updateAvailable
+        ? 'warn'
+        : 'idle',
     },
     {
       key: 'diagnostics',
@@ -3457,7 +3535,9 @@ function SettingsScreen({
                 label="Trusted devices"
                 value={showTrustedDevices}
                 onValueChange={setShowTrustedDevices}
-                detail={`${devices.devices.length} device${devices.devices.length === 1 ? '' : 's'} registered`}
+                detail={`${devices.devices.length} device${
+                  devices.devices.length === 1 ? '' : 's'
+                } registered`}
               />
             ) : null}
             {auth.auth && showTrustedDevices ? (
@@ -3561,6 +3641,71 @@ function SettingsScreen({
                 </View>
               ))
             )}
+          </SettingsSection>
+        );
+
+      case 'updates':
+        return (
+          <SettingsSection
+            title="Updates"
+            subtitle="Check GitHub releases and install Android APK updates."
+          >
+            <StatusRow
+              label="Updater"
+              value={
+                appUpdater.checking
+                  ? 'checking'
+                  : appUpdater.installing
+                  ? 'downloading'
+                  : 'ready'
+              }
+              tone={
+                appUpdater.error
+                  ? 'error'
+                  : appUpdater.info?.updateAvailable
+                  ? 'warn'
+                  : 'idle'
+              }
+            />
+            <SettingLine
+              label="Current"
+              value={appUpdater.info?.currentVersion || 'not checked'}
+            />
+            <SettingLine
+              label="Latest"
+              value={appUpdater.info?.latestVersion || 'not checked'}
+            />
+            <SettingLine
+              label="APK"
+              value={appUpdater.info?.apkName || 'not checked'}
+            />
+            <View style={styles.settingsActions}>
+              <TextButton
+                label={appUpdater.checking ? 'Checking…' : 'Check updates'}
+                variant="primary"
+                disabled={appUpdater.checking || appUpdater.installing}
+                onPress={() => appUpdater.check().catch(() => undefined)}
+              />
+              <TextButton
+                label={appUpdater.installing ? 'Starting…' : 'Install update'}
+                disabled={
+                  appUpdater.checking ||
+                  appUpdater.installing ||
+                  !appUpdater.info?.updateAvailable
+                }
+                onPress={() => appUpdater.install().catch(() => undefined)}
+              />
+            </View>
+            {appUpdater.message ? (
+              <Text style={styles.settingHint}>{appUpdater.message}</Text>
+            ) : null}
+            {appUpdater.error ? (
+              <Text style={styles.errorLine}>{appUpdater.error}</Text>
+            ) : null}
+            <Text style={styles.settingHint}>
+              Android will always ask for confirmation before installing an APK.
+              If prompted, allow Dexyd to install unknown apps, then retry.
+            </Text>
           </SettingsSection>
         );
 
@@ -3836,11 +3981,13 @@ function UsagePanel({
         value={
           usage?.context.percent !== null &&
           usage?.context.percent !== undefined
-            ? `${usage.context.percent}% (${formatCompactNumber(usage.context.usedTokens ?? 0)} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
+            ? `${usage.context.percent}% (${formatCompactNumber(
+                usage.context.usedTokens ?? 0,
+              )} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
             : usage?.context.usedTokens !== null &&
-                usage?.context.usedTokens !== undefined
-              ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-              : 'unknown'
+              usage?.context.usedTokens !== undefined
+            ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+            : 'unknown'
         }
         tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
@@ -3863,7 +4010,10 @@ function UsagePanel({
           style={[
             styles.usageMeterFill,
             {
-              width: `${Math.min(100, Math.max(0, usage?.context.percent ?? 0))}%`,
+              width: `${Math.min(
+                100,
+                Math.max(0, usage?.context.percent ?? 0),
+              )}%`,
             },
             tone === 'warn' && styles.usageMeterFillWarn,
             tone === 'error' && styles.usageMeterFillError,
@@ -3954,8 +4104,8 @@ function CodexAuthPanel({
                   {account.active
                     ? 'active'
                     : codexAuth.switching === account.index
-                      ? 'switching…'
-                      : 'switch'}
+                    ? 'switching…'
+                    : 'switch'}
                 </Text>
               </Pressable>
             ))
@@ -4008,6 +4158,24 @@ function SettingsAppInfo({
         bridge {bridgeHealth} · realtime {socketState} · {sessionsCount} session
         {sessionsCount === 1 ? '' : 's'}
       </Text>
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel="Open Dexyd on GitHub"
+        onPress={() =>
+          Linking.openURL('https://github.com/DrB0rk/dexyd').catch(
+            () => undefined,
+          )
+        }
+        hitSlop={8}
+        style={({ pressed }) => [
+          styles.settingsGithubLink,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.settingsGithubLinkText}>
+          ⌘ GitHub · created by DrB0rk
+        </Text>
+      </Pressable>
     </View>
   );
 }
@@ -4109,6 +4277,18 @@ function attentionItemFromEvent(
     };
   }
 
+  if (eventType === 'chat.turn.completed') {
+    return {
+      id: `update-${event.sequence}`,
+      requestId,
+      kind: 'update',
+      title: `Prompt finished · ${sessionTitle}`,
+      body: body || 'The agent finished the current prompt.',
+      timestamp: event.timestamp,
+      sessionId: event.sessionId,
+    };
+  }
+
   if (eventType === 'chat.turn.failed' || eventType === 'chat.turn.cancelled') {
     return {
       id: `update-${event.sequence}`,
@@ -4169,12 +4349,12 @@ function notificationFromAttention(item: AttentionItem): SystemNotification {
     item.kind === 'message'
       ? 'response'
       : item.kind === 'approval'
-        ? 'approval'
-        : item.kind === 'question'
-          ? 'question'
-          : item.title.toLowerCase().includes('failed')
-            ? 'alert'
-            : 'response';
+      ? 'approval'
+      : item.kind === 'question'
+      ? 'question'
+      : item.title.toLowerCase().includes('failed')
+      ? 'alert'
+      : 'response';
 
   return {
     id: `notice-${item.id}`,
@@ -4211,8 +4391,8 @@ function interactionResponseFromEvent(
     typeof payload.interactionId === 'string'
       ? payload.interactionId
       : typeof payload.requestId === 'string'
-        ? payload.requestId
-        : '';
+      ? payload.requestId
+      : '';
 
   if (!requestId) return null;
 
@@ -4220,8 +4400,8 @@ function interactionResponseFromEvent(
     typeof payload.decision === 'string'
       ? payload.decision
       : typeof payload.answer === 'string'
-        ? payload.answer
-        : 'sent';
+      ? payload.answer
+      : 'sent';
 
   return { requestId, label };
 }
@@ -4276,8 +4456,8 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
   const raw = Array.isArray(payload.choices)
     ? payload.choices
     : Array.isArray(payload.options)
-      ? payload.options
-      : [];
+    ? payload.options
+    : [];
 
   return raw
     .map((choice, index): AttentionChoice | null => {
@@ -4294,10 +4474,10 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
         typeof item.label === 'string'
           ? item.label
           : typeof item.title === 'string'
-            ? item.title
-            : typeof item.text === 'string'
-              ? item.text
-              : '';
+          ? item.title
+          : typeof item.text === 'string'
+          ? item.text
+          : '';
 
       if (!label.trim()) return null;
 
@@ -4327,8 +4507,8 @@ function usageSummary(usage: UsageStatus): string {
     usage.context.percent !== null
       ? `${usage.context.percent}% context`
       : usage.context.usedTokens !== null
-        ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-        : 'context unknown';
+      ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+      : 'context unknown';
   return `${accountUsageLabel(usage)} · ${context}`;
 }
 
@@ -4343,7 +4523,9 @@ function accountUsageLabel(usage: UsageStatus): string {
   return 'account usage unknown';
 }
 
-function accountUsageWarningThreshold(usage: UsageStatus | null): number | null {
+function accountUsageWarningThreshold(
+  usage: UsageStatus | null,
+): number | null {
   const remaining = accountRemainingPercent(usage);
   if (remaining === null) return null;
   if (remaining <= 10) return 10;
@@ -4363,6 +4545,35 @@ function accountUsageWarningBody(
       : `${Math.max(0, Math.round(remaining))}% remaining`;
   const label = usage.limits.label ? ` · ${usage.limits.label}` : '';
   return `Account usage is ${remainingText}${label}`;
+}
+
+function parseAccount5hUsage(value: string): AccountUsageSample | null {
+  const raw = value.trim();
+  if (!raw || /unknown|n\/a|none/i.test(raw)) return null;
+  const percentMatch = raw.match(/(\d+(?:\.\d+)?)\s*%/);
+  if (!percentMatch) return null;
+  const percent = Number(percentMatch[1]);
+  if (!Number.isFinite(percent)) return null;
+  const lower = raw.toLowerCase();
+  const remainingPercent = /used|spent|consumed/.test(lower)
+    ? 100 - percent
+    : percent;
+  return {
+    raw,
+    remainingPercent: Math.max(0, Math.min(100, remainingPercent)),
+  };
+}
+
+function isFiveHourLimitRefresh(
+  previous: AccountUsageSample,
+  next: AccountUsageSample,
+): boolean {
+  const gained = next.remainingPercent - previous.remainingPercent;
+  return (
+    gained >= 20 &&
+    previous.remainingPercent <= 50 &&
+    next.remainingPercent >= 50
+  );
 }
 
 function accountRemainingPercent(usage: UsageStatus | null): number | null {
@@ -4387,7 +4598,8 @@ function lowestRemainingPercent(value: unknown): number | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
   const usedPercent =
-    numericField(record, 'used_percent') ?? numericField(record, 'usedPercentage');
+    numericField(record, 'used_percent') ??
+    numericField(record, 'usedPercentage');
   const percent =
     numericField(record, 'remaining_percent') ??
     numericField(record, 'remainingPercentage') ??
@@ -6106,6 +6318,17 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     marginTop: 2,
     textAlign: 'center',
+  },
+  settingsGithubLink: {
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  settingsGithubLinkText: {
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   settingsSection: {
     marginBottom: 10,

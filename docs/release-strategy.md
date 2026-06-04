@@ -61,8 +61,10 @@ Use semantic versioning.
 Keep these aligned before tagging:
 
 - root `package.json` version;
+- `src/version.ts`;
 - mobile `package.json` version;
-- Android version name/code when release builds are formalized;
+- Android `versionName` and monotonically increasing `versionCode`;
+- mobile updater fallback version;
 - release notes.
 
 Beta package versions and tags use the `-b` suffix, for example:
@@ -101,6 +103,7 @@ Planned/future:
 9. For stable releases, promote `beta` to `main`. For beta releases, keep the release target on `beta`.
 10. Create and publish GitHub Release `vX.Y.Z` or prerelease `vX.Y.Z-b`.
 11. Manually upload `dexyd-vX.Y.Z.apk` or `dexyd-vX.Y.Z-b.apk` to the GitHub Release.
+12. Verify mobile Settings → Updates and TUI Updates can see the new release metadata.
 
 ## Rollback strategy
 

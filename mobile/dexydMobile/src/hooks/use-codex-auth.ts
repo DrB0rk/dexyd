@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AppState } from 'react-native';
 import {
   getCodexAuthStatus,
   switchCodexAuthAccount,
@@ -51,6 +52,22 @@ export function useCodexAuth(bridgeUrl: string, tokens: AuthTokens | null) {
   useEffect(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!tokens) return undefined;
+    const timer = setInterval(() => {
+      refresh().catch(() => undefined);
+    }, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [refresh, tokens]);
+
+  useEffect(() => {
+    if (!tokens) return undefined;
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') refresh().catch(() => undefined);
+    });
+    return () => subscription.remove();
+  }, [refresh, tokens]);
 
   return {
     status,

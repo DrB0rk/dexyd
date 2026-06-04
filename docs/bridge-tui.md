@@ -142,6 +142,20 @@ Devices lists trusted phones. Revoke a device when:
 
 Revocation invalidates that device's refresh tokens.
 
+### Updates
+
+Updates checks GitHub Releases from inside the TUI. It shows:
+
+- installed bridge/TUI version;
+- latest release tag;
+- whether an update is available;
+- release page URL;
+- attached Android APK name and URL when present.
+
+**Install bridge update** downloads the official installer and reruns it against the current installed Dexyd app directory. It preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, and restarts the user service when enabled. Restart the TUI after updating so the running interface uses the new code.
+
+For safety, the TUI refuses to self-update a development checkout outside the installed app directory. Use git and the release workflow for development trees.
+
 ### Help
 
 Help contains quick reminders for commands and common flows.

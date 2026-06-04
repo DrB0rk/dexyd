@@ -1,116 +1,142 @@
-# dexyd
+<div align="center">
+  <img src="assets/dexyd-logo.svg" alt="Dexyd" width="96" />
 
-Dexyd lets you control Codex and OMX sessions from your phone. It runs a small bridge on your computer, pairs with a trusted mobile app, and gives you a focused place to chat with sessions, answer approvals, respond to questions, review changes, and monitor usage.
+# Dexyd
 
-## What you can do
+**A mobile control surface for Codex and OMX sessions.**
 
-- Pair your phone with one or more computers.
-- See Codex/OMX sessions grouped by project.
-- Open a session as a focused chat.
-- Send messages and see responses in real time.
-- Queue follow-up messages while a session is already working.
-- Answer approval requests and multiple-choice questions from the app.
-- Review per-message code diffs after assistant responses complete.
-- Receive in-app notifications for replies, alerts, approvals, and questions.
-- Check account and usage status.
-- Configure LAN, domain, Caddy, or Cloudflare named-tunnel access through the bridge TUI.
-- Revoke trusted devices when needed.
+Pair your phone with your computer, manage sessions by project, chat with agents, answer approvals, inspect diffs, and keep bridge/mobile updates close at hand.
+
+[![Release](https://img.shields.io/github/v/release/DrB0rk/dexyd?label=release)](https://github.com/DrB0rk/dexyd/releases/latest)
+[![Platform](https://img.shields.io/badge/mobile-Android-3DDC84?logo=android&logoColor=white)](docs/mobile-app.md)
+[![Bridge](https://img.shields.io/badge/bridge-Node.js%2020+-339933?logo=node.js&logoColor=white)](docs/installation.md)
+[![TUI](https://img.shields.io/badge/TUI-Textual-8B5CF6)](docs/bridge-tui.md)
+[![Security](https://img.shields.io/badge/security-paired%20devices-64d98b)](docs/security.md)
+[![License](https://img.shields.io/badge/license-not%20declared-lightgrey)](#license)
+
+</div>
+
+---
+
+## Why Dexyd?
+
+Dexyd runs a small bridge on your computer and connects it to a trusted mobile app. It is built for people who use Codex/OMX locally and want a clean phone interface for monitoring and steering sessions without exposing their whole machine carelessly.
+
+## Highlights
+
+- **Pair once, switch easily** — save one or more bridge profiles on your phone.
+- **Sessions by project** — see Codex/OMX sessions grouped by workspace.
+- **Focused chat** — open chat only from a session, with no distracting bottom nav.
+- **Queued follow-ups** — send another message while a session is busy and steer queued prompts before they run.
+- **Approvals and questions** — answer agent prompts from integrated mobile UI.
+- **Per-prompt diffs** — view changed files after a completed response.
+- **Useful notifications** — responses, prompt completion, alerts, approvals, questions, and important account-usage changes.
+- **Connection setup** — LAN, HTTPS domain/Caddy, or Cloudflare named tunnel from the TUI.
+- **Built-in updates** — update the bridge/TUI from the TUI and the Android APK from the mobile app.
 
 ## Requirements
 
-- A computer that can run the Dexyd bridge.
-- Codex CLI installed and authenticated on that computer.
-- Optional: OMX if you want Dexyd to launch sessions through OMX.
-- A phone with the Dexyd mobile app installed.
-- For remote access outside your LAN: a HTTPS domain, Caddy setup, or Cloudflare named tunnel.
+- Linux computer for the bridge installer.
+- Node.js 20+ and Python 3; the installer checks and installs common dependencies where possible.
+- Codex CLI authenticated on the bridge computer.
+- Optional: OMX for OMX-backed sessions and harness behavior.
+- Android phone with the Dexyd APK installed.
+- Optional remote access: HTTPS domain/Caddy or Cloudflare named tunnel.
 
-## Install and start
+## Install the bridge
 
-On Linux, install Dexyd with one command:
+Install Dexyd with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
-The installer puts Dexyd in the XDG app data directory, normally `~/.local/share/dexyd`, cleans/replaces old Dexyd service and command links, checks bridge dependencies, creates configuration with your home directory as the workspace root, installs TUI dependencies, builds the bridge, links the `dexyd` command, verifies the install, and installs or restarts the user service. It does not build or install the Android app.
+The installer:
 
-After installation, open the bridge TUI:
+- installs into the XDG app data location, normally `~/.local/share/dexyd`;
+- creates `dexyd.config.yaml` with your home directory as the workspace root;
+- installs bridge and TUI dependencies;
+- builds the bridge;
+- links the `dexyd` command;
+- installs/restarts the user service when available;
+- does **not** build or install the Android app.
+
+Open the setup console:
 
 ```bash
 dexyd --tui
 ```
 
-To remove an installed bridge before reinstalling:
+Clean an installed bridge before reinstalling:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
 ```
 
-The TUI is the main setup surface. Use it to start or inspect the bridge, configure connection settings, generate pairing QR codes, manage trusted devices, and set up Cloudflare named tunnels.
+## Install the Android app
+
+Download the latest APK from GitHub Releases:
+
+[Latest Dexyd release](https://github.com/DrB0rk/dexyd/releases/latest)
+
+Install the APK on your phone, then pair it with the bridge from the TUI.
 
 ## Pair your phone
 
-1. Start the bridge on your computer.
-2. Open the Dexyd TUI.
-3. Go to **Pair** and generate a QR code.
-4. Open the mobile app.
-5. Scan the QR code during onboarding or from **Settings → Pairing**.
-6. The app saves that computer as a bridge profile.
+1. Run `dexyd --tui` on your computer.
+2. Open **Connection** and choose LAN, domain/Caddy, or Cloudflare named tunnel.
+3. Save the connection.
+4. Open **Pair** and generate a fresh QR code.
+5. Scan the QR from the mobile app onboarding or **Settings → Pairing**.
+6. Open **Sessions** on the phone and select a session to chat.
 
-You can pair multiple computers and switch between them from the app settings.
+Pairing QR codes are short-lived. Generate a new QR after changing LAN/domain/tunnel settings.
 
-## Connection options
+## Updating
 
-### LAN
+### Bridge and TUI
 
-Use LAN when your phone and computer are on the same network. This is the simplest option for home use.
+Open:
 
-### Domain or Caddy
+```bash
+dexyd --tui
+```
 
-Use a HTTPS domain when you want a stable remote address. Configure the public bridge URL in the TUI, then generate a fresh pairing QR code.
+Go to **Updates → Check updates → Install bridge update**. The TUI reruns the official installer for the installed app directory while preserving `dexyd.config.yaml` and `.dexyd` data. Restart the TUI after updating.
 
-### Cloudflare named tunnel
+### Android app
 
-Use the TUI Cloudflare flow when you want remote access without opening router ports. Dexyd can guide the named tunnel setup, save the tunnel URL, and regenerate pairing details.
+Open **Settings → Updates** in the app. Dexyd checks the latest GitHub Release, downloads the APK if one is attached, and opens Android's installer prompt.
 
-## Using the app
+Android does not allow normal APK apps to silently self-update; you must confirm the installation.
 
-### Sessions
+## Security model in short
 
-The Sessions page shows Codex/OMX sessions by project. Each session shows whether it is idle, busy, waiting for input, waiting for approval, stopped, done, or errored.
+- Pairing is local/private-network restricted and short-lived.
+- Mobile access uses trusted-device credentials and refresh tokens.
+- Old phones can be revoked.
+- Project/file access is confined to `codex.workspaceRoot`.
+- Prefer HTTPS or Cloudflare named tunnels outside your LAN.
+- Keep the bridge on networks you trust.
 
-Tap a session to open its chat. The chat opens as a full-screen page so the bottom navigation does not distract from the conversation.
-
-### Inbox
-
-Inbox is only for things that need attention, such as new messages, agent questions, approval requests, and important alerts.
-
-### Chat
-
-The chat view shows your messages, queued follow-ups, assistant responses, compact work status, and completed response actions. When a response changes files, use **View message diff** under that completed message to inspect the code changed by that turn.
-
-### Settings
-
-Settings contains connection profiles, pairing, account and usage status, security/trusted devices, workspace/project options, diagnostics, and app information.
-
-## Security notes
-
-- Pairing codes are temporary. Generate them only when you are ready to pair a trusted phone.
-- Keep the bridge on a trusted LAN unless you are using HTTPS or a secure tunnel.
-- Revoke old phones from the trusted device list if they are lost or replaced.
-- Workspace access is confined to the configured workspace root.
-- Prefer HTTPS domains or Cloudflare tunnels for remote access.
+Read more in [Security model](docs/security.md).
 
 ## Documentation
 
-- [Documentation index](docs/index.md)
 - [Installation](docs/installation.md)
 - [Bridge and TUI](docs/bridge-tui.md)
 - [Mobile app](docs/mobile-app.md)
 - [Configuration](docs/configuration.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Security model](docs/security.md)
+- [API reference](docs/api-reference.md)
+- [Release strategy](docs/release-strategy.md)
+
+## Created by
+
+Dexyd is created and maintained by **DrB0rk**.
+
+- GitHub: [github.com/DrB0rk/dexyd](https://github.com/DrB0rk/dexyd)
 
 ## License
 
-No license has been declared yet.
+No license has been declared yet. Until a license is added, all rights are reserved by default.

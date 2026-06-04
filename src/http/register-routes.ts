@@ -10,6 +10,7 @@ import { fileQuerySchema, readFileQuerySchema } from '../domain/file.js';
 import { createPairingRequestSchema } from '../domain/pairing.js';
 import { createSessionRequestSchema, patchSessionRequestSchema, type SessionRecord, type SessionStatus } from '../domain/session.js';
 import { AppContext } from '../runtime/app-context.js';
+import { DEXYD_VERSION } from '../version.js';
 
 const sessionIdSchema = z
   .string()
@@ -66,6 +67,7 @@ export async function registerRoutes(
 
   app.get('/health/live', async () => ({
     status: 'ok',
+    version: DEXYD_VERSION,
     timestamp: new Date().toISOString()
   }));
 
@@ -83,6 +85,7 @@ export async function registerRoutes(
 
     return {
       status: overallStatus,
+      version: DEXYD_VERSION,
       timestamp: new Date().toISOString(),
       database: databaseHealth,
       modules: moduleHealth
@@ -91,6 +94,7 @@ export async function registerRoutes(
 
   app.get('/capabilities', async () => ({
     name: 'dexyd',
+    version: DEXYD_VERSION,
     modules: moduleManager.getModuleNames(),
     protocol: {
       rest: 'https',

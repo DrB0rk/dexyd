@@ -38,7 +38,7 @@ Basic liveness response.
 Response:
 
 ```json
-{ "status": "ok", "timestamp": "2026-06-01T00:00:00.000Z" }
+{ "status": "ok", "version": "0.0.4", "timestamp": "2026-06-01T00:00:00.000Z" }
 ```
 
 ### `GET /health/ready`
@@ -48,12 +48,13 @@ Readiness check for database and modules.
 Response includes:
 
 - `status`: `ready` or `degraded`;
+- `version`: bridge version;
 - `database` health;
 - module health map.
 
 ### `GET /capabilities`
 
-Returns bridge name, modules, protocol support, and replay limits.
+Returns bridge name, version, modules, protocol support, and replay limits.
 
 ## Pairing and auth
 

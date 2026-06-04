@@ -410,6 +410,7 @@ export class CodexChatService {
               }
             });
           }
+          this.emitCompletion(input.session.id, input.turnId, code ?? 0, Boolean(cleanOutput), truncated);
           this.setSessionStatus(input.session.id, 'idle');
           this.startNextQueuedTurn(input.session);
         } else {
@@ -546,6 +547,15 @@ export class CodexChatService {
       source: 'session',
       sessionId,
       payload: session
+    });
+  }
+
+  private emitCompletion(sessionId: string, turnId: string, exitCode: number, hasOutput: boolean, truncated: boolean): void {
+    this.eventService.emit({
+      eventType: 'chat.turn.completed',
+      source: 'codexAdapter',
+      sessionId,
+      payload: { turnId, exitCode, hasOutput, truncated }
     });
   }
 

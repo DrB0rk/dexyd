@@ -69,6 +69,10 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
     };
   }
 
+  if (event.eventType === 'chat.turn.completed') {
+    return null;
+  }
+
   if (
     event.eventType === 'chat.turn.failed' ||
     event.eventType === 'chat.turn.cancelled'
@@ -82,8 +86,8 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
         typeof payload.message === 'string'
           ? payload.message
           : cancelled
-            ? 'Codex turn cancelled.'
-            : 'Chat turn failed.',
+          ? 'Codex turn cancelled.'
+          : 'Chat turn failed.',
       createdAt: event.timestamp,
       sequence: event.sequence,
       status: cancelled ? 'cancelled' : 'failed',
@@ -104,8 +108,8 @@ function eventToQueuedMessage(event: EventEnvelope): QueuedChatMessage | null {
     typeof payload.queueId === 'string'
       ? payload.queueId
       : typeof payload.id === 'string'
-        ? payload.id
-        : '';
+      ? payload.id
+      : '';
   const turnId = typeof payload.turnId === 'string' ? payload.turnId : '';
   const sessionId = typeof event.sessionId === 'string' ? event.sessionId : '';
   const content = typeof payload.content === 'string' ? payload.content : '';
