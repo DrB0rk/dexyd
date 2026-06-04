@@ -253,7 +253,11 @@ def install_latest_bridge_update(root: Path) -> str:
         "--dir",
         str(root),
     ]
-    result = run_capture(command, timeout=600, env={**os.environ, "DEXYD_INSTALL_DIR": str(root)})
+    env = {**os.environ, "DEXYD_INSTALL_DIR": str(root)}
+    venv_bin = str(root / ".dexyd" / ".venv-tui" / "bin")
+    env["PATH"] = os.pathsep.join(part for part in env.get("PATH", "").split(os.pathsep) if part != venv_bin)
+    env.pop("VIRTUAL_ENV", None)
+    result = run_capture(command, timeout=600, env=env)
     output = (result.stdout + "\n" + result.stderr).strip()
     if result.returncode != 0:
         raise RuntimeError(f"Installer failed with exit {result.returncode}:\n{output[-4000:]}")
