@@ -14,6 +14,7 @@ import { errorMessage } from '../utils/error-message';
 
 const CHAT_POLL_INTERVAL_MS = 3500;
 const CHAT_ACTIVE_POLL_INTERVAL_MS = 1200;
+const CHAT_SEND_FOLLOWUP_REFRESH_MS = 350;
 const TRANSIENT_MESSAGE_KEEP_MS = 2 * 60 * 1000;
 const CHAT_CACHE_KEY = 'dexyd.chat.cache.v1';
 const MAX_CACHED_MESSAGES = 260;
@@ -743,6 +744,8 @@ export function useChat(
   const [error, setError] = useState<string | null>(null);
   const pendingUserMessagesRef = useRef<ChatMessage[]>([]);
   const refreshRequestRef = useRef(0);
+  const refreshInFlightRef = useRef(false);
+  const queuedRefreshRef = useRef<{ silent: boolean } | null>(null);
   const cacheReadyRef = useRef(false);
   const activeChatKeyRef = useRef<string | null>(null);
   const [cacheReadyVersion, setCacheReadyVersion] = useState(0);
@@ -758,6 +761,13 @@ export function useChat(
 
   const refresh = useCallback(
     async (silent = false) => {
+      if (refreshInFlightRef.current) {
+        queuedRefreshRef.current = {
+          silent: (queuedRefreshRef.current?.silent ?? true) && silent,
+        };
+        return;
+      }
+
       if (!tokens || !sessionId) {
         refreshRequestRef.current += 1;
         setMessages(current => nextChatMessages(current, []));
@@ -766,7 +776,8 @@ export function useChat(
         return;
       }
 
-      const requestId = ++refreshRequestRef.current;
+      const requestId = refreshRequestRef.current;
+      refreshInFlightRef.current = true;
       if (!silent) setLoading(true);
       setError(null);
       try {
@@ -807,8 +818,19 @@ export function useChat(
         if (silent) return;
         setError(errorMessage(err, 'failed to load chat'));
       } finally {
-        if (requestId === refreshRequestRef.current && !silent) {
+        if (requestId !== refreshRequestRef.current) {
+          return;
+        }
+        if (!silent) {
           setLoading(false);
+        }
+        refreshInFlightRef.current = false;
+        const queued = queuedRefreshRef.current;
+        queuedRefreshRef.current = null;
+        if (queued) {
+          setTimeout(() => {
+            refresh(queued.silent).catch(() => undefined);
+          }, 0);
         }
       }
     },
@@ -867,6 +889,9 @@ export function useChat(
             nextChatMessages(current, mergeMessage(current, sent)),
           );
         }
+        setTimeout(() => {
+          refresh(true).catch(() => undefined);
+        }, CHAT_SEND_FOLLOWUP_REFRESH_MS);
         return true;
       } catch (err) {
         pendingUserMessagesRef.current = pendingUserMessagesRef.current.filter(
@@ -884,7 +909,7 @@ export function useChat(
         setSending(false);
       }
     },
-    [bridgeUrl, sessionId, tokens],
+    [bridgeUrl, refresh, sessionId, tokens],
   );
 
   const steerQueued = useCallback(
@@ -958,6 +983,8 @@ export function useChat(
 
   useEffect(() => {
     refreshRequestRef.current += 1;
+    refreshInFlightRef.current = false;
+    queuedRefreshRef.current = null;
     cacheReadyRef.current = false;
     const nextCacheKey =
       tokens && sessionId ? cacheKeyForChat(bridgeUrl, sessionId) : null;
@@ -1057,6 +1084,11 @@ export function useChat(
       return;
     }
     if (lastEvent.sessionId !== sessionId) return;
+    if (lastEvent.eventType === 'chat.turn.completed') {
+      refresh(true).catch(() => undefined);
+      refreshQueue().catch(() => undefined);
+      return;
+    }
     if (lastEvent.eventType === 'chat.output.delta') {
       setMessages(current =>
         nextChatMessages(current, mergeDelta(current, lastEvent)),

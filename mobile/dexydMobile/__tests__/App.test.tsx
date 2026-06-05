@@ -44,6 +44,18 @@ jest.mock('../src/hooks/use-bridge-settings', () => ({
   })
 }));
 
+jest.mock('../src/hooks/use-app-updater', () => ({
+  useAppUpdater: () => ({
+    checking: false,
+    installing: false,
+    info: null,
+    message: null,
+    error: null,
+    check: jest.fn().mockResolvedValue(null),
+    install: jest.fn().mockResolvedValue(false)
+  })
+}));
+
 jest.mock('../src/hooks/use-sessions', () => ({
   useSessions: () => ({
     sessions: [],

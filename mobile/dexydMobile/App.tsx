@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   BackHandler,
   Dimensions,
   FlatList,
@@ -32,7 +33,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { getHealth, respondToInteraction } from './src/api/dexyd-client';
-import { useAppUpdater } from './src/hooks/use-app-updater';
+import { useAppUpdater, type AppUpdateInfo } from './src/hooks/use-app-updater';
 import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
@@ -225,6 +226,12 @@ export default function App() {
   const [transientSession, setTransientSession] = useState<DexydSession | null>(
     null,
   );
+  const [startupUpdateInfo, setStartupUpdateInfo] =
+    useState<AppUpdateInfo | null>(null);
+  const startupUpdateCheckedRef = useRef(false);
+  const pageTranslateX = useRef(new Animated.Value(0)).current;
+  const pageOpacity = useRef(new Animated.Value(1)).current;
+  const previousTabRef = useRef<TabKey>('sessions');
 
   const bridgeSettings = useBridgeSettings();
   const auth = useAuth(
@@ -274,6 +281,8 @@ export default function App() {
   );
   const codexAuth = useCodexAuth(bridgeSettings.bridgeUrl, tokens);
   const appUpdater = useAppUpdater();
+  const checkForAppUpdate = appUpdater.check;
+  const installAppUpdate = appUpdater.install;
   const usageAlertThresholdsRef = useRef<Set<number>>(new Set());
   const account5hUsageRef = useRef<Map<string, AccountUsageSample>>(new Map());
   const lastErrorNotificationRef = useRef<string | null>(null);
@@ -310,6 +319,29 @@ export default function App() {
   useEffect(() => {
     refreshSystemNotificationPermission().catch(() => undefined);
   }, [refreshSystemNotificationPermission]);
+
+  useEffect(() => {
+    if (
+      startupUpdateCheckedRef.current ||
+      bridgeSettings.loading ||
+      auth.loading
+    ) {
+      return undefined;
+    }
+
+    startupUpdateCheckedRef.current = true;
+    const timer = setTimeout(() => {
+      checkForAppUpdate()
+        .then(info => {
+          if (info?.updateAvailable) {
+            setStartupUpdateInfo(info);
+          }
+        })
+        .catch(() => undefined);
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [auth.loading, bridgeSettings.loading, checkForAppUpdate]);
 
   const updateNotificationSetting = useCallback(
     (key: keyof NotificationSettings, value: boolean) => {
@@ -792,6 +824,37 @@ export default function App() {
     !addSessionOpen &&
     !scannerOpen;
 
+  useEffect(() => {
+    const previous = previousTabRef.current;
+    previousTabRef.current = tab;
+
+    const previousIndex = bottomTabOrder.indexOf(previous as BottomTabKey);
+    const nextIndex = bottomTabOrder.indexOf(tab as BottomTabKey);
+    if (previous === tab || previousIndex < 0 || nextIndex < 0) {
+      pageTranslateX.setValue(0);
+      pageOpacity.setValue(1);
+      return;
+    }
+
+    const direction = nextIndex > previousIndex ? 1 : -1;
+    pageTranslateX.setValue(direction * 28);
+    pageOpacity.setValue(0.84);
+    Animated.parallel([
+      Animated.spring(pageTranslateX, {
+        toValue: 0,
+        damping: 18,
+        stiffness: 210,
+        mass: 0.65,
+        useNativeDriver: true,
+      }),
+      Animated.timing(pageOpacity, {
+        toValue: 1,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [pageOpacity, pageTranslateX, tab]);
+
   const pageSwipeResponder = useMemo(
     () =>
       PanResponder.create({
@@ -804,22 +867,59 @@ export default function App() {
             horizontal > vertical * 1.5
           );
         },
+        onPanResponderMove: (_, gesture) => {
+          if (!pageSwipeEnabled) return;
+          const damped = Math.max(-22, Math.min(22, gesture.dx * 0.14));
+          pageTranslateX.setValue(damped);
+        },
         onPanResponderRelease: (_, gesture) => {
           if (!pageSwipeEnabled) return;
           const force =
             Math.abs(gesture.dx) >= PAGE_SWIPE_DISTANCE ||
             Math.abs(gesture.vx) >= PAGE_SWIPE_VELOCITY;
-          if (!force) return;
+          if (!force) {
+            Animated.spring(pageTranslateX, {
+              toValue: 0,
+              damping: 18,
+              stiffness: 220,
+              useNativeDriver: true,
+            }).start();
+            return;
+          }
           const currentIndex = bottomTabOrder.indexOf(tab as BottomTabKey);
-          if (currentIndex < 0) return;
+          if (currentIndex < 0) {
+            Animated.spring(pageTranslateX, {
+              toValue: 0,
+              damping: 18,
+              stiffness: 220,
+              useNativeDriver: true,
+            }).start();
+            return;
+          }
           const nextIndex =
             gesture.dx < 0 ? currentIndex + 1 : currentIndex - 1;
           const nextTab = bottomTabOrder[nextIndex];
-          if (nextTab) setTab(nextTab);
+          if (nextTab) {
+            setTab(nextTab);
+          } else {
+            Animated.spring(pageTranslateX, {
+              toValue: 0,
+              damping: 18,
+              stiffness: 220,
+              useNativeDriver: true,
+            }).start();
+          }
         },
-        onPanResponderTerminate: () => undefined,
+        onPanResponderTerminate: () => {
+          Animated.spring(pageTranslateX, {
+            toValue: 0,
+            damping: 18,
+            stiffness: 220,
+            useNativeDriver: true,
+          }).start();
+        },
       }),
-    [pageSwipeEnabled, tab],
+    [pageSwipeEnabled, pageTranslateX, tab],
   );
 
   return (
@@ -898,7 +998,16 @@ export default function App() {
               />
             </>
           )}
-          <View style={styles.content} {...pageSwipeResponder.panHandlers}>
+          <Animated.View
+            style={[
+              styles.content,
+              {
+                opacity: pageOpacity,
+                transform: [{ translateX: pageTranslateX }],
+              },
+            ]}
+            {...pageSwipeResponder.panHandlers}
+          >
             {showOnboarding ? (
               <OnboardingScreen
                 bridgeUrl={bridgeSettings.bridgeUrl}
@@ -933,7 +1042,15 @@ export default function App() {
                 onClear={() => setAttentionItems([])}
                 onRefresh={sessions.refresh}
                 onOpenSession={sessionId => {
-                  if (sessionId) setActiveSessionId(sessionId);
+                  if (sessionId) {
+                    const session = sessions.sessions.find(
+                      item => item.id === sessionId,
+                    );
+                    if (session?.workspacePath) {
+                      setSelectedProjectPath(session.workspacePath);
+                    }
+                    setActiveSessionId(sessionId);
+                  }
                   setProjectMenuOpen(false);
                   setProjectPickerOpen(false);
                   setTab('chat');
@@ -946,6 +1063,7 @@ export default function App() {
                 loading={auth.loading || sessions.loading}
                 authReady={Boolean(auth.auth)}
                 sessions={sessions.sessions}
+                selectedProject={selectedProject}
                 usage={usage.usage}
                 connectivity={sessions.connectivity}
                 error={sessions.error}
@@ -1017,7 +1135,7 @@ export default function App() {
                 }}
               />
             ) : null}
-          </View>
+          </Animated.View>
           <SystemNotificationToast
             notification={systemNotification}
             onDismiss={() => setSystemNotification(null)}
@@ -1034,6 +1152,15 @@ export default function App() {
                   ? 'inbox'
                   : 'sessions',
               );
+            }}
+          />
+          <StartupUpdatePrompt
+            info={startupUpdateInfo}
+            installing={appUpdater.installing}
+            onDismiss={() => setStartupUpdateInfo(null)}
+            onInstall={() => {
+              setStartupUpdateInfo(null);
+              installAppUpdate().catch(() => undefined);
             }}
           />
           {keyboardVisible || tab === 'chat' || showOnboarding ? null : (
@@ -1233,6 +1360,54 @@ function SystemNotificationToast({
         <Text style={styles.systemToastClose}>×</Text>
       </Pressable>
     </Pressable>
+  );
+}
+
+function StartupUpdatePrompt({
+  info,
+  installing,
+  onDismiss,
+  onInstall,
+}: {
+  info: AppUpdateInfo | null;
+  installing: boolean;
+  onDismiss: () => void;
+  onInstall: () => void;
+}) {
+  if (!info) return null;
+
+  return (
+    <View style={styles.updatePromptBackdrop} pointerEvents="box-none">
+      <View style={styles.updatePromptCard}>
+        <View style={styles.updatePromptHeader}>
+          <Text style={styles.updatePromptKicker}>Update available</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss update prompt"
+            onPress={onDismiss}
+            hitSlop={10}
+          >
+            <Text style={styles.updatePromptClose}>×</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.updatePromptTitle}>
+          Dexyd {info.latestVersion}
+        </Text>
+        <Text style={styles.updatePromptBody}>
+          Installed: {info.currentVersion} · APK:{' '}
+          {info.apkName ?? 'not attached'}
+        </Text>
+        <View style={styles.updatePromptActions}>
+          <TextButton label="Later" onPress={onDismiss} />
+          <TextButton
+            label={installing ? 'Starting…' : 'Update'}
+            onPress={onInstall}
+            variant="primary"
+            disabled={installing}
+          />
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -1655,26 +1830,34 @@ function ChatScreen({
     () => visibleChatMessages(chat.messages),
     [chat.messages],
   );
-  const promptDiffTurnIds = useMemo(() => {
-    const assistantCompletedTurns = new Set(
+  const activeSessionKey = activeSession?.id ?? null;
+  const activeSessionStatus = activeSession?.status ?? null;
+  const refreshChat = chat.refresh;
+  const assistantDiffMessageIds = useMemo(() => {
+    const userTurns = new Set(
       chat.messages
-        .filter(
-          message =>
-            message.role === 'assistant' &&
-            message.status === 'sent' &&
-            Boolean(message.turnId),
-        )
+        .filter(message => message.role === 'user' && Boolean(message.turnId))
         .map(message => message.turnId),
     );
+
+    const lastAssistantByTurn = new Map<string, ChatMessage>();
+    for (const message of chat.messages) {
+      if (
+        message.role !== 'assistant' ||
+        message.status !== 'sent' ||
+        !message.turnId ||
+        !userTurns.has(message.turnId)
+      ) {
+        continue;
+      }
+      const current = lastAssistantByTurn.get(message.turnId);
+      if (!current || message.sequence >= current.sequence) {
+        lastAssistantByTurn.set(message.turnId, message);
+      }
+    }
+
     return new Set(
-      chat.messages
-        .filter(
-          message =>
-            message.role === 'user' &&
-            message.status === 'sent' &&
-            assistantCompletedTurns.has(message.turnId),
-        )
-        .map(message => message.turnId),
+      [...lastAssistantByTurn.values()].map(message => message.id),
     );
   }, [chat.messages]);
 
@@ -1734,6 +1917,16 @@ function ChatScreen({
       scrollToLatest(false);
     }
   }, [keyboardLift, scrollToLatest]);
+
+  useEffect(() => {
+    if (!activeSessionKey || activeSessionStatus !== 'running')
+      return undefined;
+    refreshChat(true).catch(() => undefined);
+    const timer = setInterval(() => {
+      refreshChat(true).catch(() => undefined);
+    }, 1200);
+    return () => clearInterval(timer);
+  }, [activeSessionKey, activeSessionStatus, refreshChat]);
 
   useEffect(() => {
     if (
@@ -1878,9 +2071,9 @@ function ChatScreen({
           <MessageRow
             message={item}
             showDiffButton={
-              item.role === 'user' &&
+              item.role === 'assistant' &&
               item.status === 'sent' &&
-              promptDiffTurnIds.has(item.turnId)
+              assistantDiffMessageIds.has(item.id)
             }
             diffLoading={diff.loading && diff.loadingTurnId === item.turnId}
             onViewDiff={() => openMessageDiff(item.turnId)}
@@ -3043,6 +3236,7 @@ function SessionsScreen({
   loading,
   authReady,
   sessions,
+  selectedProject,
   usage,
   connectivity,
   error,
@@ -3056,6 +3250,7 @@ function SessionsScreen({
   loading: boolean;
   authReady: boolean;
   sessions: DexydSession[];
+  selectedProject: ProjectOption;
   usage: UsageStatus | null;
   connectivity: 'idle' | 'online' | 'offline' | 'error';
   error: string | null;
@@ -3072,6 +3267,10 @@ function SessionsScreen({
     return <QuietSpinner />;
   }
 
+  const projectSessions = sessions.filter(session =>
+    sessionBelongsToProject(session, selectedProject),
+  );
+
   if (loading && sessions.length === 0) {
     return <QuietSpinner />;
   }
@@ -3086,7 +3285,15 @@ function SessionsScreen({
     />
   );
 
-  if (sessions.length === 0) {
+  const visibleSessions = projectSessions.filter(
+    session => !isHiddenDexydSession(session),
+  );
+  const hiddenSessions = projectSessions.filter(isHiddenDexydSession);
+  const pendingBySession = pendingAttentionBySession(attentionItems);
+  const sections = sessionSections(visibleSessions, pendingBySession);
+  const visibleCount = visibleSessions.length;
+
+  if (projectSessions.length === 0) {
     return (
       <ScrollView
         style={styles.fill}
@@ -3097,21 +3304,16 @@ function SessionsScreen({
           style={styles.emptyTapArea}
           onPress={() => onRefresh().catch(() => undefined)}
         >
-          <Text style={styles.quietText}>
-            No Codex sessions found. Pull or tap to refresh.
+          <Text style={styles.sessionEmptyTitle}>No sessions here</Text>
+          <Text style={styles.sessionEmptyText}>
+            {selectedProject.label} has no Codex sessions yet. Pull to refresh
+            or tap + to create one.
           </Text>
           {error ? <Text style={styles.errorLine}>{error}</Text> : null}
         </Pressable>
       </ScrollView>
     );
   }
-
-  const visibleSessions = sessions.filter(
-    session => !isHiddenDexydSession(session),
-  );
-  const hiddenSessions = sessions.filter(isHiddenDexydSession);
-  const projectGroups = groupSessionsByProject(visibleSessions);
-  const pendingBySession = pendingAttentionBySession(attentionItems);
 
   return (
     <ScrollView
@@ -3130,33 +3332,51 @@ function SessionsScreen({
       ) : null}
       {error ? <Text style={styles.errorLine}>{error}</Text> : null}
       {usage ? <SessionUsageSummary usage={usage} /> : null}
-      {projectGroups.map(group => (
-        <View key={group.projectPath} style={styles.sessionProjectGroup}>
-          <View style={styles.sessionProjectHeader}>
+      <View style={styles.sessionProjectSummary}>
+        <View style={styles.sessionProjectHeader}>
+          <View style={styles.sessionProjectTitleBlock}>
             <Text style={styles.sessionProjectName} numberOfLines={1}>
-              {group.projectName}
+              {selectedProject.label}
             </Text>
-            <Text style={styles.sessionProjectCount} numberOfLines={1}>
-              {group.sessions.length} session
-              {group.sessions.length === 1 ? '' : 's'}
+            <Text style={styles.sessionProjectPath} numberOfLines={1}>
+              {selectedProject.detail}
             </Text>
           </View>
-          <Text style={styles.sessionProjectPath} numberOfLines={1}>
-            {group.projectPath}
+          <Text style={styles.sessionProjectCount} numberOfLines={1}>
+            {visibleCount} session{visibleCount === 1 ? '' : 's'}
           </Text>
-          {group.sessions.map(session => (
-            <SessionListRow
-              key={session.id}
-              session={session}
-              pendingAttention={pendingBySession.get(session.id) ?? []}
-              active={activeSessionId === session.id}
-              onSelect={onSelect}
-              onCancel={onCancel}
-              onDelete={onDelete}
-            />
-          ))}
         </View>
-      ))}
+      </View>
+      {sections.map(section =>
+        section.sessions.length > 0 ? (
+          <View key={section.key} style={styles.sessionSection}>
+            <View style={styles.sessionSectionHeader}>
+              <Text style={styles.sessionSectionTitle}>{section.title}</Text>
+              <Text style={styles.sessionSectionCount}>
+                {section.sessions.length}
+              </Text>
+            </View>
+            {section.sessions.map(session => (
+              <SessionListRow
+                key={session.id}
+                session={session}
+                pendingAttention={pendingBySession.get(session.id) ?? []}
+                active={activeSessionId === session.id}
+                onSelect={onSelect}
+                onCancel={onCancel}
+                onDelete={onDelete}
+              />
+            ))}
+          </View>
+        ) : null,
+      )}
+      {visibleCount === 0 && hiddenSessions.length > 0 ? (
+        <View style={styles.sessionSection}>
+          <Text style={styles.sessionEmptyText}>
+            Only hidden Dexyd helper sessions exist in this project.
+          </Text>
+        </View>
+      ) : null}
       {hiddenSessions.length > 0 ? (
         <View style={styles.hiddenSessionsBlock}>
           <Pressable
@@ -3317,27 +3537,75 @@ function sessionContextLabel(session: DexydSession): string | null {
   return null;
 }
 
-function groupSessionsByProject(sessions: DexydSession[]) {
-  const groups = new Map<string, DexydSession[]>();
+function normalizeProjectPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '.') return '.';
+  return trimmed.replace(/\/+$/, '') || '/';
+}
+
+function sessionBelongsToProject(
+  session: DexydSession,
+  project: ProjectOption,
+): boolean {
+  const sessionPath = normalizeProjectPath(session.workspacePath);
+  const projectPath = normalizeProjectPath(project.path);
+  const projectDetail = normalizeProjectPath(project.detail);
+
+  return (
+    sessionPath === projectPath ||
+    (projectPath === '.' && sessionPath === projectDetail)
+  );
+}
+
+function sortSessionsByUpdatedAt(items: DexydSession[]): DexydSession[] {
+  return [...items].sort(
+    (a, b) =>
+      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
+}
+
+function sessionSections(
+  sessions: DexydSession[],
+  pendingBySession: Map<string, AttentionItem[]>,
+) {
+  const waiting: DexydSession[] = [];
+  const active: DexydSession[] = [];
+  const errored: DexydSession[] = [];
+  const recent: DexydSession[] = [];
+
   for (const session of sessions) {
-    const key = session.workspacePath || 'unknown project';
-    groups.set(key, [...(groups.get(key) ?? []), session]);
+    const status = sessionUiStatus(
+      session,
+      pendingBySession.get(session.id) ?? [],
+    );
+    if (status.kind === 'warn') waiting.push(session);
+    else if (session.status === 'running') active.push(session);
+    else if (status.kind === 'error') errored.push(session);
+    else recent.push(session);
   }
 
-  return Array.from(groups.entries())
-    .map(([projectPath, items]) => ({
-      projectPath,
-      projectName: projectNameFromPath(projectPath),
-      sessions: items.sort(
-        (a, b) =>
-          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-      ),
-    }))
-    .sort((a, b) => {
-      const latestA = new Date(a.sessions[0]?.updatedAt ?? 0).getTime();
-      const latestB = new Date(b.sessions[0]?.updatedAt ?? 0).getTime();
-      return latestB - latestA || a.projectName.localeCompare(b.projectName);
-    });
+  return [
+    {
+      key: 'waiting',
+      title: 'Waiting for you',
+      sessions: sortSessionsByUpdatedAt(waiting),
+    },
+    {
+      key: 'active',
+      title: 'Working',
+      sessions: sortSessionsByUpdatedAt(active),
+    },
+    {
+      key: 'errored',
+      title: 'Needs attention',
+      sessions: sortSessionsByUpdatedAt(errored),
+    },
+    {
+      key: 'recent',
+      title: 'Recent',
+      sessions: sortSessionsByUpdatedAt(recent),
+    },
+  ];
 }
 
 function pendingAttentionBySession(
@@ -5467,6 +5735,69 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     paddingLeft: 10,
   },
+  updatePromptBackdrop: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  updatePromptCard: {
+    width: '100%',
+    maxWidth: 380,
+    padding: 14,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#3b3b3e',
+    backgroundColor: '#242426',
+    shadowColor: '#000',
+    shadowOpacity: 0.32,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 18,
+  },
+  updatePromptHeader: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  updatePromptKicker: {
+    color: palette.ok,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  updatePromptClose: {
+    color: palette.dim,
+    fontSize: 24,
+    lineHeight: 26,
+    fontWeight: '700',
+  },
+  updatePromptTitle: {
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: -0.3,
+    marginBottom: 6,
+  },
+  updatePromptBody: {
+    color: palette.muted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 12,
+  },
+  updatePromptActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+  },
   projectMenu: {
     position: 'absolute',
     top: 58,
@@ -6568,36 +6899,77 @@ const styles = StyleSheet.create({
   },
   terminalList: {
     paddingHorizontal: 14,
-    paddingTop: 4,
+    paddingTop: 2,
     paddingBottom: 18,
   },
-  sessionProjectGroup: {
-    marginBottom: 14,
+  sessionProjectSummary: {
+    paddingBottom: 10,
+    marginBottom: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.line,
   },
   sessionProjectHeader: {
-    minHeight: 24,
+    minHeight: 34,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
   },
-  sessionProjectName: {
+  sessionProjectTitleBlock: {
     flex: 1,
     minWidth: 0,
+  },
+  sessionProjectName: {
     color: palette.text,
-    fontSize: 13,
+    fontSize: 16,
     fontWeight: '900',
-    letterSpacing: 0.2,
+    letterSpacing: -0.25,
   },
   sessionProjectCount: {
-    color: palette.dim,
-    fontSize: 11,
-    fontWeight: '700',
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '800',
   },
   sessionProjectPath: {
     color: palette.dim,
     fontSize: 11,
-    marginBottom: 4,
+    marginTop: 2,
+  },
+  sessionSection: {
+    marginTop: 10,
+  },
+  sessionSectionHeader: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.line,
+  },
+  sessionSectionTitle: {
+    color: palette.muted,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  sessionSectionCount: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  sessionEmptyTitle: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '900',
+    marginBottom: 6,
+  },
+  sessionEmptyText: {
+    color: palette.dim,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+    paddingHorizontal: 24,
   },
   sessionUsageSummary: {
     minHeight: 38,
