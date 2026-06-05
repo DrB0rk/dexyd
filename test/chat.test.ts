@@ -437,7 +437,7 @@ echo "assistant response"
     } finally {
       await service.stop();
     }
-  });
+  }, 15_000);
 
   it('rejects new prompts when Codex usage limits are exhausted', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-limit-'));

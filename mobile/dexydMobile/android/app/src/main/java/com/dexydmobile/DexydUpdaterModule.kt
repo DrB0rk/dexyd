@@ -1,5 +1,6 @@
 package com.dexydmobile
 
+import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageInstaller
@@ -90,7 +91,7 @@ class DexydUpdaterModule(
     }
 
     val safeFileName = sanitizeApkFileName(fileName)
-    showToast("Preparing Dexyd update…")
+    showToast("Downloading Dexyd update…")
 
     executor.execute {
       var sessionId = -1
@@ -122,6 +123,7 @@ class DexydUpdaterModule(
 
           val callback = Intent(reactContext, DexydInstallActivity::class.java).apply {
             action = DexydInstallActivity.ACTION_INSTALL_COMMIT
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra(DexydInstallActivity.EXTRA_APK_NAME, safeFileName)
           }
           val pendingIntent = PendingIntent.getActivity(
@@ -129,11 +131,12 @@ class DexydUpdaterModule(
             sessionId,
             callback,
             pendingIntentFlags(),
+            pendingIntentOptions(),
           )
           session.commit(pendingIntent.intentSender)
         }
 
-        showToast("Opening Android installer…")
+        showToast("Opening Android update prompt…")
         promise.resolve(sessionId.toString())
       } catch (error: Exception) {
         if (sessionId != -1) {
@@ -144,7 +147,7 @@ class DexydUpdaterModule(
           }
         }
         showToast("Dexyd update could not be prepared.", Toast.LENGTH_LONG)
-        promise.reject("update_install_failed", "Could not stage Dexyd update for Android installer.", error)
+        promise.reject("update_install_failed", "Could not stage Dexyd update for Android installer: ${error.message ?: "unknown error"}", error)
       } finally {
         connection?.disconnect()
       }
@@ -164,7 +167,7 @@ class DexydUpdaterModule(
       }
       connection.instanceFollowRedirects = false
       connection.connectTimeout = 20_000
-      connection.readTimeout = 90_000
+      connection.readTimeout = 120_000
       connection.setRequestProperty("Accept", "$APK_MIME_TYPE, application/octet-stream")
       connection.setRequestProperty("User-Agent", "Dexyd Android updater")
       connection.connect()
@@ -200,6 +203,19 @@ class DexydUpdaterModule(
     } else {
       update
     }
+  }
+
+  private fun pendingIntentOptions(): android.os.Bundle? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
+    val mode = if (Build.VERSION.SDK_INT >= 36) {
+      ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+    } else {
+      @Suppress("DEPRECATION")
+      ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+    }
+    return ActivityOptions.makeBasic().apply {
+      setPendingIntentBackgroundActivityStartMode(mode)
+    }.toBundle()
   }
 
   private fun isTrustedApkSource(uri: Uri): Boolean {
