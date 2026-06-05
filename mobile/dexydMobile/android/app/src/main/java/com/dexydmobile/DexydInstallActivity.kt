@@ -3,10 +3,13 @@ package com.dexydmobile
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -30,6 +33,7 @@ class DexydInstallActivity : Activity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     setContentView(createContentView())
+    configurePopupWindow()
     handleIntent(intent)
   }
 
@@ -198,6 +202,22 @@ class DexydInstallActivity : Activity() {
     throw IOException("Update download redirected too many times.")
   }
 
+  private fun configurePopupWindow() {
+    val density = resources.displayMetrics.density
+    val screenWidth = resources.displayMetrics.widthPixels
+    val maxWidth = (420 * density).toInt()
+    val horizontalMargin = (48 * density).toInt()
+    val popupWidth = (screenWidth - horizontalMargin).coerceAtMost(maxWidth).coerceAtLeast((280 * density).toInt())
+
+    window?.apply {
+      setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+      setDimAmount(0.58f)
+      addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+      setGravity(Gravity.CENTER)
+      setLayout(popupWidth, WindowManager.LayoutParams.WRAP_CONTENT)
+    }
+  }
+
   private fun createContentView(): View {
     val density = resources.displayMetrics.density
     fun dp(value: Int): Int = (value * density).toInt()
@@ -205,12 +225,12 @@ class DexydInstallActivity : Activity() {
     val root = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER
-      setPadding(dp(28), dp(28), dp(28), dp(28))
-      setBackgroundColor(0xFF181818.toInt())
+      setPadding(dp(24), dp(24), dp(24), dp(22))
+      setBackgroundResource(R.drawable.dexyd_update_popup_background)
     }
     titleView = TextView(this).apply {
       text = "Preparing Dexyd update"
-      textSize = 20f
+      textSize = 18f
       setTextColor(0xFFF4F4F4.toInt())
       gravity = Gravity.CENTER
     }
@@ -219,7 +239,7 @@ class DexydInstallActivity : Activity() {
       textSize = 14f
       setTextColor(0xFFBDBDBD.toInt())
       gravity = Gravity.CENTER
-      setPadding(0, dp(10), 0, dp(20))
+      setPadding(0, dp(8), 0, dp(18))
     }
     progressBar = ProgressBar(this).apply {
       isIndeterminate = true

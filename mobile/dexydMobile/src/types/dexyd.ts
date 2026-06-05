@@ -25,6 +25,13 @@ export type DexydSession = {
 };
 
 
+
+export type HiddenDexydSession = {
+  id: string;
+  hiddenAt: string;
+  session: DexydSession | null;
+};
+
 export type QueuedChatMessage = {
   queueId: string;
   turnId: string;

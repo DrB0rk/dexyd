@@ -65,4 +65,68 @@ describe('session deletion', () => {
       await service.stop();
     }
   });
+
+  it('lists hidden sessions, restores them, and includes sessions in project subdirectories', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-session-restore-'));
+    cleanupPaths.push(tempDir);
+    const workspaceRoot = join(tempDir, 'workspace');
+    const projectRoot = join(workspaceRoot, 'dexyd');
+    const nestedProjectDir = join(projectRoot, 'mobile');
+    mkdirSync(nestedProjectDir, { recursive: true });
+    const configPath = join(tempDir, 'dexyd.yaml');
+    writeFileSync(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: 4555
+storage:
+  sqlitePath: ${join(tempDir, 'dexyd.db')}
+codex:
+  workspaceRoot: ${workspaceRoot}
+`,
+    );
+
+    process.env.DEXYD_CONFIG = configPath;
+    const service = await createDexydApplication();
+
+    try {
+      const tokens = await pairTestDevice(service.app);
+      const headers = { authorization: `Bearer ${tokens.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers,
+        payload: { workspacePath: nestedProjectDir, title: 'nested work' },
+      });
+      expect(created.statusCode).toBe(201);
+      const sessionId = created.json().session.id as string;
+
+      const listedByProject = await service.app.inject({
+        method: 'GET',
+        url: `/sessions?workspacePath=${encodeURIComponent(projectRoot)}&limit=20`,
+        headers,
+      });
+      expect(listedByProject.statusCode).toBe(200);
+      expect(listedByProject.json().sessions.map((session: { id: string }) => session.id)).toContain(sessionId);
+
+      const deleted = await service.app.inject({ method: 'DELETE', url: `/sessions/${sessionId}`, headers });
+      expect(deleted.statusCode).toBe(200);
+
+      const hidden = await service.app.inject({ method: 'GET', url: '/sessions/hidden', headers });
+      expect(hidden.statusCode).toBe(200);
+      expect(hidden.json().sessions.map((session: { id: string }) => session.id)).toContain(sessionId);
+
+      const restored = await service.app.inject({ method: 'POST', url: `/sessions/${sessionId}/restore`, headers, payload: {} });
+      expect(restored.statusCode).toBe(200);
+      expect(restored.json()).toMatchObject({ restored: true });
+
+      const hiddenAfterRestore = await service.app.inject({ method: 'GET', url: '/sessions/hidden', headers });
+      expect(hiddenAfterRestore.statusCode).toBe(200);
+      expect(hiddenAfterRestore.json().sessions.map((session: { id: string }) => session.id)).not.toContain(sessionId);
+    } finally {
+      await service.stop();
+    }
+  });
+
 });

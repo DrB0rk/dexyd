@@ -173,7 +173,7 @@ export function useAuth(
       .then(async stored => {
         if (cancelled) return;
         const tokensByBridge = stored.tokensByBridge ?? {};
-        let nextState = bridgeKey ? (tokensByBridge[bridgeKey] ?? null) : null;
+        let nextState = bridgeKey ? tokensByBridge[bridgeKey] ?? null : null;
 
         if (!nextState && bridgeKey && tokensByBridge.legacy) {
           nextState = tokensByBridge.legacy;
@@ -217,8 +217,8 @@ export function useAuth(
         activeBridgeUrl: next
           ? key
           : stored.activeBridgeUrl === key
-            ? ''
-            : stored.activeBridgeUrl,
+          ? ''
+          : stored.activeBridgeUrl,
         tokensByBridge,
       });
 
@@ -337,6 +337,14 @@ export function useAuth(
     return () => subscription.remove();
   }, [bridgeUrl, refresh, state]);
 
+  const forgetBridge = useCallback(
+    async (targetBridgeUrl: string) => {
+      await persist(null, targetBridgeUrl);
+      setError(null);
+    },
+    [persist],
+  );
+
   const signOut = useCallback(async () => {
     if (state && bridgeUrl.trim()) {
       try {
@@ -358,9 +366,10 @@ export function useAuth(
       error,
       pairFromUri,
       refresh,
+      forgetBridge,
       signOut,
       setError,
     }),
-    [error, loading, pairFromUri, refresh, signOut, state],
+    [error, forgetBridge, loading, pairFromUri, refresh, signOut, state],
   );
 }

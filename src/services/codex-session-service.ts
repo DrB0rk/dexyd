@@ -88,7 +88,7 @@ type ToolActivity = {
 type ToolCategory = 'command' | 'edit' | 'plan' | 'inspect' | 'network' | 'image' | 'generic';
 
 const CODEX_SESSION_ID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-const MAX_SESSION_FILES = 400;
+const MAX_SESSION_FILES = 5000;
 const MAX_CHAT_LINES = 5000;
 const ACTIVE_TRANSCRIPT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 

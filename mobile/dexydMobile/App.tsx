@@ -36,7 +36,10 @@ import { getHealth, respondToInteraction } from './src/api/dexyd-client';
 import { useAppUpdater, type AppUpdateInfo } from './src/hooks/use-app-updater';
 import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
-import { useBridgeSettings } from './src/hooks/use-bridge-settings';
+import {
+  useBridgeSettings,
+  type BridgeProfile,
+} from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
 import {
   chatMessageKey,
@@ -142,6 +145,7 @@ type SettingsPaneKey =
   | 'security'
   | 'notifications'
   | 'workspace'
+  | 'recovery'
   | 'history'
   | 'updates'
   | 'diagnostics';
@@ -157,6 +161,7 @@ type SettingsPane = {
 const ONBOARDING_DISMISSED_KEY = 'dexyd.onboarding.dismissed.v1';
 const ADDED_PROJECTS_KEY = 'dexyd.projects.added.v1';
 const REMOVED_PROJECTS_KEY = 'dexyd.projects.removed.v1';
+const SELECTED_PROJECT_KEY = 'dexyd.projects.selected.v1';
 const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
@@ -200,6 +205,23 @@ const PAGE_SWIPE_DISTANCE = 72;
 const PAGE_SWIPE_CLAIM_DISTANCE = 28;
 const PAGE_SWIPE_VELOCITY = 0.45;
 
+function storageScopeKey(base: string, scope: string): string {
+  return `${base}:${scope || 'unconfigured'}`;
+}
+
+function formatRelativeTime(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return 'recently';
+  const seconds = Math.max(1, Math.round((Date.now() - time) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
 export default function App() {
   const [tab, setTab] = useState<TabKey>('sessions');
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -234,6 +256,16 @@ export default function App() {
   const previousTabRef = useRef<TabKey>('sessions');
 
   const bridgeSettings = useBridgeSettings();
+  const activeComputerScope =
+    bridgeSettings.activeBridgeId || bridgeSettings.bridgeUrl || 'unconfigured';
+  const projectStorageKeys = useMemo(
+    () => ({
+      added: storageScopeKey(ADDED_PROJECTS_KEY, activeComputerScope),
+      removed: storageScopeKey(REMOVED_PROJECTS_KEY, activeComputerScope),
+      selected: storageScopeKey(SELECTED_PROJECT_KEY, activeComputerScope),
+    }),
+    [activeComputerScope],
+  );
   const auth = useAuth(
     bridgeSettings.bridgeUrl,
     bridgeSettings.setBridgeUrlFromPairing,
@@ -364,22 +396,64 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     Promise.all([
+      AsyncStorage.getItem(projectStorageKeys.added),
+      AsyncStorage.getItem(projectStorageKeys.removed),
+      AsyncStorage.getItem(projectStorageKeys.selected),
       AsyncStorage.getItem(ADDED_PROJECTS_KEY),
       AsyncStorage.getItem(REMOVED_PROJECTS_KEY),
     ])
-      .then(([addedRaw, removedRaw]) => {
-        if (addedRaw) {
-          const parsed = JSON.parse(addedRaw) as ProjectOption[];
-          if (Array.isArray(parsed)) setAddedProjects(parsed);
-        }
-        if (removedRaw) {
-          const parsed = JSON.parse(removedRaw) as string[];
-          if (Array.isArray(parsed)) setRemovedProjectPaths(parsed);
-        }
-      })
+      .then(
+        ([
+          addedRaw,
+          removedRaw,
+          selectedRaw,
+          legacyAddedRaw,
+          legacyRemovedRaw,
+        ]) => {
+          if (cancelled) return;
+          const addedSource = addedRaw ?? legacyAddedRaw;
+          const removedSource = removedRaw ?? legacyRemovedRaw;
+          if (addedSource) {
+            const parsed = JSON.parse(addedSource) as ProjectOption[];
+            const next = Array.isArray(parsed) ? parsed : [];
+            setAddedProjects(next);
+            if (!addedRaw && legacyAddedRaw) {
+              AsyncStorage.setItem(
+                projectStorageKeys.added,
+                JSON.stringify(next),
+              ).catch(() => undefined);
+            }
+          } else {
+            setAddedProjects([]);
+          }
+          if (removedSource) {
+            const parsed = JSON.parse(removedSource) as string[];
+            const next = Array.isArray(parsed) ? parsed : [];
+            setRemovedProjectPaths(next);
+            if (!removedRaw && legacyRemovedRaw) {
+              AsyncStorage.setItem(
+                projectStorageKeys.removed,
+                JSON.stringify(next),
+              ).catch(() => undefined);
+            }
+          } else {
+            setRemovedProjectPaths([]);
+          }
+          setSelectedProjectPath(selectedRaw?.trim() || '.');
+          setActiveSessionId(null);
+          setTransientSession(null);
+          setProjectMenuOpen(false);
+          setProjectPickerOpen(false);
+          setAddSessionOpen(false);
+        },
+      )
       .catch(() => undefined);
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectStorageKeys]);
 
   useEffect(() => {
     if (!auth.auth) return;
@@ -393,6 +467,36 @@ export default function App() {
     setOnboardingDismissed(true);
     await AsyncStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true');
   }, []);
+
+  const selectProject = useCallback(
+    (path: string) => {
+      setSelectedProjectPath(path);
+      AsyncStorage.setItem(projectStorageKeys.selected, path).catch(
+        () => undefined,
+      );
+    },
+    [projectStorageKeys.selected],
+  );
+
+  const forgetComputerProfile = useCallback(
+    async (profile: BridgeProfile) => {
+      await auth.forgetBridge(profile.bridgeUrl);
+      await bridgeSettings.removeBridge(profile.id);
+      const scope = profile.id || profile.bridgeUrl || 'unconfigured';
+      await Promise.all([
+        AsyncStorage.removeItem(storageScopeKey(ADDED_PROJECTS_KEY, scope)),
+        AsyncStorage.removeItem(storageScopeKey(REMOVED_PROJECTS_KEY, scope)),
+        AsyncStorage.removeItem(storageScopeKey(SELECTED_PROJECT_KEY, scope)),
+      ]);
+      setActiveSessionId(null);
+      setTransientSession(null);
+      setAttentionItems([]);
+      setProjectMenuOpen(false);
+      setProjectPickerOpen(false);
+      setAddSessionOpen(false);
+    },
+    [auth, bridgeSettings],
+  );
 
   const activeSession =
     sessions.sessions.find(session => session.id === activeSessionId) ??
@@ -434,9 +538,9 @@ export default function App() {
   useEffect(() => {
     if (projectOptions.length === 0) return;
     if (!projectOptions.some(project => project.path === selectedProjectPath)) {
-      setSelectedProjectPath(projectOptions[0].path);
+      selectProject(projectOptions[0].path);
     }
-  }, [projectOptions, selectedProjectPath]);
+  }, [projectOptions, selectProject, selectedProjectPath]);
 
   const refreshHealth = useCallback(
     async (targetBridgeUrl = bridgeSettings.bridgeUrl) => {
@@ -725,36 +829,43 @@ export default function App() {
           if (!session) return;
           setTransientSession(session);
           setActiveSessionId(session.id);
-          setSelectedProjectPath(project.path);
+          selectProject(project.path);
           setAddSessionOpen(false);
           setTab('chat');
         })
         .catch(() => undefined);
     },
-    [sessions, tokens],
+    [selectProject, sessions, tokens],
   );
 
   const removeProject = useCallback(
     (path: string) => {
       setAddedProjects(current => {
         const next = current.filter(project => project.path !== path);
-        AsyncStorage.setItem(ADDED_PROJECTS_KEY, JSON.stringify(next)).catch(
-          () => undefined,
-        );
+        AsyncStorage.setItem(
+          projectStorageKeys.added,
+          JSON.stringify(next),
+        ).catch(() => undefined);
         return next;
       });
       setRemovedProjectPaths(current => {
         const next = Array.from(new Set([...current, path]));
-        AsyncStorage.setItem(REMOVED_PROJECTS_KEY, JSON.stringify(next)).catch(
-          () => undefined,
-        );
+        AsyncStorage.setItem(
+          projectStorageKeys.removed,
+          JSON.stringify(next),
+        ).catch(() => undefined);
         return next;
       });
       if (selectedProjectPath === path) {
-        setSelectedProjectPath('.');
+        selectProject('.');
       }
     },
-    [selectedProjectPath],
+    [
+      projectStorageKeys.added,
+      projectStorageKeys.removed,
+      selectProject,
+      selectedProjectPath,
+    ],
   );
 
   const respondToAttention = useCallback(
@@ -931,6 +1042,7 @@ export default function App() {
             <>
               <TopBar
                 project={selectedProject}
+                activeComputer={bridgeSettings.activeBridge}
                 status={status}
                 menuOpen={projectMenuOpen}
                 onToggleProjects={() => setProjectMenuOpen(open => !open)}
@@ -938,13 +1050,33 @@ export default function App() {
                 onPlus={onPlus}
               />
               {projectMenuOpen ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close project menu"
+                  onPress={() => setProjectMenuOpen(false)}
+                  style={styles.popupDismissLayer}
+                />
+              ) : null}
+              {projectMenuOpen ? (
                 <ProjectMenu
                   loading={projects.loading}
                   projects={projectOptions}
+                  computers={bridgeSettings.bridges}
+                  activeComputerId={bridgeSettings.activeBridgeId}
                   selectedPath={selectedProject.path}
                   onSelect={project => {
-                    setSelectedProjectPath(project.path);
+                    selectProject(project.path);
                     setProjectMenuOpen(false);
+                  }}
+                  onSelectComputer={computer => {
+                    bridgeSettings
+                      .switchBridge(computer.id)
+                      .then(() => setProjectMenuOpen(false))
+                      .catch(err =>
+                        bridgeSettings.setError(
+                          errorMessage(err, 'failed to switch computer'),
+                        ),
+                      );
                   }}
                   onNewProject={() => {
                     setProjectMenuOpen(false);
@@ -967,7 +1099,7 @@ export default function App() {
                   setAddedProjects(current => {
                     const next = upsertProjectOption(current, project);
                     AsyncStorage.setItem(
-                      ADDED_PROJECTS_KEY,
+                      projectStorageKeys.added,
                       JSON.stringify(next),
                     ).catch(() => undefined);
                     return next;
@@ -975,12 +1107,12 @@ export default function App() {
                   setRemovedProjectPaths(current => {
                     const next = current.filter(path => path !== project.path);
                     AsyncStorage.setItem(
-                      REMOVED_PROJECTS_KEY,
+                      projectStorageKeys.removed,
                       JSON.stringify(next),
                     ).catch(() => undefined);
                     return next;
                   });
-                  setSelectedProjectPath(project.path);
+                  selectProject(project.path);
                   setProjectPickerOpen(false);
                 }}
               />
@@ -1047,7 +1179,7 @@ export default function App() {
                       item => item.id === sessionId,
                     );
                     if (session?.workspacePath) {
-                      setSelectedProjectPath(session.workspacePath);
+                      selectProject(session.workspacePath);
                     }
                     setActiveSessionId(sessionId);
                   }
@@ -1074,7 +1206,7 @@ export default function App() {
                     item => item.id === sessionId,
                   );
                   if (session?.workspacePath) {
-                    setSelectedProjectPath(session.workspacePath);
+                    selectProject(session.workspacePath);
                   }
                   setProjectMenuOpen(false);
                   setProjectPickerOpen(false);
@@ -1096,6 +1228,7 @@ export default function App() {
               <SettingsScreen
                 auth={auth}
                 bridgeSettings={bridgeSettings}
+                onRemoveComputer={forgetComputerProfile}
                 bridgeHealth={bridgeHealth}
                 refreshHealth={refreshHealth}
                 scannerOpen={scannerOpen}
@@ -1103,6 +1236,10 @@ export default function App() {
                 socketState={stream.socketState}
                 socketError={stream.socketError}
                 sessionsCount={sessions.sessions.length}
+                deletedSessions={sessions.hiddenSessions}
+                deletedSessionsLoading={sessions.hiddenLoading}
+                onRefreshDeletedSessions={sessions.refreshHidden}
+                onRestoreSession={sessions.restore}
                 devices={devices}
                 usage={usage}
                 codexAuth={codexAuth}
@@ -1244,6 +1381,7 @@ function OnboardingScreen({
 
 function TopBar({
   project,
+  activeComputer,
   status,
   menuOpen,
   onToggleProjects,
@@ -1251,6 +1389,7 @@ function TopBar({
   onPlus,
 }: {
   project: ProjectOption;
+  activeComputer: BridgeProfile | null;
   status: { label: string; kind: StatusKind };
   menuOpen: boolean;
   onToggleProjects: () => void;
@@ -1269,6 +1408,9 @@ function TopBar({
           pressed && styles.pressed,
         ]}
       >
+        <Text style={styles.projectComputerLabel} numberOfLines={1}>
+          {activeComputer?.label ?? 'Computer'}
+        </Text>
         <Text style={styles.title} numberOfLines={1}>
           {project.label}
         </Text>
@@ -1377,8 +1519,15 @@ function StartupUpdatePrompt({
   if (!info) return null;
 
   return (
-    <View style={styles.updatePromptBackdrop} pointerEvents="box-none">
-      <View style={styles.updatePromptCard}>
+    <Pressable
+      style={styles.updatePromptBackdrop}
+      disabled={installing}
+      onPress={onDismiss}
+    >
+      <Pressable
+        style={styles.updatePromptCard}
+        onPress={event => event.stopPropagation()}
+      >
         <View style={styles.updatePromptHeader}>
           <Text style={styles.updatePromptKicker}>Update available</Text>
           <Pressable
@@ -1390,9 +1539,7 @@ function StartupUpdatePrompt({
             <Text style={styles.updatePromptClose}>×</Text>
           </Pressable>
         </View>
-        <Text style={styles.updatePromptTitle}>
-          Dexyd {info.latestVersion}
-        </Text>
+        <Text style={styles.updatePromptTitle}>Dexyd {info.latestVersion}</Text>
         <Text style={styles.updatePromptBody}>
           Installed: {info.currentVersion} · APK:{' '}
           {info.apkName ?? 'not attached'}
@@ -1406,24 +1553,30 @@ function StartupUpdatePrompt({
             disabled={installing}
           />
         </View>
-      </View>
-    </View>
+      </Pressable>
+    </Pressable>
   );
 }
 
 function ProjectMenu({
   loading,
   projects,
+  computers,
+  activeComputerId,
   selectedPath,
   onSelect,
+  onSelectComputer,
   onNewProject,
   onRefresh,
   onRemove,
 }: {
   loading: boolean;
   projects: ProjectOption[];
+  computers: BridgeProfile[];
+  activeComputerId: string | null;
   selectedPath: string;
   onSelect: (project: ProjectOption) => void;
+  onSelectComputer: (computer: BridgeProfile) => void;
   onNewProject: () => void;
   onRefresh: () => Promise<void>;
   onRemove: (path: string) => void;
@@ -1441,60 +1594,106 @@ function ProjectMenu({
           </Text>
         </Pressable>
       </View>
-      {projects.map(project => {
-        const selected = project.path === selectedPath;
-        return (
-          <Pressable
-            key={project.path}
-            onPress={() => onSelect(project)}
-            style={({ pressed }) => [
-              styles.projectMenuRow,
-              selected && styles.projectMenuRowActive,
-              pressed && styles.pressed,
-            ]}
-          >
-            <View style={styles.projectMenuText}>
-              <Text style={styles.projectMenuName} numberOfLines={1}>
-                {project.label}
-              </Text>
-              <Text style={styles.projectMenuDetail} numberOfLines={1}>
-                {project.detail}
-              </Text>
-            </View>
-            <View style={styles.projectMenuActions}>
-              {selected ? <Text style={styles.projectSelected}>✓</Text> : null}
-              {project.path !== '.' ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Remove ${project.label} from dexyd`}
-                  onPress={event => {
-                    event.stopPropagation();
-                    onRemove(project.path);
-                  }}
-                  hitSlop={10}
-                >
-                  <Text style={styles.projectRemove}>×</Text>
-                </Pressable>
-              ) : null}
-            </View>
-          </Pressable>
-        );
-      })}
-      <Pressable
-        onPress={onNewProject}
-        style={({ pressed }) => [
-          styles.projectMenuRow,
-          styles.projectNewRow,
-          pressed && styles.pressed,
-        ]}
+      <ScrollView
+        style={styles.projectMenuScroll}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.projectMenuText}>
-          <Text style={styles.projectMenuName}>＋ New project</Text>
-          <Text style={styles.projectMenuDetail}>
-            Choose a directory from the workspace
-          </Text>
-        </View>
-      </Pressable>
+        {computers.length > 0 ? (
+          <View style={styles.computerSwitchBlock}>
+            <Text style={styles.projectMenuSectionLabel}>Computers</Text>
+            {computers.map(computer => {
+              const active = computer.id === activeComputerId;
+              return (
+                <Pressable
+                  key={computer.id}
+                  onPress={() => onSelectComputer(computer)}
+                  style={({ pressed }) => [
+                    styles.computerSwitchRow,
+                    active && styles.computerSwitchRowActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <View style={styles.computerSwitchText}>
+                    <Text style={styles.computerSwitchName} numberOfLines={1}>
+                      {computer.label}
+                    </Text>
+                    <Text style={styles.computerSwitchUrl} numberOfLines={1}>
+                      {computer.bridgeUrl}
+                    </Text>
+                  </View>
+                  <Text
+                    style={
+                      active
+                        ? styles.computerSwitchActiveText
+                        : styles.projectRefresh
+                    }
+                  >
+                    {active ? 'active' : 'use'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+        <Text style={styles.projectMenuSectionLabel}>Projects</Text>
+        {projects.map(project => {
+          const selected = project.path === selectedPath;
+          return (
+            <Pressable
+              key={project.path}
+              onPress={() => onSelect(project)}
+              style={({ pressed }) => [
+                styles.projectMenuRow,
+                selected && styles.projectMenuRowActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.projectMenuText}>
+                <Text style={styles.projectMenuName} numberOfLines={1}>
+                  {project.label}
+                </Text>
+                <Text style={styles.projectMenuDetail} numberOfLines={1}>
+                  {project.detail}
+                </Text>
+              </View>
+              <View style={styles.projectMenuActions}>
+                {selected ? (
+                  <Text style={styles.projectSelected}>✓</Text>
+                ) : null}
+                {project.path !== '.' ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${project.label} from dexyd`}
+                    onPress={event => {
+                      event.stopPropagation();
+                      onRemove(project.path);
+                    }}
+                    hitSlop={10}
+                  >
+                    <Text style={styles.projectRemove}>×</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            </Pressable>
+          );
+        })}
+        <Pressable
+          onPress={onNewProject}
+          style={({ pressed }) => [
+            styles.projectMenuRow,
+            styles.projectNewRow,
+            pressed && styles.pressed,
+          ]}
+        >
+          <View style={styles.projectMenuText}>
+            <Text style={styles.projectMenuName}>＋ New project</Text>
+            <Text style={styles.projectMenuDetail}>
+              Choose a directory from the workspace
+            </Text>
+          </View>
+        </Pressable>
+      </ScrollView>
     </View>
   );
 }
@@ -1526,8 +1725,11 @@ function AddSessionModal({
   if (!visible) return null;
 
   return (
-    <View style={styles.pickerOverlay}>
-      <View style={styles.addSessionPanel}>
+    <Pressable style={styles.pickerOverlay} onPress={onClose}>
+      <Pressable
+        style={styles.addSessionPanel}
+        onPress={event => event.stopPropagation()}
+      >
         <View style={styles.pickerHeader}>
           <View style={styles.pickerTitleBlock}>
             <Text style={styles.pickerTitle}>New session</Text>
@@ -1583,8 +1785,8 @@ function AddSessionModal({
             onPress={() => onCreate(project, title)}
           />
         </View>
-      </View>
-    </View>
+      </Pressable>
+    </Pressable>
   );
 }
 
@@ -1647,8 +1849,11 @@ function ProjectPicker({
   };
 
   return (
-    <View style={styles.pickerOverlay}>
-      <View style={styles.pickerPanel}>
+    <Pressable style={styles.pickerOverlay} onPress={onClose}>
+      <Pressable
+        style={styles.pickerPanel}
+        onPress={event => event.stopPropagation()}
+      >
         <View style={styles.pickerHeader}>
           <View style={styles.pickerTitleBlock}>
             <Text style={styles.pickerTitle}>New project</Text>
@@ -1761,8 +1966,8 @@ function ProjectPicker({
             </Pressable>
           ))}
         </ScrollView>
-      </View>
-    </View>
+      </Pressable>
+    </Pressable>
   );
 }
 
@@ -2008,8 +2213,7 @@ function ChatScreen({
     !activeSession ||
     Boolean(usageBlockMessage);
   const steeringTarget = steeringQueueId
-    ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
-      null)
+    ? chat.queuedMessages.find(item => item.queueId === steeringQueueId) ?? null
     : null;
 
   const header = (
@@ -2870,8 +3074,8 @@ function DiffViewer({
                       diff.truncated ? ' · truncated' : ''
                     }`
                   : diff.truncated
-                    ? 'Truncated · message changes'
-                    : 'Message changes'}
+                  ? 'Truncated · message changes'
+                  : 'Message changes'}
               </Text>
             </View>
             {loading ? (
@@ -2981,6 +3185,9 @@ function DiffViewer({
           ) : null}
           <ScrollView
             style={styles.diffScroll}
+            onTouchStart={() => {
+              if (fileMenuOpen) setFileMenuOpen(false);
+            }}
             horizontal
             nestedScrollEnabled
             contentContainerStyle={styles.diffHorizontalContent}
@@ -3080,10 +3287,10 @@ function MessageBlockView({
     tone === 'user'
       ? styles.messageTextUser
       : tone === 'system'
-        ? styles.messageTextSystem
-        : tone === 'tool'
-          ? styles.messageTextSystem
-          : null;
+      ? styles.messageTextSystem
+      : tone === 'tool'
+      ? styles.messageTextSystem
+      : null;
 
   if (block.type === 'code') {
     return (
@@ -3551,16 +3758,21 @@ function sessionBelongsToProject(
   const projectPath = normalizeProjectPath(project.path);
   const projectDetail = normalizeProjectPath(project.detail);
 
+  if (projectPath === '.') {
+    return (
+      sessionPath === projectDetail ||
+      sessionPath.startsWith(`${projectDetail}/`)
+    );
+  }
+
   return (
-    sessionPath === projectPath ||
-    (projectPath === '.' && sessionPath === projectDetail)
+    sessionPath === projectPath || sessionPath.startsWith(`${projectPath}/`)
   );
 }
 
 function sortSessionsByUpdatedAt(items: DexydSession[]): DexydSession[] {
   return [...items].sort(
-    (a, b) =>
-      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   );
 }
 
@@ -3734,6 +3946,7 @@ function projectNameFromPath(projectPath: string): string {
 function SettingsScreen({
   auth,
   bridgeSettings,
+  onRemoveComputer,
   bridgeHealth,
   refreshHealth,
   scannerOpen,
@@ -3741,6 +3954,10 @@ function SettingsScreen({
   socketState,
   socketError,
   sessionsCount,
+  deletedSessions,
+  deletedSessionsLoading,
+  onRefreshDeletedSessions,
+  onRestoreSession,
   devices,
   usage,
   codexAuth,
@@ -3757,6 +3974,7 @@ function SettingsScreen({
 }: {
   auth: ReturnType<typeof useAuth>;
   bridgeSettings: ReturnType<typeof useBridgeSettings>;
+  onRemoveComputer: (profile: BridgeProfile) => Promise<void>;
   bridgeHealth: string;
   refreshHealth: (bridgeUrl?: string) => Promise<void>;
   scannerOpen: boolean;
@@ -3764,6 +3982,10 @@ function SettingsScreen({
   socketState: string;
   socketError: string | null;
   sessionsCount: number;
+  deletedSessions: ReturnType<typeof useSessions>['hiddenSessions'];
+  deletedSessionsLoading: boolean;
+  onRefreshDeletedSessions: () => Promise<void>;
+  onRestoreSession: (sessionId: string) => Promise<boolean>;
   devices: ReturnType<typeof useDevices>;
   usage: ReturnType<typeof useUsageStatus>;
   codexAuth: ReturnType<typeof useCodexAuth>;
@@ -3782,6 +4004,7 @@ function SettingsScreen({
   onFullReset: () => Promise<void>;
 }) {
   const [deviceLabel, setDeviceLabel] = useState('phone');
+  const [computerLabel, setComputerLabel] = useState('');
   const [pairingUri, setPairingUri] = useState('');
   const [pairing, setPairing] = useState(false);
   const [showManualConnection, setShowManualConnection] = useState(false);
@@ -3808,6 +4031,11 @@ function SettingsScreen({
     appUpdater.check().catch(() => undefined);
   }, [activePane, appUpdater]);
 
+  useEffect(() => {
+    if (activePane !== 'recovery') return;
+    onRefreshDeletedSessions().catch(() => undefined);
+  }, [activePane, onRefreshDeletedSessions]);
+
   const pair = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed || pairing) return;
@@ -3817,6 +4045,10 @@ function SettingsScreen({
       const pairedBridgeUrl = await auth.pairFromUri(
         trimmed,
         deviceLabel.trim() || 'phone',
+      );
+      await bridgeSettings.setBridgeUrlFromPairing(
+        pairedBridgeUrl,
+        computerLabel.trim() || undefined,
       );
       setPairingUri('');
       setScannerOpen(false);
@@ -3830,7 +4062,9 @@ function SettingsScreen({
   };
 
   const save = async () => {
-    const ok = await bridgeSettings.saveBridgeUrl();
+    const ok = await bridgeSettings.saveBridgeUrl(
+      computerLabel.trim() || undefined,
+    );
     if (ok) await refreshHealth();
   };
 
@@ -3843,17 +4077,17 @@ function SettingsScreen({
     bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
       : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
-        ? 'warn'
-        : 'error';
+      ? 'warn'
+      : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
   const realtimeTone =
     socketState === 'open'
       ? 'ok'
       : socketState === 'polling'
-        ? 'warn'
-        : auth.auth
-          ? 'error'
-          : 'idle';
+      ? 'warn'
+      : auth.auth
+      ? 'error'
+      : 'idle';
   const errors = [
     bridgeSettings.error,
     auth.error,
@@ -3865,15 +4099,18 @@ function SettingsScreen({
     {
       key: 'connection',
       icon: '⌁',
-      title: 'Connection',
-      subtitle: 'Bridge address used for API and realtime traffic.',
-      detail: bridgeSettings.bridgeUrl || 'not configured',
+      title: 'Computers',
+      subtitle: 'Switch between paired computers.',
+      detail:
+        bridgeSettings.activeBridge?.label ||
+        bridgeSettings.bridgeUrl ||
+        'not configured',
       tone: connectionTone,
     },
     {
       key: 'pairing',
       icon: '◇',
-      title: 'Pairing',
+      title: 'Add computer',
       subtitle: 'Connect this phone to the selected bridge.',
       detail: auth.auth ? 'phone paired' : 'scan QR or paste URI',
       tone: authTone,
@@ -3888,10 +4125,10 @@ function SettingsScreen({
         usage.usage?.limits.status === 'error'
           ? 'error'
           : usage.usage?.limits.status === 'warn'
-            ? 'warn'
-            : codexAuth.status?.installed === false
-              ? 'warn'
-              : 'ok',
+          ? 'warn'
+          : codexAuth.status?.installed === false
+          ? 'warn'
+          : 'ok',
     },
     {
       key: 'security',
@@ -3915,8 +4152,8 @@ function SettingsScreen({
           ? 'system enabled'
           : 'permission needed'
         : notificationSettings.inApp
-          ? 'in-app only'
-          : 'disabled',
+        ? 'in-app only'
+        : 'disabled',
       tone:
         notificationSettings.system && !systemNotificationsEnabled
           ? 'warn'
@@ -3929,6 +4166,17 @@ function SettingsScreen({
       subtitle: 'Codex/OMX session overview.',
       detail: `${sessionsCount} session${sessionsCount === 1 ? '' : 's'}`,
       tone: sessionsCount > 0 ? 'ok' : 'idle',
+    },
+    {
+      key: 'recovery',
+      icon: '↺',
+      title: 'Deleted sessions',
+      subtitle: 'Restore sessions hidden from the mobile app.',
+      detail:
+        deletedSessions.length === 0
+          ? 'none hidden'
+          : `${deletedSessions.length} hidden`,
+      tone: deletedSessions.length > 0 ? 'warn' : 'idle',
     },
     {
       key: 'history',
@@ -3944,8 +4192,8 @@ function SettingsScreen({
       tone: errorHistory.some(item => item.level === 'error')
         ? 'error'
         : errorHistory.length
-          ? 'warn'
-          : 'idle',
+        ? 'warn'
+        : 'idle',
     },
     {
       key: 'updates',
@@ -3958,8 +4206,8 @@ function SettingsScreen({
       tone: appUpdater.error
         ? 'error'
         : appUpdater.info?.updateAvailable
-          ? 'warn'
-          : 'idle',
+        ? 'warn'
+        : 'idle',
     },
     {
       key: 'diagnostics',
@@ -3975,14 +4223,35 @@ function SettingsScreen({
   ];
   const selectedPane =
     settingsPanes.find(pane => pane.key === activePane) ?? null;
+  const paneByKey = new Map(settingsPanes.map(pane => [pane.key, pane]));
+  const settingsGroups: Array<{ title: string; panes: SettingsPane[] }> = [
+    {
+      title: 'Connection',
+      panes: (['connection', 'pairing', 'account'] as SettingsPaneKey[]).map(
+        key => paneByKey.get(key)!,
+      ),
+    },
+    {
+      title: 'App',
+      panes: (
+        ['notifications', 'workspace', 'recovery'] as SettingsPaneKey[]
+      ).map(key => paneByKey.get(key)!),
+    },
+    {
+      title: 'Maintenance',
+      panes: (
+        ['security', 'updates', 'history', 'diagnostics'] as SettingsPaneKey[]
+      ).map(key => paneByKey.get(key)!),
+    },
+  ];
 
   const renderSelectedPane = () => {
     switch (selectedPane?.key) {
       case 'connection':
         return (
           <SettingsSection
-            title="Connection"
-            subtitle="Bridge address used for API and realtime traffic."
+            title="Computers & connection"
+            subtitle="Switch between paired computers, each with its own projects and auth."
           >
             <StatusRow
               label="Bridge"
@@ -3995,10 +4264,17 @@ function SettingsScreen({
               tone={realtimeTone}
             />
             <SettingLine
-              label="Active URL"
-              value={bridgeSettings.bridgeUrl || 'not configured'}
+              label="Active computer"
+              value={
+                bridgeSettings.activeBridge?.label ||
+                bridgeSettings.bridgeUrl ||
+                'not configured'
+              }
             />
-            <BridgeProfilesPanel bridgeSettings={bridgeSettings} />
+            <BridgeProfilesPanel
+              bridgeSettings={bridgeSettings}
+              onRemoveComputer={onRemoveComputer}
+            />
             <ToggleRow
               label="Manual URL"
               value={showManualConnection}
@@ -4030,8 +4306,8 @@ function SettingsScreen({
               />
             </View>
             <Text style={styles.settingHint}>
-              Pairing QR codes from the TUI set this automatically. For
-              Cloudflare, set up the named tunnel first, then scan the QR.
+              Pairing QR codes add or update a computer profile automatically.
+              Switching computers also switches auth, sessions, and projects.
             </Text>
           </SettingsSection>
         );
@@ -4040,7 +4316,7 @@ function SettingsScreen({
         return (
           <SettingsSection
             title="Pairing"
-            subtitle="Connect this phone to the currently selected bridge."
+            subtitle="Scan a QR from any computer to add it to this phone."
           >
             <StatusRow
               label="Phone"
@@ -4048,11 +4324,18 @@ function SettingsScreen({
               tone={authTone}
             />
             <LabeledInput
-              label="Device label"
+              label="Phone label"
               value={deviceLabel}
               onChangeText={setDeviceLabel}
               placeholder="phone"
               autoCapitalize="none"
+            />
+            <LabeledInput
+              label="Computer label"
+              value={computerLabel}
+              onChangeText={setComputerLabel}
+              placeholder="Workstation, laptop, server…"
+              autoCapitalize="words"
             />
             <ToggleRow
               label="Paste URI"
@@ -4225,8 +4508,8 @@ function SettingsScreen({
                 !DexydNotifications.available
                   ? 'idle'
                   : systemNotificationsEnabled
-                    ? 'ok'
-                    : 'warn'
+                  ? 'ok'
+                  : 'warn'
               }
             />
             <ToggleRow
@@ -4336,6 +4619,57 @@ function SettingsScreen({
           </SettingsSection>
         );
 
+      case 'recovery':
+        return (
+          <SettingsSection
+            title="Deleted sessions"
+            subtitle="Restore sessions hidden from the mobile session list."
+          >
+            <View style={styles.settingsActions}>
+              <TextButton
+                label={deletedSessionsLoading ? 'Refreshing…' : 'Refresh'}
+                disabled={deletedSessionsLoading}
+                onPress={() =>
+                  onRefreshDeletedSessions().catch(() => undefined)
+                }
+              />
+            </View>
+            {deletedSessionsLoading ? (
+              <ActivityIndicator color={palette.text} size="small" />
+            ) : deletedSessions.length === 0 ? (
+              <Text style={styles.settingHint}>No hidden sessions.</Text>
+            ) : (
+              deletedSessions.map(item => (
+                <View key={item.id} style={styles.deletedSessionRow}>
+                  <View style={styles.deletedSessionTextBlock}>
+                    <Text style={styles.deletedSessionTitle} numberOfLines={1}>
+                      {item.session?.title || shortId(item.id)}
+                    </Text>
+                    <Text style={styles.deletedSessionMeta} numberOfLines={1}>
+                      {item.session?.workspacePath ||
+                        'session file not currently found'}
+                    </Text>
+                    <Text style={styles.deletedSessionMeta}>
+                      hidden {formatDate(item.hiddenAt)} · {shortId(item.id)}
+                    </Text>
+                  </View>
+                  <TextButton
+                    label="Restore"
+                    variant="primary"
+                    onPress={() =>
+                      onRestoreSession(item.id).catch(() => undefined)
+                    }
+                  />
+                </View>
+              ))
+            )}
+            <Text style={styles.settingHint}>
+              Restore only removes Dexyd's hide marker. Codex transcript files
+              are never modified.
+            </Text>
+          </SettingsSection>
+        );
+
       case 'history':
         return (
           <SettingsSection
@@ -4391,15 +4725,15 @@ function SettingsScreen({
                 appUpdater.checking
                   ? 'checking'
                   : appUpdater.installing
-                    ? 'downloading'
-                    : 'ready'
+                  ? 'downloading'
+                  : 'ready'
               }
               tone={
                 appUpdater.error
                   ? 'error'
                   : appUpdater.info?.updateAvailable
-                    ? 'warn'
-                    : 'idle'
+                  ? 'warn'
+                  : 'idle'
               }
             />
             <SettingLine
@@ -4523,15 +4857,19 @@ function SettingsScreen({
           <View style={styles.settingsMenuHeader}>
             <Text style={styles.settingsMenuTitle}>Settings</Text>
             <Text style={styles.settingsMenuSubtitle}>
-              Choose a section to configure the bridge and app.
+              Configure Dexyd, recover sessions, and check app status.
             </Text>
           </View>
-          {settingsPanes.map(pane => (
-            <SettingsMenuCard
-              key={pane.key}
-              pane={pane}
-              onPress={() => setActivePane(pane.key)}
-            />
+          {settingsGroups.map(group => (
+            <SettingsMenuGroup key={group.title} title={group.title}>
+              {group.panes.map(pane => (
+                <SettingsMenuCard
+                  key={pane.key}
+                  pane={pane}
+                  onPress={() => setActivePane(pane.key)}
+                />
+              ))}
+            </SettingsMenuGroup>
           ))}
           <SettingsAppInfo
             bridgeHealth={bridgeHealth}
@@ -4570,6 +4908,21 @@ function SettingsSection({
   );
 }
 
+function SettingsMenuGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={styles.settingsMenuGroup}>
+      <Text style={styles.settingsMenuGroupTitle}>{title}</Text>
+      <View style={styles.settingsMenuGroupBody}>{children}</View>
+    </View>
+  );
+}
+
 function SettingsMenuCard({
   pane,
   onPress,
@@ -4591,17 +4944,22 @@ function SettingsMenuCard({
         <Text style={styles.settingsMenuIconText}>{pane.icon}</Text>
       </View>
       <View style={styles.settingsMenuText}>
-        <View style={styles.settingsMenuRow}>
-          <Text style={styles.settingsMenuCardTitle}>{pane.title}</Text>
-        </View>
-        <Text style={styles.settingsMenuCardSubtitle} numberOfLines={1}>
-          {pane.subtitle}
+        <Text style={styles.settingsMenuCardTitle} numberOfLines={1}>
+          {pane.title}
         </Text>
         <Text style={styles.settingsMenuCardDetail} numberOfLines={1}>
           {pane.detail}
         </Text>
       </View>
-      <Text style={styles.settingsMenuChevron}>›</Text>
+      <View style={styles.settingsMenuRight}>
+        <View
+          style={[
+            styles.statusDotSmall,
+            { backgroundColor: statusColor(pane.tone) },
+          ]}
+        />
+        <Text style={styles.settingsMenuChevron}>›</Text>
+      </View>
     </Pressable>
   );
 }
@@ -4642,51 +5000,119 @@ function SettingsSubHeader({
 
 function BridgeProfilesPanel({
   bridgeSettings,
+  onRemoveComputer,
 }: {
   bridgeSettings: ReturnType<typeof useBridgeSettings>;
+  onRemoveComputer: (profile: BridgeProfile) => Promise<void>;
 }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [labelDraft, setLabelDraft] = useState('');
+
   if (bridgeSettings.bridges.length === 0) {
     return (
       <Text style={styles.settingHint}>
-        No saved bridge profiles yet. Pair with a bridge to save it here.
+        No saved computers yet. Pair with a bridge to save it here.
       </Text>
     );
   }
+
   return (
     <View style={styles.inlinePanel}>
-      <Text style={styles.inlinePanelTitle}>Saved PCs</Text>
-      {bridgeSettings.bridges.map(bridge => (
-        <Pressable
-          key={bridge.id}
-          onPress={() =>
-            bridgeSettings.switchBridge(bridge.id).catch(() => undefined)
-          }
-          style={({ pressed }) => [
-            styles.accountRow,
-            bridge.id === bridgeSettings.activeBridgeId &&
-              styles.accountRowActive,
-            pressed && styles.pressed,
-          ]}
-        >
-          <View style={styles.accountTextBlock}>
-            <Text style={styles.deviceName} numberOfLines={1}>
-              {bridge.label}
-            </Text>
-            <Text style={styles.deviceMeta} numberOfLines={1}>
-              {bridge.bridgeUrl}
-            </Text>
-          </View>
-          <Text
-            style={
-              bridge.id === bridgeSettings.activeBridgeId
-                ? styles.currentDeviceText
-                : styles.projectRefresh
-            }
+      <Text style={styles.inlinePanelTitle}>Computers</Text>
+      {bridgeSettings.bridges.map(bridge => {
+        const active = bridge.id === bridgeSettings.activeBridgeId;
+        const editing = editingId === bridge.id;
+        return (
+          <View
+            key={bridge.id}
+            style={[styles.accountRow, active && styles.accountRowActive]}
           >
-            {bridge.id === bridgeSettings.activeBridgeId ? 'active' : 'switch'}
-          </Text>
-        </Pressable>
-      ))}
+            <View style={styles.accountTextBlock}>
+              {editing ? (
+                <TextInput
+                  value={labelDraft}
+                  onChangeText={setLabelDraft}
+                  placeholder="Computer label"
+                  placeholderTextColor={palette.dim}
+                  autoCapitalize="words"
+                  style={styles.compactInlineInput}
+                />
+              ) : (
+                <Text style={styles.deviceName} numberOfLines={1}>
+                  {bridge.label}
+                </Text>
+              )}
+              <Text style={styles.deviceMeta} numberOfLines={1}>
+                {bridge.bridgeUrl}
+              </Text>
+              <Text style={styles.deviceMeta} numberOfLines={1}>
+                {active ? 'active computer' : 'saved computer'} · used{' '}
+                {formatRelativeTime(bridge.lastUsedAt)}
+              </Text>
+            </View>
+            <View style={styles.computerActions}>
+              {editing ? (
+                <>
+                  <TextButton
+                    label="Save"
+                    variant="primary"
+                    onPress={() => {
+                      bridgeSettings
+                        .renameBridge(bridge.id, labelDraft)
+                        .then(() => setEditingId(null))
+                        .catch(err =>
+                          bridgeSettings.setError(
+                            errorMessage(err, 'failed to update computer'),
+                          ),
+                        );
+                    }}
+                  />
+                  <TextButton
+                    label="Cancel"
+                    onPress={() => setEditingId(null)}
+                  />
+                </>
+              ) : (
+                <>
+                  {!active ? (
+                    <TextButton
+                      label="Use"
+                      variant="primary"
+                      onPress={() =>
+                        bridgeSettings
+                          .switchBridge(bridge.id)
+                          .catch(err =>
+                            bridgeSettings.setError(
+                              errorMessage(err, 'failed to update computer'),
+                            ),
+                          )
+                      }
+                    />
+                  ) : null}
+                  <TextButton
+                    label="Rename"
+                    onPress={() => {
+                      setEditingId(bridge.id);
+                      setLabelDraft(bridge.label);
+                    }}
+                  />
+                  <TextButton
+                    label="Remove"
+                    variant="danger"
+                    onPress={() =>
+                      onRemoveComputer(bridge).catch(err =>
+                        bridgeSettings.setError(
+                          errorMessage(err, 'failed to update computer'),
+                        ),
+                      )
+                    }
+                  />
+                </>
+              )}
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -4720,9 +5146,9 @@ function UsagePanel({
                 usage.context.usedTokens ?? 0,
               )} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
             : usage?.context.usedTokens !== null &&
-                usage?.context.usedTokens !== undefined
-              ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-              : 'unknown'
+              usage?.context.usedTokens !== undefined
+            ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+            : 'unknown'
         }
         tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
@@ -4839,8 +5265,8 @@ function CodexAuthPanel({
                   {account.active
                     ? 'active'
                     : codexAuth.switching === account.index
-                      ? 'switching…'
-                      : 'switch'}
+                    ? 'switching…'
+                    : 'switch'}
                 </Text>
               </Pressable>
             ))
@@ -5084,12 +5510,12 @@ function notificationFromAttention(item: AttentionItem): SystemNotification {
     item.kind === 'message'
       ? 'response'
       : item.kind === 'approval'
-        ? 'approval'
-        : item.kind === 'question'
-          ? 'question'
-          : item.title.toLowerCase().includes('failed')
-            ? 'alert'
-            : 'response';
+      ? 'approval'
+      : item.kind === 'question'
+      ? 'question'
+      : item.title.toLowerCase().includes('failed')
+      ? 'alert'
+      : 'response';
 
   return {
     id: `notice-${item.id}`,
@@ -5136,8 +5562,8 @@ function interactionResponseFromEvent(
     typeof payload.interactionId === 'string'
       ? payload.interactionId
       : typeof payload.requestId === 'string'
-        ? payload.requestId
-        : '';
+      ? payload.requestId
+      : '';
 
   if (!requestId) return null;
 
@@ -5145,8 +5571,8 @@ function interactionResponseFromEvent(
     typeof payload.decision === 'string'
       ? payload.decision
       : typeof payload.answer === 'string'
-        ? payload.answer
-        : 'sent';
+      ? payload.answer
+      : 'sent';
 
   return { requestId, label };
 }
@@ -5201,8 +5627,8 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
   const raw = Array.isArray(payload.choices)
     ? payload.choices
     : Array.isArray(payload.options)
-      ? payload.options
-      : [];
+    ? payload.options
+    : [];
 
   return raw
     .map((choice, index): AttentionChoice | null => {
@@ -5219,10 +5645,10 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
         typeof item.label === 'string'
           ? item.label
           : typeof item.title === 'string'
-            ? item.title
-            : typeof item.text === 'string'
-              ? item.text
-              : '';
+          ? item.title
+          : typeof item.text === 'string'
+          ? item.text
+          : '';
 
       if (!label.trim()) return null;
 
@@ -5252,8 +5678,8 @@ function usageSummary(usage: UsageStatus): string {
     usage.context.percent !== null
       ? `${usage.context.percent}% context`
       : usage.context.usedTokens !== null
-        ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-        : 'context unknown';
+      ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+      : 'context unknown';
   return `${accountUsageLabel(usage)} · ${context}`;
 }
 
@@ -5605,7 +6031,7 @@ const styles = StyleSheet.create({
     left: 12,
     maxWidth: '58%',
     minWidth: 132,
-    minHeight: 44,
+    minHeight: 48,
     alignItems: 'flex-start',
     justifyContent: 'center',
     paddingHorizontal: 12,
@@ -5614,9 +6040,17 @@ const styles = StyleSheet.create({
   projectSelectorActive: {
     backgroundColor: '#262628',
   },
+  projectComputerLabel: {
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginBottom: -1,
+  },
   title: {
     color: palette.text,
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     letterSpacing: -0.4,
   },
@@ -5804,6 +6238,7 @@ const styles = StyleSheet.create({
     left: 16,
     right: 16,
     zIndex: 20,
+    maxHeight: '78%',
     padding: 10,
     borderRadius: 16,
     borderWidth: 1,
@@ -5814,6 +6249,9 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 6 },
     elevation: 8,
+  },
+  projectMenuScroll: {
+    maxHeight: '100%',
   },
   projectMenuHeader: {
     minHeight: 28,
@@ -5832,6 +6270,55 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 12,
     fontWeight: '700',
+  },
+  projectMenuSectionLabel: {
+    marginTop: 5,
+    marginBottom: 4,
+    paddingHorizontal: 4,
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    textTransform: 'uppercase',
+  },
+  computerSwitchBlock: {
+    marginBottom: 5,
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.line,
+  },
+  computerSwitchRow: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
+  },
+  computerSwitchRowActive: {
+    backgroundColor: '#242d27',
+  },
+  computerSwitchText: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 8,
+  },
+  computerSwitchName: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  computerSwitchUrl: {
+    marginTop: 1,
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  computerSwitchActiveText: {
+    color: palette.ok,
+    fontSize: 11,
+    fontWeight: '900',
   },
   projectMenuRow: {
     minHeight: 44,
@@ -6013,6 +6500,15 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  popupDismissLayer: {
+    position: 'absolute',
+    top: 58,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 18,
+    backgroundColor: 'transparent',
   },
   onboardingShell: {
     flex: 1,
@@ -7059,6 +7555,24 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
+  deletedSessionRow: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: palette.line,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  deletedSessionTextBlock: {
+    gap: 3,
+  },
+  deletedSessionTitle: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  deletedSessionMeta: {
+    color: palette.dim,
+    fontSize: 12,
+  },
   hiddenSessionsBlock: {
     marginTop: 10,
     paddingTop: 4,
@@ -7114,7 +7628,7 @@ const styles = StyleSheet.create({
   settingsMenuHeader: {
     paddingHorizontal: 2,
     paddingTop: 2,
-    paddingBottom: 10,
+    paddingBottom: 12,
   },
   settingsMenuTitle: {
     color: palette.text,
@@ -7127,59 +7641,69 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
   },
+  settingsMenuGroup: {
+    marginBottom: 14,
+  },
+  settingsMenuGroupTitle: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    paddingHorizontal: 2,
+    marginBottom: 3,
+  },
+  settingsMenuGroupBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: palette.line,
+  },
   settingsMenuCard: {
-    minHeight: 58,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 2,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: palette.line,
   },
   settingsMenuIcon: {
-    width: 32,
-    height: 32,
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 10,
+    marginRight: 9,
   },
   settingsMenuIconText: {
     color: palette.text,
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: '800',
-    lineHeight: 24,
+    lineHeight: 21,
   },
   settingsMenuText: {
     flex: 1,
     minWidth: 0,
   },
-  settingsMenuRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
   settingsMenuCardTitle: {
-    flex: 1,
     color: palette.text,
     fontSize: 14,
-    fontWeight: '900',
-  },
-  settingsMenuCardSubtitle: {
-    color: palette.muted,
-    fontSize: 12,
-    lineHeight: 16,
+    fontWeight: '800',
   },
   settingsMenuCardDetail: {
     color: palette.dim,
     fontSize: 11,
     lineHeight: 15,
-    marginTop: 2,
+    marginTop: 1,
+  },
+  settingsMenuRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    marginLeft: 10,
   },
   settingsMenuChevron: {
     color: palette.dim,
-    fontSize: 26,
-    lineHeight: 28,
-    marginLeft: 10,
+    fontSize: 22,
+    lineHeight: 24,
   },
   settingsSubHeader: {
     minHeight: 56,
@@ -7563,6 +8087,26 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     paddingRight: 10,
+  },
+  computerActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: 190,
+  },
+  compactInlineInput: {
+    minHeight: 32,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.line,
+    color: palette.text,
+    backgroundColor: '#151516',
+    fontSize: 13,
+    fontWeight: '800',
   },
   suggestionStrip: {
     flexDirection: 'row',

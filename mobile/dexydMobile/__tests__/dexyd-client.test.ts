@@ -50,7 +50,7 @@ describe('dexyd client request headers', () => {
       accessToken: 'access-token',
       refreshToken: 'refresh-token'
     })).rejects.toThrow(
-      "Can't reach Dexyd bridge at http://10.0.0.88:4242/sessions. Check that the bridge service is running"
+      "Can't reach Dexyd bridge at http://10.0.0.88:4242/sessions?limit=2000. Check that the bridge service is running"
     );
   });
 
@@ -65,7 +65,7 @@ describe('dexyd client request headers', () => {
     await expect(getSessions('http://bridge.local', {
       accessToken: 'access-token',
       refreshToken: 'refresh-token'
-    })).rejects.toThrow('Bridge returned HTTP 503 for /sessions: database down');
+    })).rejects.toThrow('Bridge returned HTTP 503 for /sessions?limit=2000: database down');
   });
 
   it('supports queued chat message APIs', async () => {

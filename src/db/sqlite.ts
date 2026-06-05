@@ -23,6 +23,11 @@ type SessionRow = {
   title: string | null;
 };
 
+export type HiddenSessionRecord = {
+  id: string;
+  hiddenAt: string;
+};
+
 type EventRow = {
   sequence: number;
   timestamp: string;
@@ -221,6 +226,18 @@ export class SqliteService {
   listHiddenSessionIds(): Set<string> {
     const rows = this.#db.prepare('SELECT id FROM hidden_sessions').all() as Array<{ id: string }>;
     return new Set(rows.map((row) => row.id));
+  }
+
+  listHiddenSessions(): HiddenSessionRecord[] {
+    const rows = this.#db
+      .prepare('SELECT id, hidden_at AS hiddenAt FROM hidden_sessions ORDER BY hidden_at DESC')
+      .all() as HiddenSessionRecord[];
+    return rows;
+  }
+
+  restoreSession(sessionId: string): boolean {
+    const result = this.#db.prepare('DELETE FROM hidden_sessions WHERE id = ?').run(sessionId);
+    return result.changes > 0;
   }
 
   patchSession(input: {

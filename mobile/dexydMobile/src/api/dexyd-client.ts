@@ -18,6 +18,7 @@ import {
   ChatMessage,
   DexydSession,
   EventEnvelope,
+  HiddenDexydSession,
   QueuedChatMessage,
 } from '../types/dexyd';
 
@@ -198,14 +199,46 @@ export async function revoke(
 export async function getSessions(
   baseUrl: string,
   tokens: AuthTokens,
+  options: { limit?: number; workspacePath?: string } = {},
 ): Promise<DexydSession[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(options.limit ?? 2000));
+  if (options.workspacePath?.trim()) {
+    params.set('workspacePath', options.workspacePath.trim());
+  }
   const result = await fetchJson<{ sessions: DexydSession[] }>(
     baseUrl,
-    '/sessions',
+    `/sessions?${params.toString()}`,
     undefined,
     tokens,
   );
   return result.sessions;
+}
+
+export async function getHiddenSessions(
+  baseUrl: string,
+  tokens: AuthTokens,
+): Promise<HiddenDexydSession[]> {
+  const result = await fetchJson<{ sessions: HiddenDexydSession[] }>(
+    baseUrl,
+    '/sessions/hidden',
+    undefined,
+    tokens,
+  );
+  return result.sessions;
+}
+
+export async function restoreSession(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens,
+): Promise<{ restored: boolean; session: DexydSession | null }> {
+  return fetchJson<{ restored: boolean; session: DexydSession | null }>(
+    baseUrl,
+    sessionPath(sessionId, '/restore'),
+    { method: 'POST', body: JSON.stringify({}) },
+    tokens,
+  );
 }
 
 export async function getProjects(

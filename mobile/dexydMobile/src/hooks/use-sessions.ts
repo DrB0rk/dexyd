@@ -7,11 +7,13 @@ import {
   createSession,
   deleteSession,
   DexydBridgeConnectionError,
+  getHiddenSessions,
   getSessions,
   patchSessionStatus,
+  restoreSession,
   type AuthTokens,
 } from '../api/dexyd-client';
-import { DexydSession, EventEnvelope } from '../types/dexyd';
+import { DexydSession, EventEnvelope, HiddenDexydSession } from '../types/dexyd';
 import { errorMessage } from '../utils/error-message';
 
 const SESSION_CACHE_KEY = 'dexyd.sessions.cache.v1';
@@ -75,6 +77,8 @@ export function useSessions(
   lastEvent?: EventEnvelope | null,
 ) {
   const [sessions, setSessions] = useState<DexydSession[]>([]);
+  const [hiddenSessions, setHiddenSessions] = useState<HiddenDexydSession[]>([]);
+  const [hiddenLoading, setHiddenLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectivity, setConnectivity] = useState<Connectivity>('idle');
@@ -213,6 +217,40 @@ export function useSessions(
     [bridgeUrl, persist, refresh, sessions, tokens],
   );
 
+  const refreshHidden = useCallback(async () => {
+    if (!tokens) {
+      setHiddenSessions([]);
+      return;
+    }
+    setHiddenLoading(true);
+    try {
+      const items = await getHiddenSessions(bridgeUrl, tokens);
+      setHiddenSessions(items);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err, 'failed to load deleted sessions'));
+    } finally {
+      setHiddenLoading(false);
+    }
+  }, [bridgeUrl, tokens]);
+
+  const restore = useCallback(
+    async (sessionId: string) => {
+      if (!tokens) return false;
+      setError(null);
+      try {
+        await restoreSession(bridgeUrl, sessionId, tokens);
+        await refresh();
+        await refreshHidden();
+        return true;
+      } catch (err) {
+        setError(errorMessage(err, 'failed to restore session'));
+        return false;
+      }
+    },
+    [bridgeUrl, refresh, refreshHidden, tokens],
+  );
+
   const clearCache = useCallback(async () => {
     await AsyncStorage.removeItem(cacheKeyForBridge(bridgeUrl));
     setSessions([]);
@@ -308,6 +346,8 @@ export function useSessions(
 
   return {
     sessions,
+    hiddenSessions,
+    hiddenLoading,
     loading,
     error,
     connectivity,
@@ -317,6 +357,8 @@ export function useSessions(
     setStatus,
     cancel,
     remove,
+    restore,
+    refreshHidden,
     clearCache,
   };
 }

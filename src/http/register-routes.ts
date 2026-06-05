@@ -22,7 +22,10 @@ const sessionIdParamsSchema = z.object({ sessionId: sessionIdSchema });
 const queueIdParamsSchema = z.object({ sessionId: sessionIdSchema, queueId: z.string().uuid() });
 
 const deviceIdParamsSchema = z.object({ deviceId: z.string().uuid() });
-const listSessionsQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) });
+const listSessionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(5000).default(1000),
+  workspacePath: z.string().trim().min(1).max(1000).optional()
+});
 const dexydChatSessionRequestSchema = z.object({ title: z.string().trim().max(160).optional() });
 const browseProjectsQuerySchema = z.object({ path: z.string().max(1000).default('') });
 const suggestProjectsQuerySchema = z.object({ path: z.string().max(1000).default('') });
@@ -391,17 +394,77 @@ export async function registerRoutes(
     const auth = requireAuth(request.headers.authorization, context, reply);
     if (!auth) return;
 
-    const parsed = listSessionsQuerySchema.safeParse(request.query);
-    const limit = parsed.success ? parsed.data.limit : 100;
+    const parsed = listSessionsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+    }
+    const { limit, workspacePath } = parsed.data;
+    let resolvedWorkspacePath: string | null = null;
+    if (workspacePath) {
+      try {
+        resolvedWorkspacePath = context.projectService.resolveWorkspace(workspacePath);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'invalid_workspace' });
+      }
+    }
 
     const hidden = context.db.listHiddenSessionIds();
-    const localSessions = context.db.listSessions(limit).filter((session) => !hidden.has(session.id));
-    const codexSessions = context.codexSessionService.listSessions(limit).filter((session) => !hidden.has(session.id));
-    const sessions = mergeSessions([...localSessions, ...codexSessions]
+    const allLocalSessions = context.db.listSessions(5000);
+    const allCodexSessions = context.codexSessionService.listSessions(5000);
+    const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions]
+      .filter((session) => !hidden.has(session.id))
+      .filter((session) => !resolvedWorkspacePath || sessionWithinWorkspace(session.workspacePath, resolvedWorkspacePath))
       .map((session) => context.codexChatService.applyRuntimeStatus(session)))
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
       .slice(0, limit);
     return { sessions };
+  });
+
+  app.get('/sessions/hidden', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const hidden = context.db.listHiddenSessions();
+    const hiddenIds = new Set(hidden.map((session) => session.id));
+    const visibleRecords = mergeSessions([
+      ...context.db.listSessions(5000),
+      ...context.codexSessionService.listSessions(5000)
+    ])
+      .filter((session) => hiddenIds.has(session.id))
+      .map((session) => context.codexChatService.applyRuntimeStatus(session));
+    const byId = new Map(visibleRecords.map((session) => [session.id, session]));
+
+    return {
+      sessions: hidden.map((hiddenSession) => ({
+        ...hiddenSession,
+        session: byId.get(hiddenSession.id) ?? null
+      }))
+    };
+  });
+
+  app.post('/sessions/:sessionId/restore', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+
+    const restored = context.db.restoreSession(params.data.sessionId);
+    const session = getSession(context, params.data.sessionId);
+    context.eventService.emit({
+      eventType: 'session.restored',
+      source: 'session',
+      sessionId: params.data.sessionId,
+      payload: { id: params.data.sessionId, restored, session }
+    });
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'session.restored',
+      target: params.data.sessionId
+    });
+    return { restored, session };
   });
 
   app.get('/sessions/:sessionId', async (request, reply) => {
@@ -956,6 +1019,18 @@ function getSession(context: AppContext, sessionId: string) {
     .filter((session): session is SessionRecord => session !== null)
     .map((session) => context.codexChatService.applyRuntimeStatus(session));
   return mergeSessions(sessions)[0] ?? null;
+}
+
+function sessionWithinWorkspace(sessionPath: string, workspacePath: string): boolean {
+  const normalizedSession = normalizeComparablePath(sessionPath);
+  const normalizedWorkspace = normalizeComparablePath(workspacePath);
+  return normalizedSession === normalizedWorkspace || normalizedSession.startsWith(`${normalizedWorkspace}/`);
+}
+
+function normalizeComparablePath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '.') return '.';
+  return trimmed.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
 }
 
 function mergeSessions<T extends SessionRecord>(sessions: T[]): T[] {
