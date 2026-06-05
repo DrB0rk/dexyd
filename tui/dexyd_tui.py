@@ -1019,6 +1019,12 @@ def install_user_service(config_path: Path) -> str:
     runner = repo_root / "scripts" / "run-connection-service.sh"
     if not runner.exists():
         return f"Connection service runner is missing: {runner}"
+    bridge_entry = repo_root / "dist" / "index.js"
+    if not bridge_entry.exists():
+        return (
+            f"Connection service runner is present, but the bridge build is missing: {bridge_entry}\n"
+            "Run the official installer again to rebuild the installed bridge."
+        )
     runner.chmod(0o755)
     service_file = user_service_dir() / "dexyd.service"
     service_file.write_text(
@@ -1036,9 +1042,6 @@ def install_user_service(config_path: Path) -> str:
         "WantedBy=default.target\n",
         encoding="utf-8",
     )
-    build = run_capture(["npm", "run", "build"], timeout=120)
-    if build.returncode != 0:
-        return f"Service file written: {service_file}\nBuild failed; run npm run build before enabling.\n{build.stderr or build.stdout}"
     for command in (["daemon-reload"], ["enable", "--now", "dexyd.service"]):
         result = systemctl_user(list(command), timeout=30)
         if result.returncode != 0:
