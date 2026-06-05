@@ -17,9 +17,9 @@
       android:supportsRtl="true">
       <activity
         android:name=".DexydInstallActivity"
-        android:theme="@style/DexydNoDisplayTheme"
+        android:theme="@style/DexydInstallerTheme"
+        android:launchMode="singleTop"
         android:excludeFromRecents="true"
-        android:noHistory="true"
         android:exported="false" />
       <activity
         android:name=".MainActivity"

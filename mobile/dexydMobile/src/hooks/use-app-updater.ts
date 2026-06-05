@@ -167,7 +167,7 @@ export function useAppUpdater() {
         updateInfo.apkName,
       );
       setMessage(
-        `Preparing ${updateInfo.apkName}. Android will open the update confirmation prompt when ready.`,
+        `Opening Dexyd update installer for ${updateInfo.apkName}.`,
       );
       return Boolean(updateSessionId);
     } catch (err) {

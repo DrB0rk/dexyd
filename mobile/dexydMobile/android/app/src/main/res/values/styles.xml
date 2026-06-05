@@ -6,9 +6,10 @@
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
     </style>
 
-    <style name="DexydNoDisplayTheme" parent="android:style/Theme.NoDisplay">
-        <item name="android:windowNoDisplay">true</item>
-        <item name="android:windowIsTranslucent">true</item>
+    <style name="DexydInstallerTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">#f4f4f4</item>
     </style>
 
 </resources>
