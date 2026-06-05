@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import {
@@ -14,6 +15,8 @@ import { errorMessage } from '../utils/error-message';
 const CHAT_POLL_INTERVAL_MS = 3500;
 const CHAT_ACTIVE_POLL_INTERVAL_MS = 1200;
 const TRANSIENT_MESSAGE_KEEP_MS = 2 * 60 * 1000;
+const CHAT_CACHE_KEY = 'dexyd.chat.cache.v1';
+const MAX_CACHED_MESSAGES = 260;
 
 export function normalizeDisplayUserContent(content: string): string {
   const text = content.trim();
@@ -223,6 +226,7 @@ function mergeMessage(
     item =>
       item.id === next.id ||
       sameMessageIdentity(item, next) ||
+      sameOptimisticUserMessage(item, next) ||
       (next.queueId &&
         item.queueId === next.queueId &&
         item.status === next.status),
@@ -232,6 +236,7 @@ function mergeMessage(
       withoutQueued.map(item =>
         item.id === next.id ||
         sameMessageIdentity(item, next) ||
+        sameOptimisticUserMessage(item, next) ||
         (next.queueId &&
           item.queueId === next.queueId &&
           item.status === next.status)
@@ -328,6 +333,9 @@ export function chatMessageKey(message: ChatMessage): string {
   const contentHash = hashStableText(message.content.trim());
   const turnId = stableTurnId(message.turnId);
   if (message.queueId) return `queue:${message.queueId}:${message.status}`;
+  if (message.role === 'user' && message.status === 'sent') {
+    return `user:sent:${contentHash}:${timeBucket(message.createdAt)}`;
+  }
   if (turnId) {
     return `${message.role}:${message.status}:${turnId}:${contentHash}`;
   }
@@ -340,12 +348,29 @@ function sameMessageIdentity(left: ChatMessage, right: ChatMessage): boolean {
   return chatMessageKey(left) === chatMessageKey(right);
 }
 
+function sameOptimisticUserMessage(
+  left: ChatMessage,
+  right: ChatMessage,
+): boolean {
+  return (
+    left.id.startsWith('local-user-') &&
+    left.role === 'user' &&
+    right.role === 'user' &&
+    left.status === 'sent' &&
+    right.status === 'sent' &&
+    left.content.trim() === right.content.trim() &&
+    Math.abs(chatMessageTime(left) - chatMessageTime(right)) <= 10 * 60 * 1000
+  );
+}
+
 function preserveStableMessageFields(
   next: ChatMessage,
   existingMessages: ChatMessage[],
 ): ChatMessage {
-  const existing = existingMessages.find(message =>
-    sameMessageIdentity(message, next),
+  const existing = existingMessages.find(
+    message =>
+      sameMessageIdentity(message, next) ||
+      sameOptimisticUserMessage(message, next),
   );
   if (!existing) return next;
 
@@ -614,6 +639,78 @@ function mergeQueuedMessages(
   return nextQueuedMessages(current, sorted);
 }
 
+type CachedChatState = {
+  messages: ChatMessage[];
+  queuedMessages: QueuedChatMessage[];
+  updatedAt: string;
+};
+
+function cacheKeyForChat(bridgeUrl: string, sessionId: string): string {
+  return `${CHAT_CACHE_KEY}:${bridgeUrl || 'unconfigured'}:${sessionId}`;
+}
+
+function parseCachedChatState(raw: string | null): CachedChatState | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedChatState>;
+    const messages = Array.isArray(parsed.messages)
+      ? parsed.messages.filter(isChatMessage)
+      : [];
+    const queuedMessages = Array.isArray(parsed.queuedMessages)
+      ? parsed.queuedMessages.filter(isQueuedChatMessage)
+      : [];
+    return {
+      messages: messages
+        .map(normalizeChatMessageForDisplay)
+        .filter((message): message is ChatMessage => message !== null),
+      queuedMessages,
+      updatedAt:
+        typeof parsed.updatedAt === 'string'
+          ? parsed.updatedAt
+          : new Date(0).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.turnId === 'string' &&
+    typeof record.role === 'string' &&
+    typeof record.content === 'string' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.sequence === 'number' &&
+    typeof record.status === 'string'
+  );
+}
+
+function isQueuedChatMessage(value: unknown): value is QueuedChatMessage {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.queueId === 'string' &&
+    typeof record.turnId === 'string' &&
+    typeof record.sessionId === 'string' &&
+    typeof record.content === 'string' &&
+    typeof record.actorDeviceId === 'string' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string'
+  );
+}
+
+function cacheableMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages
+    .map(normalizeChatMessageForDisplay)
+    .filter((message): message is ChatMessage => message !== null)
+    .filter(message => message.role !== 'tool' || message.status !== 'running')
+    .sort(compareChatMessages)
+    .slice(-MAX_CACHED_MESSAGES);
+}
+
 export function useChat(
   bridgeUrl: string,
   tokens: AuthTokens | null,
@@ -627,6 +724,8 @@ export function useChat(
   const [error, setError] = useState<string | null>(null);
   const pendingUserMessagesRef = useRef<ChatMessage[]>([]);
   const refreshRequestRef = useRef(0);
+  const cacheReadyRef = useRef(false);
+  const [cacheReadyVersion, setCacheReadyVersion] = useState(0);
 
   const refreshQueue = useCallback(async () => {
     if (!tokens || !sessionId) {
@@ -738,12 +837,6 @@ export function useChat(
               setQueuedMessages(current =>
                 mergeQueuedMessages(current, queued),
               );
-            setMessages(current =>
-              nextChatMessages(
-                current,
-                current.filter(item => item.id !== optimistic.id),
-              ),
-            );
           } else {
             pendingUserMessagesRef.current = dedupeMessages([
               ...pendingUserMessagesRef.current,
@@ -751,13 +844,7 @@ export function useChat(
             ]).filter(item => item.role === 'user');
           }
           setMessages(current =>
-            nextChatMessages(
-              current,
-              mergeMessage(
-                current.filter(item => item.id !== optimistic.id),
-                sent,
-              ),
-            ),
+            nextChatMessages(current, mergeMessage(current, sent)),
           );
         }
         return true;
@@ -852,10 +939,65 @@ export function useChat(
   useEffect(() => {
     refreshRequestRef.current += 1;
     pendingUserMessagesRef.current = [];
+    cacheReadyRef.current = false;
     setMessages(current => nextChatMessages(current, []));
     setQueuedMessages(current => nextQueuedMessages(current, []));
     setError(null);
-  }, [sessionId]);
+
+    if (!tokens || !sessionId) {
+      cacheReadyRef.current = true;
+      setCacheReadyVersion(version => version + 1);
+      return undefined;
+    }
+
+    let cancelled = false;
+    AsyncStorage.getItem(cacheKeyForChat(bridgeUrl, sessionId))
+      .then(raw => {
+        if (cancelled) return;
+        const cached = parseCachedChatState(raw);
+        if (!cached) return;
+        setMessages(current =>
+          nextChatMessages(
+            current,
+            mergeFetchedChatMessages(cached.messages, [], undefined, current),
+          ),
+        );
+        setQueuedMessages(current =>
+          nextQueuedMessages(current, cached.queuedMessages),
+        );
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) {
+          cacheReadyRef.current = true;
+          setCacheReadyVersion(version => version + 1);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bridgeUrl, sessionId, tokens]);
+
+  useEffect(() => {
+    if (!tokens || !sessionId || !cacheReadyRef.current) return;
+    const cached: CachedChatState = {
+      messages: cacheableMessages(messages),
+      queuedMessages,
+      updatedAt: new Date().toISOString(),
+    };
+    AsyncStorage.setItem(
+      cacheKeyForChat(bridgeUrl, sessionId),
+      JSON.stringify(cached),
+    ).catch(() => undefined);
+  }, [
+    bridgeUrl,
+    cacheReadyVersion,
+    messages,
+    queuedMessages,
+    sessionId,
+    tokens,
+  ]);
 
   useEffect(() => {
     refresh().catch(() => undefined);

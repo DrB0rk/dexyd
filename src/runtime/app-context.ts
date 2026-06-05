@@ -6,6 +6,7 @@ import { SqliteService } from '../db/sqlite.js';
 import { AuthService } from '../services/auth-service.js';
 import { CodexAuthService } from '../services/codex-auth-service.js';
 import { CodexChatService } from '../services/codex-chat-service.js';
+import { CommandService } from '../services/command-service.js';
 import { CodexSessionService } from '../services/codex-session-service.js';
 import { DexydChatService } from '../services/dexyd-chat-service.js';
 import { DiffService } from '../services/diff-service.js';
@@ -24,6 +25,7 @@ export type AppContext = ModuleContext & {
   pairingService: PairingService;
   codexAuthService: CodexAuthService;
   codexChatService: CodexChatService;
+  commandService: CommandService;
   codexSessionService: CodexSessionService;
   fileService: FileService;
   dexydChatService: DexydChatService;
@@ -85,6 +87,7 @@ export function buildAppContext(config: DexydConfig): AppContext {
   );
 
   const codexAuthService = new CodexAuthService();
+  const commandService = new CommandService();
   const codexSessionService = new CodexSessionService(config.codex.workspaceRoot, logger);
   const diffService = new DiffService();
 
@@ -114,6 +117,7 @@ export function buildAppContext(config: DexydConfig): AppContext {
     pairingService,
     codexAuthService,
     codexChatService,
+    commandService,
     codexSessionService,
     dexydChatService,
     fileService,

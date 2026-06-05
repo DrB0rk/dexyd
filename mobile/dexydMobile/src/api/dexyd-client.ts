@@ -3,6 +3,7 @@ import { normalizeBridgeHttpUrl } from '../config/bridge';
 const API_TIMEOUT_MS = 15000;
 import {
   CodexAuthStatus,
+  CommandsResponse,
   DeviceRecord,
   DiffSummary,
   FileListResponse,
@@ -230,6 +231,20 @@ export async function suggestProjects(
   return fetchJson<ProjectSuggestResponse>(
     baseUrl,
     `/projects/suggest${suffix}`,
+    undefined,
+    tokens,
+  );
+}
+
+export async function getCommands(
+  baseUrl: string,
+  tokens: AuthTokens,
+  sessionId?: string | null,
+): Promise<CommandsResponse> {
+  const suffix = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+  return fetchJson<CommandsResponse>(
+    baseUrl,
+    `/commands${suffix}`,
     undefined,
     tokens,
   );

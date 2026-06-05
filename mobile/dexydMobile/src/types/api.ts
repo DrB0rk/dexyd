@@ -109,7 +109,6 @@ export type UsageStatus = {
   };
 };
 
-
 export type CodexAuthAccount = {
   index: string;
   label: string;
@@ -131,4 +130,20 @@ export type CodexAuthStatus = {
   accounts: CodexAuthAccount[];
   activeAccount: CodexAuthAccount | null;
   error: string | null;
+};
+
+export type SlashCommand = {
+  id: string;
+  name: string;
+  command: string;
+  insertText: string;
+  description: string;
+  category: 'codex' | 'omx' | 'skill' | 'prompt';
+  source: string;
+};
+
+export type CommandsResponse = {
+  commands: SlashCommand[];
+  sessionId: string | null;
+  updatedAt: string;
 };

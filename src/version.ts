@@ -1,1 +1,1 @@
-export const DEXYD_VERSION = '0.0.9';
+export const DEXYD_VERSION = '0.0.10';

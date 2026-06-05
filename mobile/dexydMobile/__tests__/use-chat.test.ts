@@ -1,3 +1,10 @@
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  getItem: jest.fn().mockResolvedValue(null),
+  setItem: jest.fn().mockResolvedValue(undefined),
+  removeItem: jest.fn().mockResolvedValue(undefined),
+  clear: jest.fn().mockResolvedValue(undefined),
+}));
+
 import {
   chatMessageKey,
   mergeFetchedChatMessages,
@@ -64,6 +71,33 @@ describe('mergeFetchedChatMessages', () => {
     expect(merged.map(item => item.content)).toEqual(['answer']);
   });
 
+  it('preserves optimistic user row identity when the bridge confirms the send', () => {
+    const optimistic = message({
+      id: 'local-user-123',
+      role: 'user',
+      turnId: 'local-turn',
+      content: 'ship the cache fix',
+      createdAt: '2026-06-04T08:00:00.000Z',
+      sequence: 123,
+    });
+    const fetched = message({
+      id: 'bridge-user-456',
+      role: 'user',
+      turnId: 'codex-turn',
+      content: 'ship the cache fix',
+      createdAt: '2026-06-04T08:00:02.000Z',
+      sequence: 456,
+    });
+
+    const merged = mergeFetchedChatMessages([fetched], [], undefined, [
+      optimistic,
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.id).toBe('local-user-123');
+    expect(merged[0]?.turnId).toBe('codex-turn');
+    expect(chatMessageKey(merged[0]!)).toBe(chatMessageKey(optimistic));
+  });
 
   it('preserves existing row identity when fetched transcript sequence changes', () => {
     const existing = message({
@@ -83,7 +117,9 @@ describe('mergeFetchedChatMessages', () => {
       sequence: 99,
     });
 
-    const merged = mergeFetchedChatMessages([fetched], [], undefined, [existing]);
+    const merged = mergeFetchedChatMessages([fetched], [], undefined, [
+      existing,
+    ]);
 
     expect(merged).toHaveLength(1);
     expect(merged[0]?.id).toBe('existing-user-row');
@@ -192,7 +228,6 @@ describe('mergeFetchedChatMessages', () => {
     ]);
   });
 });
-
 
 describe('normalizeDisplayUserContent', () => {
   it('extracts the real prompt from nested Dexyd environment wrappers', () => {

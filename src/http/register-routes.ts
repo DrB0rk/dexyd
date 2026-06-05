@@ -42,6 +42,9 @@ const replayQuerySchema = z.object({
 const usageStatusQuerySchema = z.object({
   sessionId: sessionIdSchema.optional()
 });
+const commandsQuerySchema = z.object({
+  sessionId: sessionIdSchema.optional()
+});
 const diffQuerySchema = z.object({
   turnId: z
     .string()
@@ -103,6 +106,22 @@ export async function registerRoutes(
     replayWindowSeconds: context.config.stream.replayWindowSeconds,
     maxReplayEvents: context.config.stream.maxReplayEvents
   }));
+
+  app.get('/commands', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const parsed = commandsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+    }
+
+    return {
+      commands: context.commandService.listCommands(),
+      sessionId: parsed.data.sessionId ?? null,
+      updatedAt: new Date().toISOString()
+    };
+  });
 
   app.post('/pairing/start', async (request, reply) => {
     if (!isLocalOrPrivateClient(request.ip)) {

@@ -37,12 +37,17 @@ import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
 import { useBridgeSettings } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
-import { chatMessageKey, useChat, visibleChatMessages } from './src/hooks/use-chat';
+import {
+  chatMessageKey,
+  useChat,
+  visibleChatMessages,
+} from './src/hooks/use-chat';
 import { useCodexAuth } from './src/hooks/use-codex-auth';
 import { useDevices } from './src/hooks/use-devices';
 import { useDiff } from './src/hooks/use-diff';
 import { useProjects } from './src/hooks/use-projects';
 import { useSessions } from './src/hooks/use-sessions';
+import { useSlashCommands } from './src/hooks/use-slash-commands';
 import { useUsageStatus } from './src/hooks/use-usage-status';
 import { QrScannerModal } from './src/ui/qr-scanner-modal';
 import { radii, spacing } from './src/ui/theme';
@@ -51,6 +56,7 @@ import {
   DiffSummary,
   ProjectBrowseResponse,
   ProjectSuggestResponse,
+  SlashCommand,
   UsageStatus,
 } from './src/types/api';
 import {
@@ -253,6 +259,11 @@ export default function App() {
     activeSessionId,
     stream.lastEvent,
   );
+  const slashCommands = useSlashCommands(
+    bridgeSettings.bridgeUrl,
+    tokens,
+    activeSessionId,
+  );
   const diff = useDiff(bridgeSettings.bridgeUrl, tokens, activeSessionId);
   const devices = useDevices(bridgeSettings.bridgeUrl, tokens);
   const usage = useUsageStatus(
@@ -319,7 +330,6 @@ export default function App() {
     setSystemNotificationsEnabled(enabled);
     return enabled;
   }, []);
-
 
   useEffect(() => {
     Promise.all([
@@ -567,7 +577,10 @@ export default function App() {
         50,
       ),
     );
-    if (item.kind === 'update' && item.title.toLowerCase().includes('prompt finished')) {
+    if (
+      item.kind === 'update' &&
+      item.title.toLowerCase().includes('prompt finished')
+    ) {
       notify(notificationFromAttention(item));
     }
   }, [notify, sessions.sessions, stream.lastEvent]);
@@ -836,7 +849,7 @@ export default function App() {
                   onNewProject={() => {
                     setProjectMenuOpen(false);
                     setProjectPickerOpen(true);
-                    projects.browse('~').catch(() => undefined);
+                    projects.browse('').catch(() => undefined);
                   }}
                   onRefresh={() => projects.refresh()}
                   onRemove={removeProject}
@@ -879,7 +892,7 @@ export default function App() {
                 onNewProject={() => {
                   setAddSessionOpen(false);
                   setProjectPickerOpen(true);
-                  projects.browse('~').catch(() => undefined);
+                  projects.browse('').catch(() => undefined);
                 }}
                 onCreate={createNamedSession}
               />
@@ -909,6 +922,7 @@ export default function App() {
                 chat={chat}
                 diff={diff}
                 usage={usage.usage}
+                slashCommands={slashCommands}
                 keyboardHeight={keyboardHeight}
               />
             ) : null}
@@ -1447,9 +1461,14 @@ function ProjectPicker({
     ? projectNameFromPath(browse.currentPath || browse.rootPath)
     : 'Home';
 
+  const browsePath = (path: string) => {
+    setCustomPath(path);
+    onBrowse(path).catch(() => undefined);
+  };
+
   const browseCustomPath = () => {
     const path = customPath.trim() || '~';
-    onBrowse(path).catch(() => undefined);
+    browsePath(path);
   };
 
   return (
@@ -1467,46 +1486,60 @@ function ProjectPicker({
           </Pressable>
         </View>
 
+        <View style={styles.pathQuickActions}>
+          <TextButton label="Home" onPress={() => browsePath('')} />
+          <TextButton label="Root" onPress={() => browsePath('/')} />
+          <TextButton
+            label="↑ Up"
+            disabled={!browse?.parentPath}
+            onPress={() => browsePath(browse?.parentPath || '~')}
+          />
+        </View>
+
         <LabeledInput
           label="Location"
           value={customPath}
           onChangeText={setCustomPath}
+          onSubmitEditing={browseCustomPath}
+          returnKeyType="go"
           placeholder="~/Projects or /mnt/work/project"
           autoCapitalize="none"
           autoCorrect={false}
         />
 
         {suggestions?.suggestions.length ? (
-          <View style={styles.suggestionStrip}>
-            {suggestions.suggestions.slice(0, 5).map(suggestion => (
-              <Pressable
-                key={suggestion.path}
-                onPress={() => {
-                  setCustomPath(suggestion.path);
-                  onBrowse(suggestion.path).catch(() => undefined);
-                }}
-                style={({ pressed }) => [
-                  styles.suggestionPill,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={styles.suggestionText} numberOfLines={1}>
-                  {suggestion.name}
-                </Text>
-              </Pressable>
-            ))}
+          <View style={styles.autocompleteBox}>
+            <ScrollView
+              style={styles.autocompleteList}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+            >
+              {suggestions.suggestions.slice(0, 12).map(suggestion => (
+                <Pressable
+                  key={suggestion.path}
+                  onPress={() => browsePath(suggestion.path)}
+                  style={({ pressed }) => [
+                    styles.autocompleteRow,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.autocompleteName} numberOfLines={1}>
+                    {suggestion.name}
+                  </Text>
+                  <Text style={styles.autocompletePath} numberOfLines={1}>
+                    {suggestion.path}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
           </View>
+        ) : customPath.trim() ? (
+          <Text style={styles.settingHint}>
+            Type an absolute path like /srv/project, then press Go.
+          </Text>
         ) : null}
 
         <View style={styles.pickerActions}>
-          {browse?.parentPath ? (
-            <TextButton
-              label="Up"
-              onPress={() =>
-                onBrowse(browse.parentPath || '~').catch(() => undefined)
-              }
-            />
-          ) : null}
           <TextButton label="Go" onPress={browseCustomPath} />
           <TextButton
             label={`Use ${currentLabel}`}
@@ -1533,10 +1566,7 @@ function ProjectPicker({
           {browse?.entries.map(entry => (
             <Pressable
               key={entry.path}
-              onPress={() => {
-                setCustomPath(entry.path);
-                onBrowse(entry.path).catch(() => undefined);
-              }}
+              onPress={() => browsePath(entry.path)}
               style={({ pressed }) => [
                 styles.pickerRow,
                 pressed && styles.pressed,
@@ -1575,6 +1605,7 @@ function ChatScreen({
   chat,
   diff,
   usage,
+  slashCommands,
   keyboardHeight,
 }: {
   authReady: boolean;
@@ -1583,6 +1614,7 @@ function ChatScreen({
   chat: ReturnType<typeof useChat>;
   diff: ReturnType<typeof useDiff>;
   usage: UsageStatus | null;
+  slashCommands: ReturnType<typeof useSlashCommands>;
   keyboardHeight: number;
 }) {
   const [text, setText] = useState('');
@@ -1600,7 +1632,25 @@ function ChatScreen({
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
   const queuePanelMaxHeight = Math.max(112, Math.min(220, windowHeight * 0.3));
+  const {
+    commands: availableSlashCommands,
+    loading: slashCommandsLoading,
+    error: slashCommandsError,
+    refresh: refreshSlashCommands,
+  } = slashCommands;
   const usageBlockMessage = usageSendBlockMessage(usage);
+  const commandQuery = commandQueryFromText(text);
+  const commandSuggestions = useMemo(
+    () =>
+      commandQuery === null
+        ? []
+        : filterCommandSuggestions(
+            availableSlashCommands,
+            commandQuery.query,
+            commandQuery.trigger,
+          ).slice(0, 8),
+    [availableSlashCommands, commandQuery],
+  );
   const renderedMessages = useMemo(
     () => visibleChatMessages(chat.messages),
     [chat.messages],
@@ -1685,6 +1735,23 @@ function ChatScreen({
     }
   }, [keyboardLift, scrollToLatest]);
 
+  useEffect(() => {
+    if (
+      commandQuery !== null &&
+      !slashCommandsLoading &&
+      !slashCommandsError &&
+      availableSlashCommands.length === 0
+    ) {
+      refreshSlashCommands().catch(() => undefined);
+    }
+  }, [
+    commandQuery,
+    availableSlashCommands.length,
+    refreshSlashCommands,
+    slashCommandsError,
+    slashCommandsLoading,
+  ]);
+
   const openMessageDiff = useCallback(
     (turnId: string) => {
       setSelectedDiffTurnId(turnId);
@@ -1700,11 +1767,20 @@ function ChatScreen({
     chat.sending,
   );
   const workingStateReserve = workingInfo ? 48 : 0;
+  const commandStateReserve =
+    commandQuery !== null
+      ? Math.min(252, 52 + Math.max(commandSuggestions.length, 1) * 58)
+      : 0;
   const queueStateReserve = chat.queuedMessages.length
     ? Math.min(queuePanelMaxHeight, 54 + chat.queuedMessages.length * 58) + 8
     : 0;
   const composerSpacer =
-    composerHeight + keyboardLift + 12 + workingStateReserve + queueStateReserve;
+    composerHeight +
+    keyboardLift +
+    12 +
+    workingStateReserve +
+    commandStateReserve +
+    queueStateReserve;
   const queueDockBottom = composerHeight + keyboardLift + 8;
   const workingDockBottom = queueDockBottom + queueStateReserve;
 
@@ -1719,14 +1795,18 @@ function ChatScreen({
       chat.setError(usageBlockMessage);
       return;
     }
-    const ok = steeringQueueId
-      ? await chat.steerQueued(steeringQueueId, message)
+    const activeSteeringQueueId = steeringQueueId;
+    setText('');
+    setSteeringQueueId(null);
+    scrollToLatest(false);
+    const ok = activeSteeringQueueId
+      ? await chat.steerQueued(activeSteeringQueueId, message)
       : await chat.send(message);
-    if (ok) {
-      setText('');
-      setSteeringQueueId(null);
-      scrollToLatest();
+    if (!ok) {
+      // Keep the composer cleared to avoid text jumping back in after a failed send.
+      return;
     }
+    scrollToLatest();
   };
 
   const sendDisabled =
@@ -1735,7 +1815,8 @@ function ChatScreen({
     !activeSession ||
     Boolean(usageBlockMessage);
   const steeringTarget = steeringQueueId
-    ? chat.queuedMessages.find(item => item.queueId === steeringQueueId) ?? null
+    ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
+      null)
     : null;
 
   const header = (
@@ -1870,10 +1951,7 @@ function ChatScreen({
       {workingInfo ? (
         <View
           pointerEvents="none"
-          style={[
-            styles.workingStateDock,
-            { bottom: workingDockBottom },
-          ]}
+          style={[styles.workingStateDock, { bottom: workingDockBottom }]}
         >
           <WorkingState text={workingInfo} />
         </View>
@@ -1886,6 +1964,19 @@ function ChatScreen({
           { bottom: keyboardLift },
         ]}
       >
+        {commandQuery !== null ? (
+          <CommandPalette
+            commands={commandSuggestions}
+            trigger={commandQuery.trigger}
+            loading={slashCommandsLoading}
+            error={slashCommandsError}
+            onRefresh={() => refreshSlashCommands().catch(() => undefined)}
+            onSelect={command => {
+              setText(command.insertText);
+              requestAnimationFrame(() => scrollToLatest(false));
+            }}
+          />
+        ) : null}
         {steeringTarget ? (
           <View style={styles.composerNotice}>
             <View style={styles.steeringNoticeRow}>
@@ -1951,6 +2042,145 @@ function ChatScreen({
       ) : null}
     </KeyboardAvoidingView>
   );
+}
+
+function CommandPalette({
+  commands,
+  trigger,
+  loading,
+  error,
+  onRefresh,
+  onSelect,
+}: {
+  commands: SlashCommand[];
+  trigger: '/' | '$';
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onSelect: (command: SlashCommand) => void;
+}) {
+  return (
+    <View style={styles.commandPalette}>
+      <View style={styles.commandPaletteHeader}>
+        <Text style={styles.commandPaletteTitle}>
+          {trigger === '$' ? 'Skill commands' : 'Commands'}
+        </Text>
+        <Pressable onPress={onRefresh} hitSlop={8}>
+          <Text style={styles.commandRefresh}>
+            {loading ? 'loading…' : 'refresh'}
+          </Text>
+        </Pressable>
+      </View>
+      {error ? (
+        <Text style={styles.commandHint} numberOfLines={2}>
+          {error}
+        </Text>
+      ) : null}
+      {!loading && !commands.length ? (
+        <Text style={styles.commandHint}>
+          {trigger === '$'
+            ? 'No matching skill commands. Type $ to browse OMX workflows.'
+            : 'No matching commands. Type / or $ to browse available commands.'}
+        </Text>
+      ) : null}
+      <ScrollView
+        style={styles.commandList}
+        nestedScrollEnabled
+        keyboardShouldPersistTaps="handled"
+      >
+        {commands.map(command => (
+          <Pressable
+            key={command.id}
+            onPress={() => onSelect(command)}
+            style={({ pressed }) => [
+              styles.commandRow,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.commandTextBlock}>
+              <View style={styles.commandTitleRow}>
+                <Text style={styles.commandName}>
+                  {commandDisplayTrigger(command, trigger)}
+                </Text>
+                <Text style={styles.commandCategory}>{command.category}</Text>
+              </View>
+              <Text style={styles.commandDescription} numberOfLines={2}>
+                {command.description}
+              </Text>
+            </View>
+            <Text style={styles.commandInsert} numberOfLines={1}>
+              {command.insertText.trim()}
+            </Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+type CommandQuery = { trigger: '/' | '$'; query: string };
+
+function commandQueryFromText(text: string): CommandQuery | null {
+  const trimmedStart = text.replace(/^\s+/, '');
+  const trigger = trimmedStart[0];
+  if (trigger !== '/' && trigger !== '$') return null;
+  if (/\s/.test(trimmedStart.slice(1))) return null;
+  return { trigger, query: trimmedStart.slice(1).toLowerCase() };
+}
+
+function filterCommandSuggestions(
+  commands: SlashCommand[],
+  query: string,
+  trigger: '/' | '$',
+): SlashCommand[] {
+  const filtered =
+    trigger === '$'
+      ? commands.filter(command => command.insertText.trim().startsWith('$'))
+      : commands;
+  if (!query) return filtered;
+  return filtered
+    .map(command => ({
+      command,
+      score: commandScore(command, query, trigger),
+    }))
+    .filter(item => item.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score || a.command.name.localeCompare(b.command.name),
+    )
+    .map(item => item.command);
+}
+
+function commandScore(
+  command: SlashCommand,
+  query: string,
+  triggerType: '/' | '$',
+): number {
+  const name = command.name.toLowerCase();
+  const slashTrigger = command.command.toLowerCase().replace(/^\//, '');
+  const insertTrigger = command.insertText
+    .trim()
+    .toLowerCase()
+    .replace(/^[$/]/, '');
+  const source = command.source.toLowerCase();
+  const description = command.description.toLowerCase();
+  const preferredTrigger = triggerType === '$' ? insertTrigger : slashTrigger;
+  if (name === query || preferredTrigger === query) return 100;
+  if (name.startsWith(query) || preferredTrigger.startsWith(query)) return 80;
+  if (name.includes(query) || preferredTrigger.includes(query)) return 60;
+  if (slashTrigger.includes(query) || insertTrigger.includes(query)) return 50;
+  if (source.includes(query)) return 30;
+  if (description.includes(query)) return 20;
+  return 0;
+}
+
+function commandDisplayTrigger(
+  command: SlashCommand,
+  trigger: '/' | '$',
+): string {
+  const insert = command.insertText.trim();
+  if (trigger === '$' && insert.startsWith('$')) return insert;
+  return command.command;
 }
 
 const WORKING_PHRASES = [
@@ -2447,8 +2677,8 @@ function DiffViewer({
                       diff.truncated ? ' · truncated' : ''
                     }`
                   : diff.truncated
-                  ? 'Truncated · message changes'
-                  : 'Message changes'}
+                    ? 'Truncated · message changes'
+                    : 'Message changes'}
               </Text>
             </View>
             {loading ? (
@@ -2657,15 +2887,17 @@ function MessageBlockView({
     tone === 'user'
       ? styles.messageTextUser
       : tone === 'system'
-      ? styles.messageTextSystem
-      : tone === 'tool'
-      ? styles.messageTextSystem
-      : null;
+        ? styles.messageTextSystem
+        : tone === 'tool'
+          ? styles.messageTextSystem
+          : null;
 
   if (block.type === 'code') {
     return (
       <View style={[styles.codeBlock, last && styles.messageBlockLast]}>
-        <Text selectable style={styles.codeText}>{block.text}</Text>
+        <Text selectable style={styles.codeText}>
+          {block.text}
+        </Text>
       </View>
     );
   }
@@ -2696,7 +2928,10 @@ function MessageBlockView({
         >
           •
         </Text>
-        <Text selectable style={[styles.messageText, textToneStyle, styles.bulletText]}>
+        <Text
+          selectable
+          style={[styles.messageText, textToneStyle, styles.bulletText]}
+        >
           {renderInlineText(block.text)}
         </Text>
       </View>
@@ -3297,7 +3532,10 @@ function SettingsScreen({
   appUpdater: ReturnType<typeof useAppUpdater>;
   notificationSettings: NotificationSettings;
   systemNotificationsEnabled: boolean;
-  onNotificationSettingChange: (key: keyof NotificationSettings, value: boolean) => void;
+  onNotificationSettingChange: (
+    key: keyof NotificationSettings,
+    value: boolean,
+  ) => void;
   onRequestSystemNotifications: () => Promise<boolean>;
   onOpenSystemNotificationSettings: () => void;
   onRefreshSystemNotificationPermission: () => Promise<boolean>;
@@ -3367,17 +3605,17 @@ function SettingsScreen({
     bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
       : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
-      ? 'warn'
-      : 'error';
+        ? 'warn'
+        : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
   const realtimeTone =
     socketState === 'open'
       ? 'ok'
       : socketState === 'polling'
-      ? 'warn'
-      : auth.auth
-      ? 'error'
-      : 'idle';
+        ? 'warn'
+        : auth.auth
+          ? 'error'
+          : 'idle';
   const errors = [
     bridgeSettings.error,
     auth.error,
@@ -3412,10 +3650,10 @@ function SettingsScreen({
         usage.usage?.limits.status === 'error'
           ? 'error'
           : usage.usage?.limits.status === 'warn'
-          ? 'warn'
-          : codexAuth.status?.installed === false
-          ? 'warn'
-          : 'ok',
+            ? 'warn'
+            : codexAuth.status?.installed === false
+              ? 'warn'
+              : 'ok',
     },
     {
       key: 'security',
@@ -3439,9 +3677,12 @@ function SettingsScreen({
           ? 'system enabled'
           : 'permission needed'
         : notificationSettings.inApp
-        ? 'in-app only'
-        : 'disabled',
-      tone: notificationSettings.system && !systemNotificationsEnabled ? 'warn' : 'ok',
+          ? 'in-app only'
+          : 'disabled',
+      tone:
+        notificationSettings.system && !systemNotificationsEnabled
+          ? 'warn'
+          : 'ok',
     },
     {
       key: 'workspace',
@@ -3465,8 +3706,8 @@ function SettingsScreen({
       tone: errorHistory.some(item => item.level === 'error')
         ? 'error'
         : errorHistory.length
-        ? 'warn'
-        : 'idle',
+          ? 'warn'
+          : 'idle',
     },
     {
       key: 'updates',
@@ -3479,8 +3720,8 @@ function SettingsScreen({
       tone: appUpdater.error
         ? 'error'
         : appUpdater.info?.updateAvailable
-        ? 'warn'
-        : 'idle',
+          ? 'warn'
+          : 'idle',
     },
     {
       key: 'diagnostics',
@@ -3746,8 +3987,8 @@ function SettingsScreen({
                 !DexydNotifications.available
                   ? 'idle'
                   : systemNotificationsEnabled
-                  ? 'ok'
-                  : 'warn'
+                    ? 'ok'
+                    : 'warn'
               }
             />
             <ToggleRow
@@ -3809,7 +4050,11 @@ function SettingsScreen({
             />
             <View style={styles.settingsActions}>
               <TextButton
-                label={systemNotificationsEnabled ? 'Permission OK' : 'Allow notifications'}
+                label={
+                  systemNotificationsEnabled
+                    ? 'Permission OK'
+                    : 'Allow notifications'
+                }
                 variant="primary"
                 disabled={!DexydNotifications.available}
                 onPress={() =>
@@ -3829,7 +4074,8 @@ function SettingsScreen({
               />
             </View>
             <Text style={styles.settingHint}>
-              Android may still suppress notifications if app notifications are disabled in system settings or Do Not Disturb is active.
+              Android may still suppress notifications if app notifications are
+              disabled in system settings or Do Not Disturb is active.
             </Text>
           </SettingsSection>
         );
@@ -3907,15 +4153,15 @@ function SettingsScreen({
                 appUpdater.checking
                   ? 'checking'
                   : appUpdater.installing
-                  ? 'downloading'
-                  : 'ready'
+                    ? 'downloading'
+                    : 'ready'
               }
               tone={
                 appUpdater.error
                   ? 'error'
                   : appUpdater.info?.updateAvailable
-                  ? 'warn'
-                  : 'idle'
+                    ? 'warn'
+                    : 'idle'
               }
             />
             <SettingLine
@@ -4236,9 +4482,9 @@ function UsagePanel({
                 usage.context.usedTokens ?? 0,
               )} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
             : usage?.context.usedTokens !== null &&
-              usage?.context.usedTokens !== undefined
-            ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-            : 'unknown'
+                usage?.context.usedTokens !== undefined
+              ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+              : 'unknown'
         }
         tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
@@ -4355,8 +4601,8 @@ function CodexAuthPanel({
                   {account.active
                     ? 'active'
                     : codexAuth.switching === account.index
-                    ? 'switching…'
-                    : 'switch'}
+                      ? 'switching…'
+                      : 'switch'}
                 </Text>
               </Pressable>
             ))
@@ -4600,12 +4846,12 @@ function notificationFromAttention(item: AttentionItem): SystemNotification {
     item.kind === 'message'
       ? 'response'
       : item.kind === 'approval'
-      ? 'approval'
-      : item.kind === 'question'
-      ? 'question'
-      : item.title.toLowerCase().includes('failed')
-      ? 'alert'
-      : 'response';
+        ? 'approval'
+        : item.kind === 'question'
+          ? 'question'
+          : item.title.toLowerCase().includes('failed')
+            ? 'alert'
+            : 'response';
 
   return {
     id: `notice-${item.id}`,
@@ -4616,7 +4862,6 @@ function notificationFromAttention(item: AttentionItem): SystemNotification {
     sessionId: item.sessionId,
   };
 }
-
 
 function shouldSendSystemNotification(
   notification: SystemNotification,
@@ -4653,8 +4898,8 @@ function interactionResponseFromEvent(
     typeof payload.interactionId === 'string'
       ? payload.interactionId
       : typeof payload.requestId === 'string'
-      ? payload.requestId
-      : '';
+        ? payload.requestId
+        : '';
 
   if (!requestId) return null;
 
@@ -4662,8 +4907,8 @@ function interactionResponseFromEvent(
     typeof payload.decision === 'string'
       ? payload.decision
       : typeof payload.answer === 'string'
-      ? payload.answer
-      : 'sent';
+        ? payload.answer
+        : 'sent';
 
   return { requestId, label };
 }
@@ -4718,8 +4963,8 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
   const raw = Array.isArray(payload.choices)
     ? payload.choices
     : Array.isArray(payload.options)
-    ? payload.options
-    : [];
+      ? payload.options
+      : [];
 
   return raw
     .map((choice, index): AttentionChoice | null => {
@@ -4736,10 +4981,10 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
         typeof item.label === 'string'
           ? item.label
           : typeof item.title === 'string'
-          ? item.title
-          : typeof item.text === 'string'
-          ? item.text
-          : '';
+            ? item.title
+            : typeof item.text === 'string'
+              ? item.text
+              : '';
 
       if (!label.trim()) return null;
 
@@ -4769,8 +5014,8 @@ function usageSummary(usage: UsageStatus): string {
     usage.context.percent !== null
       ? `${usage.context.percent}% context`
       : usage.context.usedTokens !== null
-      ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-      : 'context unknown';
+        ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+        : 'context unknown';
   return `${accountUsageLabel(usage)} · ${context}`;
 }
 
@@ -5402,6 +5647,12 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 10,
   },
+  pathQuickActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 8,
+  },
   pickerList: {
     maxHeight: 440,
   },
@@ -5885,6 +6136,89 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     lineHeight: 16,
+  },
+  commandPalette: {
+    maxHeight: 252,
+    marginBottom: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#343437',
+    backgroundColor: '#19191a',
+    overflow: 'hidden',
+  },
+  commandPaletteHeader: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#303033',
+  },
+  commandPaletteTitle: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  commandRefresh: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  commandHint: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: palette.dim,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  commandList: {
+    maxHeight: 218,
+  },
+  commandRow: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#2b2b2d',
+  },
+  commandTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+  commandTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  commandName: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  commandCategory: {
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  commandDescription: {
+    marginTop: 3,
+    color: palette.muted,
+    fontSize: 12,
+    lineHeight: 15,
+  },
+  commandInsert: {
+    maxWidth: 110,
+    color: '#d7d2c7',
+    fontSize: 11,
+    fontWeight: '800',
   },
   steeringNoticeRow: {
     flexDirection: 'row',
@@ -6922,6 +7256,37 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 12,
     fontWeight: '700',
+  },
+  autocompleteBox: {
+    maxHeight: 170,
+    marginTop: -2,
+    marginBottom: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.line,
+    backgroundColor: '#181819',
+    overflow: 'hidden',
+  },
+  autocompleteList: {
+    maxHeight: 170,
+  },
+  autocompleteRow: {
+    minHeight: 42,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#242426',
+  },
+  autocompleteName: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  autocompletePath: {
+    marginTop: 2,
+    color: palette.dim,
+    fontSize: 11,
   },
   bottomTabs: {
     height: 60,
