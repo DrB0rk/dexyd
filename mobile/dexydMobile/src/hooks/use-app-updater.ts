@@ -3,7 +3,7 @@ import { Linking, Platform } from 'react-native';
 import { DexydUpdater } from '../native/dexyd-updater';
 import { errorMessage } from '../utils/error-message';
 
-const FALLBACK_APP_VERSION = '0.0.7';
+const UNKNOWN_APP_VERSION = '0.0.0';
 const GITHUB_LATEST_RELEASE_URL =
   'https://api.github.com/repos/DrB0rk/dexyd/releases/latest';
 const GITHUB_RELEASES_URL = 'https://github.com/DrB0rk/dexyd/releases/latest';
@@ -85,7 +85,7 @@ export function useAppUpdater() {
     setMessage(null);
     try {
       const currentVersion = await DexydUpdater.getInstalledVersion(
-        FALLBACK_APP_VERSION,
+        UNKNOWN_APP_VERSION,
       );
       const response = await fetch(GITHUB_LATEST_RELEASE_URL, {
         headers: {

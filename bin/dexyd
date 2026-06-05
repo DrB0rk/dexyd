@@ -56,11 +56,15 @@ case "${1:-}" in
     shift || true
     exec bash scripts/install.sh --use-current "$@"
     ;;
+  --version|-V|version)
+    node -e "const p=require('./package.json'); console.log(p.version || '0.0.0')"
+    ;;
   --help|-h|help)
     cat <<'HELP'
 dexyd commands:
   dexyd --tui       open the bridge TUI
   dexyd --install   run the installer against this checkout
+  dexyd --version   print the installed bridge/TUI version
   dexyd             start the built bridge (build first if needed)
 HELP
     ;;

@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
@@ -9,6 +11,16 @@ react {
 def enableProguardInReleaseBuilds = true
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+def mobilePackageJson = new JsonSlurper().parse(file("../../package.json"))
+def mobileVersionName = (mobilePackageJson.version ?: "0.0.0").toString()
+def versionCore = mobileVersionName.tokenize("-")[0]
+def versionParts = versionCore.tokenize(".").collect { part ->
+    try { part.toInteger() } catch (ignored) { 0 }
+}
+while (versionParts.size() < 3) { versionParts.add(0) }
+def mobileVersionCode = (versionParts[0] * 10000) + (versionParts[1] * 100) + versionParts[2]
+if (mobileVersionCode < 1) { mobileVersionCode = 1 }
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -19,8 +31,8 @@ android {
         applicationId "com.dexydmobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 14
-        versionName "0.0.14"
+        versionCode mobileVersionCode
+        versionName mobileVersionName
     }
 
     signingConfigs {

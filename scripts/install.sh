@@ -372,29 +372,39 @@ install_tui_deps() {
   local marker="$venv/.deps-installed"
   local venv_bin="$venv/bin"
   local python_bin=""
+  local needs_install=0
 
-  # When this installer is launched from the TUI updater, PATH may point at the
-  # currently-running TUI virtualenv. We delete/recreate that venv below, so use
-  # a Python executable outside it or the update can fail halfway through.
-  while IFS= read -r candidate; do
-    case "$candidate" in
-      "$venv_bin"/*) continue ;;
-      *) python_bin="$candidate"; break ;;
-    esac
-  done < <(type -P -a python3 2>/dev/null || true)
-  [[ -n "$python_bin" ]] || fail "python3 is required to create the TUI virtualenv"
+  # When launched from the TUI updater, the current process may be running from
+  # this virtualenv. Never delete it during an update; repair or refresh it in
+  # place so the installer cannot invalidate its own Python runtime halfway
+  # through staging a new bridge/TUI version.
+  if [[ ! -x "$venv/bin/python" || "${DEXYD_REBUILD_TUI_VENV:-0}" == "1" ]]; then
+    while IFS= read -r candidate; do
+      case "$candidate" in
+        "$venv_bin"/*) continue ;;
+        *) python_bin="$candidate"; break ;;
+      esac
+    done < <(type -P -a python3 2>/dev/null || true)
+    [[ -n "$python_bin" ]] || fail "python3 is required to create the TUI virtualenv"
+    rm -rf "$venv"
+    hash -r 2>/dev/null || true
+    mkdir -p "$(dirname "$venv")"
+    "$python_bin" -m venv "$venv"
+    needs_install=1
+  fi
 
-  rm -rf "$venv"
-  hash -r 2>/dev/null || true
-  mkdir -p "$(dirname "$venv")"
-  "$python_bin" -m venv "$venv"
   [[ -x "$venv/bin/python" ]] || fail "TUI virtualenv did not create $venv/bin/python"
   if [[ ! -e "$venv/bin/python3" ]]; then
     ln -s python "$venv/bin/python3"
   fi
-  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install --upgrade pip
-  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install -r "$req"
-  touch "$marker"
+  if [[ ! -f "$marker" || "$req" -nt "$marker" ]]; then
+    needs_install=1
+  fi
+  if [[ "$needs_install" == "1" ]]; then
+    PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install --upgrade pip
+    PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 "$venv/bin/python" -m pip install -r "$req"
+    touch "$marker"
+  fi
   ok "TUI dependencies installed"
 }
 
