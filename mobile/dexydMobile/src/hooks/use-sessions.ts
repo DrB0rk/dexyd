@@ -13,14 +13,23 @@ import {
   restoreSession,
   type AuthTokens,
 } from '../api/dexyd-client';
-import { DexydSession, EventEnvelope, HiddenDexydSession } from '../types/dexyd';
+import {
+  DexydSession,
+  EventEnvelope,
+  HiddenDexydSession,
+} from '../types/dexyd';
 import { errorMessage } from '../utils/error-message';
 
 const SESSION_CACHE_KEY = 'dexyd.sessions.cache.v1';
 const SESSION_POLL_INTERVAL_MS = 5000;
 
-function cacheKeyForBridge(bridgeUrl: string): string {
-  return `${SESSION_CACHE_KEY}:${bridgeUrl || 'unconfigured'}`;
+function cacheKeyForBridge(
+  bridgeUrl: string,
+  workspacePath?: string | null,
+): string {
+  return `${SESSION_CACHE_KEY}:${bridgeUrl || 'unconfigured'}:${
+    workspacePath || 'all'
+  }`;
 }
 
 type Connectivity = 'idle' | 'online' | 'offline' | 'error';
@@ -75,33 +84,36 @@ export function useSessions(
   bridgeUrl: string,
   tokens: AuthTokens | null,
   lastEvent?: EventEnvelope | null,
+  workspacePath?: string | null,
 ) {
   const [sessions, setSessions] = useState<DexydSession[]>([]);
-  const [hiddenSessions, setHiddenSessions] = useState<HiddenDexydSession[]>([]);
+  const [hiddenSessions, setHiddenSessions] = useState<HiddenDexydSession[]>(
+    [],
+  );
   const [hiddenLoading, setHiddenLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectivity, setConnectivity] = useState<Connectivity>('idle');
 
   useEffect(() => {
-    AsyncStorage.getItem(cacheKeyForBridge(bridgeUrl))
+    AsyncStorage.getItem(cacheKeyForBridge(bridgeUrl, workspacePath))
       .then(raw => {
         if (!raw) return;
         const cached = JSON.parse(raw) as DexydSession[];
         if (Array.isArray(cached)) setSessions(cached);
       })
       .catch(() => undefined);
-  }, [bridgeUrl]);
+  }, [bridgeUrl, workspacePath]);
 
   const persist = useCallback(
     async (items: DexydSession[]) => {
       setSessions(items);
       await AsyncStorage.setItem(
-        cacheKeyForBridge(bridgeUrl),
+        cacheKeyForBridge(bridgeUrl, workspacePath),
         JSON.stringify(items.slice(0, 100)),
       );
     },
-    [bridgeUrl],
+    [bridgeUrl, workspacePath],
   );
 
   const refresh = useCallback(
@@ -116,7 +128,9 @@ export function useSessions(
         setError(null);
       }
       try {
-        const items = await getSessions(bridgeUrl, tokens);
+        const items = await getSessions(bridgeUrl, tokens, {
+          workspacePath: workspacePath || undefined,
+        });
         await persist(items);
         setError(null);
         setConnectivity('online');
@@ -135,17 +149,17 @@ export function useSessions(
         if (!options.silent) setLoading(false);
       }
     },
-    [bridgeUrl, persist, sessions.length, tokens],
+    [bridgeUrl, persist, sessions.length, tokens, workspacePath],
   );
 
   const create = useCallback(
-    async (workspacePath: string, title?: string) => {
+    async (targetWorkspacePath: string, title?: string) => {
       if (!tokens) return null;
       setError(null);
       try {
         const session = await createSession(
           bridgeUrl,
-          workspacePath,
+          targetWorkspacePath,
           tokens,
           title,
         );
@@ -252,11 +266,11 @@ export function useSessions(
   );
 
   const clearCache = useCallback(async () => {
-    await AsyncStorage.removeItem(cacheKeyForBridge(bridgeUrl));
+    await AsyncStorage.removeItem(cacheKeyForBridge(bridgeUrl, workspacePath));
     setSessions([]);
     setError(null);
     setConnectivity('idle');
-  }, [bridgeUrl]);
+  }, [bridgeUrl, workspacePath]);
 
   useEffect(() => {
     refresh().catch(() => undefined);
@@ -290,7 +304,7 @@ export function useSessions(
       setSessions(current => {
         const merged = mergeSession(current, next);
         AsyncStorage.setItem(
-          cacheKeyForBridge(bridgeUrl),
+          cacheKeyForBridge(bridgeUrl, workspacePath),
           JSON.stringify(merged.slice(0, 100)),
         ).catch(() => undefined);
         return merged;
@@ -303,7 +317,7 @@ export function useSessions(
           session => session.id !== lastEvent.sessionId,
         );
         AsyncStorage.setItem(
-          cacheKeyForBridge(bridgeUrl),
+          cacheKeyForBridge(bridgeUrl, workspacePath),
           JSON.stringify(next.slice(0, 100)),
         ).catch(() => undefined);
         return next;
@@ -322,7 +336,7 @@ export function useSessions(
           'running',
         );
         AsyncStorage.setItem(
-          cacheKeyForBridge(bridgeUrl),
+          cacheKeyForBridge(bridgeUrl, workspacePath),
           JSON.stringify(next.slice(0, 100)),
         ).catch(() => undefined);
         return next;
@@ -342,7 +356,7 @@ export function useSessions(
     ) {
       refresh({ silent: true }).catch(() => undefined);
     }
-  }, [bridgeUrl, lastEvent, refresh, tokens]);
+  }, [bridgeUrl, lastEvent, refresh, tokens, workspacePath]);
 
   return {
     sessions,

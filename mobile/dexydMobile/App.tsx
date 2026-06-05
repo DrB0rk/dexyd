@@ -156,6 +156,7 @@ type SettingsPane = {
   subtitle: string;
   detail: string;
   tone: StatusKind;
+  attention?: boolean;
 };
 
 const ONBOARDING_DISMISSED_KEY = 'dexyd.onboarding.dismissed.v1';
@@ -163,6 +164,7 @@ const ADDED_PROJECTS_KEY = 'dexyd.projects.added.v1';
 const REMOVED_PROJECTS_KEY = 'dexyd.projects.removed.v1';
 const SELECTED_PROJECT_KEY = 'dexyd.projects.selected.v1';
 const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
+const USAGE_WARNING_STATE_KEY = 'dexyd.usage.warning.state.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
   system: true,
@@ -290,6 +292,7 @@ export default function App() {
     bridgeSettings.bridgeUrl,
     tokens,
     stream.lastEvent,
+    selectedProjectPath === '.' ? null : selectedProjectPath,
   );
   const projects = useProjects(bridgeSettings.bridgeUrl, tokens);
   const chat = useChat(
@@ -751,19 +754,42 @@ export default function App() {
     const remaining = accountRemainingPercent(current);
     if (remaining !== null && remaining > 50) {
       usageAlertThresholdsRef.current.clear();
+      AsyncStorage.removeItem(USAGE_WARNING_STATE_KEY).catch(() => undefined);
+      return;
     }
     const threshold = accountUsageWarningThreshold(current);
     if (threshold === null) return;
+    const warningKey = accountUsageWarningKey(
+      current,
+      threshold,
+      bridgeSettings.activeBridgeId || bridgeSettings.bridgeUrl,
+    );
     if (usageAlertThresholdsRef.current.has(threshold)) return;
-    usageAlertThresholdsRef.current.add(threshold);
-    notify({
-      id: `account-usage-${threshold}`,
-      kind: 'usage',
-      title: `Account usage warning: below ${threshold}%`,
-      body: accountUsageWarningBody(current, threshold),
-      sessionId: current.sessionId,
-    });
-  }, [notify, usage.usage]);
+    AsyncStorage.getItem(USAGE_WARNING_STATE_KEY)
+      .then(raw => {
+        const sent = parseStringSet(raw);
+        if (sent.has(warningKey)) return;
+        sent.add(warningKey);
+        usageAlertThresholdsRef.current.add(threshold);
+        AsyncStorage.setItem(
+          USAGE_WARNING_STATE_KEY,
+          JSON.stringify([...sent].slice(-80)),
+        ).catch(() => undefined);
+        notify({
+          id: `account-usage-${threshold}`,
+          kind: 'usage',
+          title: `Account usage warning: below ${threshold}%`,
+          body: accountUsageWarningBody(current, threshold),
+          sessionId: current.sessionId,
+        });
+      })
+      .catch(() => undefined);
+  }, [
+    bridgeSettings.activeBridgeId,
+    bridgeSettings.bridgeUrl,
+    notify,
+    usage.usage,
+  ]);
 
   useEffect(() => {
     const status = codexAuth.status;
@@ -1171,6 +1197,10 @@ export default function App() {
               <InboxScreen
                 authReady={Boolean(auth.auth)}
                 items={attentionItems}
+                bridgeHealth={bridgeHealth}
+                socketState={stream.socketState}
+                sessionsCount={sessions.sessions.length}
+                usage={usage.usage}
                 onClear={() => setAttentionItems([])}
                 onRefresh={sessions.refresh}
                 onOpenSession={sessionId => {
@@ -1438,7 +1468,7 @@ function TopBar({
           pressed && styles.pressed,
         ]}
       >
-        <Text style={styles.helpChatIcon}>?</Text>
+        <Text style={styles.helpChatIcon}>💬</Text>
       </Pressable>
       <Pressable
         accessibilityRole="button"
@@ -1810,10 +1840,17 @@ function ProjectPicker({
   onChoose: (project: ProjectOption) => void;
 }) {
   const [customPath, setCustomPath] = useState('~');
+  const initializedRef = useRef(false);
 
   useEffect(() => {
-    if (!visible) return undefined;
-    setCustomPath(browse?.currentPath || '~');
+    if (!visible) {
+      initializedRef.current = false;
+      return undefined;
+    }
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      setCustomPath(browse?.currentPath || '~');
+    }
     const subscription = BackHandler.addEventListener(
       'hardwareBackPress',
       () => {
@@ -1848,6 +1885,11 @@ function ProjectPicker({
     browsePath(path);
   };
 
+  const chooseCurrentPath = () => {
+    if (!browse) return;
+    onChoose(projectOptionFromBrowse(browse));
+  };
+
   return (
     <Pressable style={styles.pickerOverlay} onPress={onClose}>
       <Pressable
@@ -1869,6 +1911,11 @@ function ProjectPicker({
         <View style={styles.pathQuickActions}>
           <TextButton label="Home" onPress={() => browsePath('')} />
           <TextButton label="Root" onPress={() => browsePath('/')} />
+          <TextButton
+            label="Current"
+            disabled={!browse}
+            onPress={() => browsePath(browse?.currentPath || '~')}
+          />
           <TextButton
             label="↑ Up"
             disabled={!browse?.parentPath}
@@ -1925,10 +1972,7 @@ function ProjectPicker({
             label={`Use ${currentLabel}`}
             variant="primary"
             disabled={!browse}
-            onPress={() => {
-              if (!browse) return;
-              onChoose(projectOptionFromBrowse(browse));
-            }}
+            onPress={chooseCurrentPath}
           />
         </View>
 
@@ -2708,6 +2752,10 @@ function previewText(value: string): string {
 function InboxScreen({
   authReady,
   items,
+  bridgeHealth,
+  socketState,
+  sessionsCount,
+  usage,
   onClear,
   onRefresh,
   onOpenSession,
@@ -2715,6 +2763,10 @@ function InboxScreen({
 }: {
   authReady: boolean;
   items: AttentionItem[];
+  bridgeHealth: string;
+  socketState: string;
+  sessionsCount: number;
+  usage: UsageStatus | null;
   onClear: () => void;
   onRefresh: () => Promise<void>;
   onOpenSession: (sessionId: string | null) => void;
@@ -2773,6 +2825,12 @@ function InboxScreen({
         contentContainerStyle={styles.inboxEmpty}
         refreshControl={refreshControl}
       >
+        <InboxStatusSummary
+          bridgeHealth={bridgeHealth}
+          socketState={socketState}
+          sessionsCount={sessionsCount}
+          usage={usage}
+        />
         <Text style={styles.inboxEmptyTitle}>No inbox items</Text>
         <Text style={styles.inboxEmptyText}>
           New agent messages, status updates, approval requests, and questions
@@ -2794,6 +2852,12 @@ function InboxScreen({
         </Text>
         <TextButton label="Clear" onPress={onClear} />
       </View>
+      <InboxStatusSummary
+        bridgeHealth={bridgeHealth}
+        socketState={socketState}
+        sessionsCount={sessionsCount}
+        usage={usage}
+      />
       {items.map(item => (
         <Pressable
           key={item.id}
@@ -2827,6 +2891,88 @@ function InboxScreen({
         </Pressable>
       ))}
     </ScrollView>
+  );
+}
+
+function InboxStatusSummary({
+  bridgeHealth,
+  socketState,
+  sessionsCount,
+  usage,
+}: {
+  bridgeHealth: string;
+  socketState: string;
+  sessionsCount: number;
+  usage: UsageStatus | null;
+}) {
+  const account = usage ? accountUsageLabel(usage) : 'usage unknown';
+  const context =
+    usage?.context.percent !== null && usage?.context.percent !== undefined
+      ? `${usage.context.percent}% context`
+      : usage?.context.usedTokens
+      ? `${formatCompactNumber(usage.context.usedTokens)} ctx`
+      : 'context unknown';
+  return (
+    <View style={styles.inboxStatusCard}>
+      <Text style={styles.inboxStatusTitle}>System</Text>
+      <View style={styles.inboxStatusGrid}>
+        <StatusChip
+          label="Bridge"
+          value={bridgeHealth}
+          tone={
+            bridgeHealth === 'ready' || bridgeHealth === 'ok'
+              ? 'ok'
+              : bridgeHealth === 'down'
+              ? 'error'
+              : 'idle'
+          }
+        />
+        <StatusChip
+          label="Realtime"
+          value={socketState}
+          tone={
+            socketState === 'open'
+              ? 'ok'
+              : socketState === 'polling'
+              ? 'warn'
+              : 'idle'
+          }
+        />
+        <StatusChip
+          label="Sessions"
+          value={String(sessionsCount)}
+          tone={sessionsCount > 0 ? 'ok' : 'idle'}
+        />
+        <StatusChip
+          label="Usage"
+          value={account}
+          tone={usage?.limits.status ?? 'idle'}
+        />
+      </View>
+      <Text style={styles.inboxStatusMeta}>{context}</Text>
+    </View>
+  );
+}
+
+function StatusChip({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: StatusKind | 'unknown';
+}) {
+  return (
+    <View style={styles.statusChip}>
+      <View
+        style={[styles.statusDotSmall, { backgroundColor: statusColor(tone) }]}
+      />
+      <Text style={styles.statusChipLabel}>{label}</Text>
+      <Text style={styles.statusChipValue} numberOfLines={1}>
+        {value}
+      </Text>
+    </View>
   );
 }
 
@@ -4106,6 +4252,7 @@ function SettingsScreen({
         bridgeSettings.bridgeUrl ||
         'not configured',
       tone: connectionTone,
+      attention: connectionTone === 'error' || connectionTone === 'warn',
     },
     {
       key: 'pairing',
@@ -4114,6 +4261,7 @@ function SettingsScreen({
       subtitle: 'Connect this phone to the selected bridge.',
       detail: auth.auth ? 'phone paired' : 'scan QR or paste URI',
       tone: authTone,
+      attention: !auth.auth,
     },
     {
       key: 'account',
@@ -4129,6 +4277,10 @@ function SettingsScreen({
           : codexAuth.status?.installed === false
           ? 'warn'
           : 'ok',
+      attention:
+        usage.usage?.limits.status === 'warn' ||
+        usage.usage?.limits.status === 'error' ||
+        codexAuth.status?.installed === false,
     },
     {
       key: 'security',
@@ -4141,6 +4293,7 @@ function SettingsScreen({
           }`
         : 'not paired',
       tone: auth.auth ? 'ok' : 'idle',
+      attention: !auth.auth,
     },
     {
       key: 'notifications',
@@ -4158,6 +4311,7 @@ function SettingsScreen({
         notificationSettings.system && !systemNotificationsEnabled
           ? 'warn'
           : 'ok',
+      attention: notificationSettings.system && !systemNotificationsEnabled,
     },
     {
       key: 'workspace',
@@ -4177,6 +4331,7 @@ function SettingsScreen({
           ? 'none hidden'
           : `${deletedSessions.length} hidden`,
       tone: deletedSessions.length > 0 ? 'warn' : 'idle',
+      attention: deletedSessions.length > 0,
     },
     {
       key: 'history',
@@ -4194,6 +4349,7 @@ function SettingsScreen({
         : errorHistory.length
         ? 'warn'
         : 'idle',
+      attention: errorHistory.length > 0,
     },
     {
       key: 'updates',
@@ -4208,6 +4364,7 @@ function SettingsScreen({
         : appUpdater.info?.updateAvailable
         ? 'warn'
         : 'idle',
+      attention: Boolean(appUpdater.error || appUpdater.info?.updateAvailable),
     },
     {
       key: 'diagnostics',
@@ -4219,6 +4376,7 @@ function SettingsScreen({
           ? 'no current errors'
           : `${errors.length} error${errors.length === 1 ? '' : 's'}`,
       tone: errors.length === 0 ? 'idle' : 'error',
+      attention: errors.length > 0,
     },
   ];
   const selectedPane =
@@ -4952,12 +5110,14 @@ function SettingsMenuCard({
         </Text>
       </View>
       <View style={styles.settingsMenuRight}>
-        <View
-          style={[
-            styles.statusDotSmall,
-            { backgroundColor: statusColor(pane.tone) },
-          ]}
-        />
+        {pane.attention ? (
+          <View
+            style={[
+              styles.statusDotSmall,
+              { backgroundColor: statusColor(pane.tone) },
+            ]}
+          />
+        ) : null}
         <Text style={styles.settingsMenuChevron}>›</Text>
       </View>
     </Pressable>
@@ -5703,6 +5863,29 @@ function accountUsageWarningThreshold(
   if (remaining <= 25) return 25;
   if (remaining <= 50) return 50;
   return null;
+}
+
+function parseStringSet(raw: string | null): Set<string> {
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter((item): item is string => typeof item === 'string'),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function accountUsageWarningKey(
+  usage: UsageStatus,
+  threshold: number,
+  computerKey: string,
+): string {
+  const label = usage.limits.label || 'account';
+  const detail = usage.limits.detail || '';
+  return `${computerKey || 'default'}:${label}:${detail}:${threshold}`;
 }
 
 function accountUsageWarningBody(
@@ -6468,17 +6651,18 @@ const styles = StyleSheet.create({
   },
   helpChatButton: {
     position: 'absolute',
-    right: 58,
-    top: 13,
-    width: 34,
-    height: 34,
+    right: 56,
+    top: 12,
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
   },
   helpChatIcon: {
     color: palette.text,
-    fontSize: 24,
-    fontWeight: '500',
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '700',
   },
   plusButton: {
     position: 'absolute',
@@ -7295,6 +7479,52 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     textTransform: 'uppercase',
+  },
+  inboxStatusCard: {
+    width: '100%',
+    marginBottom: 10,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.line,
+  },
+  inboxStatusTitle: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  inboxStatusGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  inboxStatusMeta: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+  statusChip: {
+    minHeight: 28,
+    maxWidth: '48%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: '#242425',
+    gap: 5,
+  },
+  statusChipLabel: {
+    color: palette.dim,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  statusChipValue: {
+    flexShrink: 1,
+    color: palette.text,
+    fontSize: 11,
+    fontWeight: '800',
   },
   inboxItem: {
     marginBottom: 10,

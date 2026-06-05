@@ -66,7 +66,7 @@ describe('session deletion', () => {
     }
   });
 
-  it('lists hidden sessions, restores them, and includes sessions in project subdirectories', async () => {
+  it('lists hidden sessions, restores them, and keeps project session filters exact', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-session-restore-'));
     cleanupPaths.push(tempDir);
     const workspaceRoot = join(tempDir, 'workspace');
@@ -97,10 +97,19 @@ codex:
         method: 'POST',
         url: '/sessions',
         headers,
-        payload: { workspacePath: nestedProjectDir, title: 'nested work' },
+        payload: { workspacePath: projectRoot, title: 'project work' },
       });
       expect(created.statusCode).toBe(201);
       const sessionId = created.json().session.id as string;
+
+      const nested = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers,
+        payload: { workspacePath: nestedProjectDir, title: 'nested work' },
+      });
+      expect(nested.statusCode).toBe(201);
+      const nestedSessionId = nested.json().session.id as string;
 
       const listedByProject = await service.app.inject({
         method: 'GET',
@@ -108,7 +117,9 @@ codex:
         headers,
       });
       expect(listedByProject.statusCode).toBe(200);
-      expect(listedByProject.json().sessions.map((session: { id: string }) => session.id)).toContain(sessionId);
+      const listedProjectSessionIds = listedByProject.json().sessions.map((session: { id: string }) => session.id);
+      expect(listedProjectSessionIds).toContain(sessionId);
+      expect(listedProjectSessionIds).not.toContain(nestedSessionId);
 
       const deleted = await service.app.inject({ method: 'DELETE', url: `/sessions/${sessionId}`, headers });
       expect(deleted.statusCode).toBe(200);

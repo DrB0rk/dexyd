@@ -1024,7 +1024,7 @@ function getSession(context: AppContext, sessionId: string) {
 function sessionWithinWorkspace(sessionPath: string, workspacePath: string): boolean {
   const normalizedSession = normalizeComparablePath(sessionPath);
   const normalizedWorkspace = normalizeComparablePath(workspacePath);
-  return normalizedSession === normalizedWorkspace || normalizedSession.startsWith(`${normalizedWorkspace}/`);
+  return normalizedSession === normalizedWorkspace;
 }
 
 function normalizeComparablePath(path: string): string {
