@@ -12,6 +12,7 @@ import { ChatMessage, EventEnvelope, QueuedChatMessage } from '../types/dexyd';
 import { errorMessage } from '../utils/error-message';
 
 const CHAT_POLL_INTERVAL_MS = 3500;
+const CHAT_ACTIVE_POLL_INTERVAL_MS = 1200;
 const TRANSIENT_MESSAGE_KEEP_MS = 2 * 60 * 1000;
 
 export function normalizeDisplayUserContent(content: string): string {
@@ -50,14 +51,18 @@ function stripEnvironmentContextBlocks(text: string): string {
 
 function isDexydPromptEnvelope(text: string): boolean {
   return (
-    /You are running inside dexyd as the assistant for a mobile chat session\./i.test(text) ||
+    /You are running inside dexyd as the assistant for a mobile chat session\./i.test(
+      text,
+    ) ||
     /<environment_context>[\s\S]*?<\/environment_context>/i.test(text) ||
     /Conversation so far:\s*$/im.test(text) ||
     /(?:^|\n)Latest user message:\s*\n/i.test(text)
   );
 }
 
-function normalizeChatMessageForDisplay(message: ChatMessage): ChatMessage | null {
+function normalizeChatMessageForDisplay(
+  message: ChatMessage,
+): ChatMessage | null {
   const content =
     message.role === 'user'
       ? normalizeDisplayUserContent(message.content)
@@ -108,8 +113,8 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
             typeof payload.content === 'string' ? payload.content : '',
           )
         : typeof payload.content === 'string'
-        ? payload.content
-        : '';
+          ? payload.content
+          : '';
     if (!content) return null;
     return {
       id: typeof payload.id === 'string' ? payload.id : `${event.sequence}`,
@@ -154,8 +159,8 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
         typeof payload.message === 'string'
           ? payload.message
           : cancelled
-          ? 'Codex turn cancelled.'
-          : 'Chat turn failed.',
+            ? 'Codex turn cancelled.'
+            : 'Chat turn failed.',
       createdAt: event.timestamp,
       sequence: event.sequence,
       status: cancelled ? 'cancelled' : 'failed',
@@ -176,8 +181,8 @@ function eventToQueuedMessage(event: EventEnvelope): QueuedChatMessage | null {
     typeof payload.queueId === 'string'
       ? payload.queueId
       : typeof payload.id === 'string'
-      ? payload.id
-      : '';
+        ? payload.id
+        : '';
   const turnId = typeof payload.turnId === 'string' ? payload.turnId : '';
   const sessionId = typeof event.sessionId === 'string' ? event.sessionId : '';
   const content = normalizeDisplayUserContent(
@@ -534,7 +539,10 @@ function sameChatMessages(left: ChatMessage[], right: ChatMessage[]): boolean {
   return left.every((message, index) => sameChatMessage(message, right[index]));
 }
 
-function sameChatMessage(left: ChatMessage, right: ChatMessage | undefined): boolean {
+function sameChatMessage(
+  left: ChatMessage,
+  right: ChatMessage | undefined,
+): boolean {
   if (!right) return false;
   return (
     left.id === right.id &&
@@ -677,6 +685,7 @@ export function useChat(
         );
       } catch (err) {
         if (requestId !== refreshRequestRef.current) return;
+        if (silent) return;
         setError(errorMessage(err, 'failed to load chat'));
       } finally {
         if (requestId === refreshRequestRef.current && !silent) {
@@ -753,10 +762,9 @@ export function useChat(
         }
         return true;
       } catch (err) {
-        pendingUserMessagesRef.current =
-          pendingUserMessagesRef.current.filter(
-            item => item.id !== optimistic.id,
-          );
+        pendingUserMessagesRef.current = pendingUserMessagesRef.current.filter(
+          item => item.id !== optimistic.id,
+        );
         setMessages(current =>
           nextChatMessages(
             current,
@@ -842,10 +850,6 @@ export function useChat(
   );
 
   useEffect(() => {
-    refresh().catch(() => undefined);
-  }, [refresh]);
-
-  useEffect(() => {
     refreshRequestRef.current += 1;
     pendingUserMessagesRef.current = [];
     setMessages(current => nextChatMessages(current, []));
@@ -854,12 +858,19 @@ export function useChat(
   }, [sessionId]);
 
   useEffect(() => {
+    refresh().catch(() => undefined);
+  }, [refresh]);
+
+  useEffect(() => {
     if (!tokens || !sessionId) return undefined;
+    const delay = messages.some(message => message.status === 'running')
+      ? CHAT_ACTIVE_POLL_INTERVAL_MS
+      : CHAT_POLL_INTERVAL_MS;
     const timer = setInterval(() => {
       refresh(true).catch(() => undefined);
-    }, CHAT_POLL_INTERVAL_MS);
+    }, delay);
     return () => clearInterval(timer);
-  }, [refresh, sessionId, tokens]);
+  }, [messages, refresh, sessionId, tokens]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
@@ -871,7 +882,13 @@ export function useChat(
   }, [refresh]);
 
   useEffect(() => {
-    if (!lastEvent || !sessionId || lastEvent.sessionId !== sessionId) return;
+    if (!lastEvent || !sessionId) return;
+    if (lastEvent.eventType === 'replay.expired') {
+      refresh(true).catch(() => undefined);
+      refreshQueue().catch(() => undefined);
+      return;
+    }
+    if (lastEvent.sessionId !== sessionId) return;
     if (lastEvent.eventType === 'chat.output.delta') {
       setMessages(current =>
         nextChatMessages(current, mergeDelta(current, lastEvent)),
@@ -928,7 +945,7 @@ export function useChat(
     setMessages(current =>
       nextChatMessages(current, mergeMessage(current, message)),
     );
-  }, [lastEvent, refreshQueue, sessionId]);
+  }, [lastEvent, refresh, refreshQueue, sessionId]);
 
   return useMemo(
     () => ({

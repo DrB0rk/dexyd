@@ -1,6 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { pairingComplete, refreshTokens, revoke } from '../api/dexyd-client';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
+import {
+  DexydApiError,
+  DexydBridgeConnectionError,
+  pairingComplete,
+  refreshTokens,
+  revoke,
+} from '../api/dexyd-client';
 import { normalizeBridgeHttpUrl } from '../config/bridge';
 import { errorMessage } from '../utils/error-message';
 
@@ -8,6 +15,8 @@ declare const atob: (input: string) => string;
 
 const LEGACY_STORAGE_KEY = 'dexyd.auth.tokens';
 const STORAGE_KEY = 'dexyd.auth.tokens.byBridge.v1';
+const ACCESS_REFRESH_SKEW_MS = 2 * 60 * 1000;
+const MIN_REFRESH_DELAY_MS = 15 * 1000;
 
 type AuthState = {
   deviceId: string;
@@ -154,6 +163,7 @@ export function useAuth(
   const [state, setState] = useState<AuthState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const bridgeKey = useMemo(() => safeBridgeKey(bridgeUrl), [bridgeUrl]);
 
   useEffect(() => {
@@ -256,16 +266,76 @@ export function useAuth(
       return;
     }
 
+    if (refreshInFlightRef.current) {
+      await refreshInFlightRef.current;
+      return;
+    }
+
+    const task = (async () => {
+      try {
+        const next = await refreshTokens(bridgeUrl, state.refreshToken);
+        await persist(next, bridgeUrl);
+        setError(null);
+      } catch (err) {
+        const message = errorMessage(err, 'refresh failed');
+        const invalidRefreshToken =
+          err instanceof DexydApiError &&
+          err.status === 401 &&
+          (err.code === 'invalid_refresh_token' || err.code === null);
+
+        if (invalidRefreshToken) {
+          await persist(null, bridgeUrl);
+          setError(message);
+          return;
+        }
+
+        if (err instanceof DexydBridgeConnectionError) {
+          setError(null);
+          return;
+        }
+
+        setError(message);
+      }
+    })();
+
+    refreshInFlightRef.current = task;
     try {
-      const next = await refreshTokens(bridgeUrl, state.refreshToken);
-      await persist(next, bridgeUrl);
-      setError(null);
-    } catch (err) {
-      const message = errorMessage(err, 'refresh failed');
-      await persist(null, bridgeUrl);
-      setError(message);
+      await task;
+    } finally {
+      if (refreshInFlightRef.current === task) {
+        refreshInFlightRef.current = null;
+      }
     }
   }, [bridgeUrl, persist, state]);
+
+  useEffect(() => {
+    if (!state || !bridgeUrl.trim()) return undefined;
+    const expiresAt = Date.parse(state.accessExpiresAt);
+    if (!Number.isFinite(expiresAt)) return undefined;
+    const delay = Math.max(
+      expiresAt - Date.now() - ACCESS_REFRESH_SKEW_MS,
+      MIN_REFRESH_DELAY_MS,
+    );
+    const timer = setTimeout(() => {
+      refresh().catch(() => undefined);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [bridgeUrl, refresh, state]);
+
+  useEffect(() => {
+    if (!state || !bridgeUrl.trim()) return undefined;
+    const subscription = AppState.addEventListener('change', appState => {
+      if (appState !== 'active') return;
+      const expiresAt = Date.parse(state.accessExpiresAt);
+      if (
+        !Number.isFinite(expiresAt) ||
+        expiresAt - Date.now() <= ACCESS_REFRESH_SKEW_MS
+      ) {
+        refresh().catch(() => undefined);
+      }
+    });
+    return () => subscription.remove();
+  }, [bridgeUrl, refresh, state]);
 
   const signOut = useCallback(async () => {
     if (state && bridgeUrl.trim()) {

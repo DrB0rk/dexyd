@@ -46,7 +46,7 @@ describe('file and diff APIs', () => {
         headers,
         payload: { workspacePath: tmpdir(), profile: 'default' }
       });
-      expect(outsideWorkspace.statusCode).toBe(400);
+      expect(outsideWorkspace.statusCode).toBe(201);
 
       const listed = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/files`, headers });
       expect(listed.statusCode).toBe(200);

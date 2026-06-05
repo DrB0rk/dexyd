@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { ChatMessage } from '../domain/chat.js';
 import { SessionRecord } from '../domain/session.js';
 
@@ -96,16 +96,13 @@ export class CodexSessionService {
   private readonly codexHome: string;
   private readonly omxHome: string;
 
-  constructor(private readonly workspaceRoot: string, private readonly logger: LoggerLike) {
+  constructor(_workspaceRoot: string, private readonly logger: LoggerLike) {
     this.codexHome = resolve(process.env.CODEX_HOME || join(homedir(), '.codex'));
     this.omxHome = resolve(process.env.OMX_HOME || join(homedir(), '.omx'));
   }
 
   createSession(input: { workspacePath: string; title?: string | null }): CodexSessionRecord {
     const workspacePath = realpathSync(resolve(input.workspacePath));
-    if (!isInsideWorkspace(this.workspaceRoot, workspacePath)) {
-      throw new Error('workspace_outside_root');
-    }
 
     const id = randomUUID();
     const now = new Date();
@@ -174,10 +171,6 @@ export class CodexSessionService {
       const indexed = index.get(id);
       const fromHistory = history.get(id);
       const cwd = fromFile.cwd;
-
-      if (cwd && !isInsideWorkspace(this.workspaceRoot, cwd)) {
-        continue;
-      }
 
       candidates.set(id, {
         id,
@@ -1041,17 +1034,6 @@ function walkJsonl(dir: string, files: string[]): void {
 
 function extractSessionId(file: string): string | null {
   return CODEX_SESSION_ID_RE.exec(basename(file))?.[1] ?? null;
-}
-
-function isInsideWorkspace(root: string, candidate: string): boolean {
-  try {
-    const realRoot = realpathSync(resolve(root));
-    const realCandidate = realpathSync(resolve(candidate));
-    const relativePath = relative(realRoot, realCandidate);
-    return relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
-  } catch {
-    return false;
-  }
 }
 
 function cleanTitle(value: string | undefined): string {

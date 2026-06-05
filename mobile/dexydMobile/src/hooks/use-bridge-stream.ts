@@ -1,23 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import { normalizeBridgeHttpUrl } from '../config/bridge';
 import { EventEnvelope } from '../types/dexyd';
 
-type SocketState = 'idle' | 'connecting' | 'open' | 'polling' | 'closed' | 'error';
+type SocketState =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'polling'
+  | 'closed'
+  | 'error';
 
 const POLL_INTERVAL_MS = 2500;
 const MAX_RECONNECT_DELAY_MS = 15000;
+const POLL_TIMEOUT_MS = 10000;
 
 type ReplayResponse = {
   events: EventEnvelope[];
   nextSequence: number;
   replayExpired: boolean;
+  snapshot?: { sequence?: number };
 };
 
 export function useBridgeStream(
   wsBaseUrl: string,
   httpBaseUrl: string,
   accessToken: string | null,
-  onUnauthorized?: () => Promise<void> | void
+  onUnauthorized?: () => Promise<void> | void,
 ) {
   const [socketState, setSocketState] = useState<SocketState>('idle');
   const [lastEvent, setLastEvent] = useState<EventEnvelope | null>(null);
@@ -27,6 +36,7 @@ export function useBridgeStream(
   const reconnectAttemptsRef = useRef(0);
   const pollingRef = useRef(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
+  const streamKeyRef = useRef('');
 
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
@@ -40,12 +50,15 @@ export function useBridgeStream(
       lastSeenSequenceRef.current = 0;
       reconnectAttemptsRef.current = 0;
       pollingRef.current = false;
+      streamKeyRef.current = '';
       return;
     }
 
     if (!httpBaseUrl.trim()) {
       setSocketState('error');
-      setSocketError('Bridge URL is not configured. Re-pair or choose a bridge profile.');
+      setSocketError(
+        'Bridge URL is not configured. Re-pair or choose a bridge profile.',
+      );
       pollingRef.current = false;
       return;
     }
@@ -53,9 +66,17 @@ export function useBridgeStream(
     let normalizedHttpUrl = '';
     try {
       normalizedHttpUrl = normalizeBridgeHttpUrl(httpBaseUrl);
+      const nextStreamKey = `${normalizedHttpUrl}|${accessToken.slice(0, 24)}`;
+      if (streamKeyRef.current !== nextStreamKey) {
+        lastSeenSequenceRef.current = 0;
+        reconnectAttemptsRef.current = 0;
+        streamKeyRef.current = nextStreamKey;
+      }
     } catch (err) {
       setSocketState('error');
-      setSocketError(err instanceof Error ? err.message : 'Bridge URL is invalid.');
+      setSocketError(
+        err instanceof Error ? err.message : 'Bridge URL is invalid.',
+      );
       pollingRef.current = false;
       return;
     }
@@ -69,13 +90,25 @@ export function useBridgeStream(
       if (closedByCleanup || !pollingRef.current) return;
 
       try {
-        const response = await fetch(
-          `${normalizedHttpUrl}/events/replay?lastSeenSequence=${lastSeenSequenceRef.current}`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+        let response: Response;
+        try {
+          response = await fetch(
+            `${normalizedHttpUrl}/events/replay?lastSeenSequence=${lastSeenSequenceRef.current}`,
+            {
+              headers: { Authorization: `Bearer ${accessToken}` },
+              signal: controller.signal,
+            },
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
 
         if (response.status === 401) {
-          setSocketError('Realtime polling unauthorized. Refreshing credentials…');
+          setSocketError(
+            'Realtime polling unauthorized. Refreshing credentials…',
+          );
           onUnauthorizedRef.current?.();
           return;
         }
@@ -86,16 +119,47 @@ export function useBridgeStream(
 
         const replay = (await response.json()) as ReplayResponse;
         setSocketError(null);
+        if (replay.replayExpired) {
+          const sequence = replay.snapshot?.sequence ?? replay.nextSequence;
+          if (typeof sequence === 'number') {
+            lastSeenSequenceRef.current = Math.max(
+              lastSeenSequenceRef.current,
+              sequence,
+            );
+            setLastEvent({
+              sequence,
+              eventType: 'replay.expired',
+              source: 'stream',
+              sessionId: null,
+              streamId: null,
+              timestamp: new Date().toISOString(),
+              payload: replay.snapshot ?? null,
+            });
+          }
+        }
         for (const event of replay.events) {
-          if (typeof event.sequence === 'number' && typeof event.eventType === 'string') {
-            lastSeenSequenceRef.current = Math.max(lastSeenSequenceRef.current, event.sequence);
+          if (
+            typeof event.sequence === 'number' &&
+            typeof event.eventType === 'string'
+          ) {
+            lastSeenSequenceRef.current = Math.max(
+              lastSeenSequenceRef.current,
+              event.sequence,
+            );
             setLastEvent(event);
           }
         }
-        lastSeenSequenceRef.current = Math.max(lastSeenSequenceRef.current, replay.nextSequence ?? lastSeenSequenceRef.current);
+        lastSeenSequenceRef.current = Math.max(
+          lastSeenSequenceRef.current,
+          replay.nextSequence ?? lastSeenSequenceRef.current,
+        );
       } catch (err) {
         const detail = err instanceof Error ? err.message : 'poll failed';
-        setSocketError(`Realtime socket unavailable; polling also failed (${detail}). Check LAN IP and firewall.`);
+        if (reconnectAttemptsRef.current >= 2) {
+          setSocketError(
+            `Realtime socket unavailable; polling also failed (${detail}). Check LAN IP and firewall.`,
+          );
+        }
       } finally {
         if (!closedByCleanup && pollingRef.current) {
           pollTimer = setTimeout(() => {
@@ -121,11 +185,16 @@ export function useBridgeStream(
 
       reconnectScheduled = true;
       reconnectAttemptsRef.current += 1;
-      const delayMs = Math.min(1000 * 2 ** (reconnectAttemptsRef.current - 1), MAX_RECONNECT_DELAY_MS);
+      const delayMs = Math.min(
+        1000 * 2 ** (reconnectAttemptsRef.current - 1),
+        MAX_RECONNECT_DELAY_MS,
+      );
       if (reconnectAttemptsRef.current >= 3) {
-        setSocketError(`${reason} Using HTTP polling; retrying socket in ${Math.round(delayMs / 1000)}s…`);
+        setSocketError(
+          `${reason} Using HTTP polling; retrying socket in ${Math.round(delayMs / 1000)}s…`,
+        );
       }
-      retryTimer = setTimeout(() => setRetryNonce((value) => value + 1), delayMs);
+      retryTimer = setTimeout(() => setRetryNonce(value => value + 1), delayMs);
     };
 
     setSocketState('connecting');
@@ -150,14 +219,21 @@ export function useBridgeStream(
       reconnectAttemptsRef.current = 0;
       setSocketState('open');
       setSocketError(null);
-      socket.send(JSON.stringify({ type: 'replay.request', lastSeenSequence: lastSeenSequenceRef.current }));
+      socket.send(
+        JSON.stringify({
+          type: 'replay.request',
+          lastSeenSequence: lastSeenSequenceRef.current,
+        }),
+      );
     };
 
-    socket.onclose = (event) => {
+    socket.onclose = event => {
       if (closedByCleanup) return;
 
       setSocketState('closed');
-      const detail = event.reason ? `${event.code} ${event.reason}` : String(event.code);
+      const detail = event.reason
+        ? `${event.code} ${event.reason}`
+        : String(event.code);
 
       if (event.code === 4401) {
         setSocketError('Realtime unauthorized. Refreshing credentials…');
@@ -175,12 +251,51 @@ export function useBridgeStream(
       scheduleReconnect(`Cannot open realtime socket at ${wsBaseUrl}.`);
     };
 
-    socket.onmessage = (message) => {
+    socket.onmessage = message => {
       try {
-        const parsed = JSON.parse(message.data as string) as EventEnvelope;
-        if (typeof parsed.sequence === 'number' && typeof parsed.eventType === 'string') {
-          lastSeenSequenceRef.current = Math.max(lastSeenSequenceRef.current, parsed.sequence);
+        const parsed = JSON.parse(message.data as string) as EventEnvelope & {
+          type?: string;
+          nextSequence?: number;
+          snapshot?: { sequence?: number };
+        };
+        if (
+          typeof parsed.sequence === 'number' &&
+          typeof parsed.eventType === 'string'
+        ) {
+          lastSeenSequenceRef.current = Math.max(
+            lastSeenSequenceRef.current,
+            parsed.sequence,
+          );
           setLastEvent(parsed);
+          return;
+        }
+        if (
+          parsed.type === 'replay.completed' &&
+          typeof parsed.nextSequence === 'number'
+        ) {
+          lastSeenSequenceRef.current = Math.max(
+            lastSeenSequenceRef.current,
+            parsed.nextSequence,
+          );
+          return;
+        }
+        if (
+          parsed.type === 'replay.expired' &&
+          typeof parsed.snapshot?.sequence === 'number'
+        ) {
+          lastSeenSequenceRef.current = Math.max(
+            lastSeenSequenceRef.current,
+            parsed.snapshot.sequence,
+          );
+          setLastEvent({
+            sequence: parsed.snapshot.sequence,
+            eventType: 'replay.expired',
+            source: 'stream',
+            sessionId: null,
+            streamId: null,
+            timestamp: new Date().toISOString(),
+            payload: parsed.snapshot,
+          });
         }
       } catch {
         // Ignore non-envelope payloads in this basic client.
@@ -196,12 +311,22 @@ export function useBridgeStream(
     };
   }, [accessToken, httpBaseUrl, retryNonce, wsBaseUrl]);
 
+  useEffect(() => {
+    if (!accessToken) return undefined;
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active' && socketState !== 'open') {
+        setRetryNonce(value => value + 1);
+      }
+    });
+    return () => subscription.remove();
+  }, [accessToken, socketState]);
+
   return useMemo(
     () => ({
       socketState,
       lastEvent,
-      socketError
+      socketError,
     }),
-    [lastEvent, socketError, socketState]
+    [lastEvent, socketError, socketState],
   );
 }

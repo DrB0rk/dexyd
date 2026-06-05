@@ -594,7 +594,7 @@ describe('codex session transcript chat projection', () => {
   });
 
 
-  it('rejects Codex sessions whose real workspace path escapes the configured root', () => {
+  it('lists Codex sessions outside the default project start path', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-symlink-'));
     cleanupPaths.push(tempDir);
     const workspaceRoot = join(tempDir, 'workspace-root');
@@ -622,8 +622,8 @@ describe('codex session transcript chat projection', () => {
 
     const service = new CodexSessionService(workspaceRoot, { warn: () => undefined });
 
-    expect(service.listSessions()).toHaveLength(0);
-    expect(service.getSession(sessionId)).toBeNull();
+    expect(service.listSessions()).toHaveLength(1);
+    expect(service.getSession(sessionId)?.workspacePath).toBe(symlinked);
   });
 
 });

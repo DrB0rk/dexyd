@@ -15,11 +15,13 @@ afterEach(() => {
 });
 
 describe('project management', () => {
-  it('browses, suggests, and creates projects inside the configured workspace root', async () => {
+  it('starts in the default location while allowing system-wide project paths', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-projects-'));
     cleanupPaths.push(tempDir);
     const workspaceRoot = join(tempDir, 'workspaces');
+    const outsideRoot = join(tempDir, 'outside-root');
     mkdirSync(join(workspaceRoot, 'existing'), { recursive: true });
+    mkdirSync(outsideRoot, { recursive: true });
 
     const configPath = join(tempDir, 'dexyd.yaml');
     writeFileSync(
@@ -51,8 +53,17 @@ describe('project management', () => {
       expect(suggested.statusCode).toBe(200);
       expect(suggested.json().suggestions.map((entry: { name: string }) => entry.name)).toContain('existing');
 
-      const escaped = await service.app.inject({ method: 'GET', url: '/projects?path=..', headers });
-      expect(escaped.statusCode).toBe(400);
+      const parent = await service.app.inject({ method: 'GET', url: '/projects?path=..', headers });
+      expect(parent.statusCode).toBe(200);
+      expect(parent.json().entries.map((entry: { name: string }) => entry.name)).toContain('outside-root');
+
+      const absolute = await service.app.inject({
+        method: 'GET',
+        url: `/projects?path=${encodeURIComponent(outsideRoot)}`,
+        headers
+      });
+      expect(absolute.statusCode).toBe(200);
+      expect(absolute.json().absolutePath).toBe(outsideRoot);
     } finally {
       await service.stop();
     }

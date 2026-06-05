@@ -107,15 +107,20 @@ export function useSessions(
         return;
       }
 
-      if (!options.silent) setLoading(true);
-      setError(null);
+      if (!options.silent) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const items = await getSessions(bridgeUrl, tokens);
         await persist(items);
+        setError(null);
         setConnectivity('online');
       } catch (err) {
         const message = errorMessage(err, 'failed to load sessions');
-        setError(message);
+        if (!options.silent || sessions.length === 0) {
+          setError(message);
+        }
         setConnectivity(
           err instanceof DexydBridgeConnectionError ||
             message.toLowerCase().includes("can't reach dexyd bridge")
@@ -126,7 +131,7 @@ export function useSessions(
         if (!options.silent) setLoading(false);
       }
     },
-    [bridgeUrl, persist, tokens],
+    [bridgeUrl, persist, sessions.length, tokens],
   );
 
   const create = useCallback(
@@ -290,6 +295,7 @@ export function useSessions(
       return;
     }
     if (
+      lastEvent.eventType === 'replay.expired' ||
       lastEvent.eventType === 'session.created' ||
       lastEvent.eventType === 'chat.message.assistant' ||
       lastEvent.eventType === 'chat.turn.completed' ||

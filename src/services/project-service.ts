@@ -31,12 +31,12 @@ const MAX_PROJECT_ENTRIES = 250;
 const MAX_PROJECT_SUGGESTIONS = 30;
 
 export class ProjectService {
-  private readonly rootPath: string;
-  private readonly realRootPath: string;
+  private readonly homePath: string;
+  private readonly realHomePath: string;
 
-  constructor(workspaceRoot: string) {
-    this.rootPath = resolve(workspaceRoot);
-    this.realRootPath = realpathSync(this.rootPath);
+  constructor(defaultStartPath: string) {
+    this.homePath = resolve(defaultStartPath);
+    this.realHomePath = realpathSync(this.homePath);
   }
 
   browse(requestedPath = ''): ProjectBrowseResult {
@@ -45,7 +45,7 @@ export class ProjectService {
     const parentPath = this.parentDisplayPath(target);
 
     const entries = readdirSync(target, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .filter((entry) => entry.isDirectory())
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, MAX_PROJECT_ENTRIES)
       .map((entry) => {
@@ -59,7 +59,7 @@ export class ProjectService {
       });
 
     return {
-      rootPath: this.rootPath,
+      rootPath: this.homePath,
       currentPath,
       absolutePath: target,
       parentPath,
@@ -81,7 +81,7 @@ export class ProjectService {
     const parent = this.resolveExistingDirectory(parentInput === '.' ? '' : parentInput);
 
     const suggestions = readdirSync(parent, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && entry.name.toLowerCase().startsWith(prefix))
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, MAX_PROJECT_SUGGESTIONS)
       .map((entry) => {
@@ -102,11 +102,13 @@ export class ProjectService {
 
   create(input: { parentPath: string; name: string }): { path: string; absolutePath: string; name: string } {
     const parent = this.resolveExistingDirectory(input.parentPath);
-    const absolutePath = resolve(parent, input.name.trim());
-    this.assertInsideRoot(absolutePath);
+    const name = input.name.trim();
+    if (!name || name.includes('\0') || name.includes('/') || name.includes(sep) || name === '.' || name === '..') {
+      throw new Error('invalid_project_name');
+    }
+    const absolutePath = resolve(parent, name);
     mkdirSync(absolutePath, { recursive: false });
     const realCreated = realpathSync(absolutePath);
-    this.assertInsideRoot(realCreated);
     return {
       path: this.displayPath(realCreated),
       absolutePath: realCreated,
@@ -123,7 +125,6 @@ export class ProjectService {
     const stat = lstatSync(absolutePath);
     if (!stat.isDirectory()) throw new Error('project_path_not_directory');
     const realTarget = realpathSync(absolutePath);
-    this.assertInsideRoot(realTarget);
     return realTarget;
   }
 
@@ -131,24 +132,24 @@ export class ProjectService {
     const normalized = this.normalizeInput(input);
     const absolutePath = isAbsolute(normalized)
       ? resolve(normalized)
-      : resolve(this.realRootPath, normalized || '.');
-    this.assertInsideRoot(absolutePath);
+      : resolve(this.realHomePath, normalized || '.');
+    if (absolutePath.includes('\0')) throw new Error('invalid_project_path');
     return absolutePath;
   }
 
   private normalizeInput(input: string): string {
     if (input.includes('\0')) throw new Error('invalid_project_path');
     const trimmed = input.trim();
-    if (!trimmed || trimmed === '~') return this.realRootPath;
+    if (!trimmed || trimmed === '~') return this.realHomePath;
     if (trimmed.startsWith(`~${sep}`) || trimmed.startsWith('~/')) {
-      return resolve(this.realRootPath, trimmed.slice(2));
+      return resolve(this.realHomePath, trimmed.slice(2));
     }
     return trimmed;
   }
 
   private displayPath(path: string): string {
     const absolutePath = resolve(path);
-    const relativePath = relative(this.realRootPath, absolutePath);
+    const relativePath = relative(this.realHomePath, absolutePath);
     if (!isOutside(relativePath)) {
       return relativePath ? `~/${relativePath.split(sep).join('/')}` : '~';
     }
@@ -157,16 +158,8 @@ export class ProjectService {
 
   private parentDisplayPath(path: string): string | null {
     const parent = resolve(path, '..');
-    if (parent === path || isOutside(relative(this.realRootPath, parent))) return null;
+    if (parent === path) return null;
     return this.displayPath(parent);
-  }
-
-  private assertInsideRoot(path: string): void {
-    if (path.includes('\0')) throw new Error('invalid_project_path');
-    const relativePath = relative(this.realRootPath, resolve(path));
-    if (isOutside(relativePath)) {
-      throw new Error('project_path_outside_allowed_root');
-    }
   }
 }
 
