@@ -48,6 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "codex": {
         "runtimePath": "codex",
         "workspaceRoot": str(Path.cwd()),
+        "permissionMode": "bypass",
         "harness": {"mode": "direct", "command": "omx", "args": []},
     },
     "plugins": {"enabled": True, "pluginDir": ".dexyd/plugins"},
@@ -55,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 LOG_LEVELS = {"fatal", "error", "warn", "info", "debug", "trace"}
 HARNESS_MODES = {"direct", "omx", "custom"}
+PERMISSION_MODES = {"inherit", "read-only", "workspace-write", "danger-full-access", "bypass"}
 CLOUDFLARE_LOG_DIR = Path.cwd() / ".dexyd" / "cloudflared"
 CLOUDFLARE_PID_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.pid"
 CLOUDFLARE_LOG_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.log"
@@ -434,6 +436,8 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     merged["storage"]["sqlitePath"] = str(merged["storage"].get("sqlitePath") or DEFAULT_CONFIG["storage"]["sqlitePath"])
     merged["codex"]["runtimePath"] = str(merged["codex"].get("runtimePath") or DEFAULT_CONFIG["codex"]["runtimePath"])
     merged["codex"]["workspaceRoot"] = str(merged["codex"].get("workspaceRoot") or DEFAULT_CONFIG["codex"]["workspaceRoot"])
+    permission_mode = str(merged["codex"].get("permissionMode") or DEFAULT_CONFIG["codex"]["permissionMode"]).strip()
+    merged["codex"]["permissionMode"] = permission_mode if permission_mode in PERMISSION_MODES else DEFAULT_CONFIG["codex"]["permissionMode"]
     harness = merged["codex"].get("harness")
     if not isinstance(harness, dict):
         harness = copy.deepcopy(DEFAULT_CONFIG["codex"]["harness"])
@@ -1519,6 +1523,9 @@ class DexydTextualApp(App[None]):
                             yield Static("Workspace root", classes="field_label")
                             yield Static("Project/session root visible to paired devices.", classes="field_help")
                             yield Input(placeholder="/path/to/workspace", id="cfg_codex_workspace_root")
+                            yield Static("Permission mode", classes="field_label")
+                            yield Static("bypass matches unsandboxed desktop-style runs; inherit uses Codex config.", classes="field_help")
+                            yield Input(placeholder="bypass | inherit | workspace-write", id="cfg_codex_permission_mode")
                             yield Static("Harness mode", classes="field_label")
                             yield Static("direct, omx, or custom.", classes="field_help")
                             yield Input(placeholder="direct | omx | custom", id="cfg_codex_harness_mode")
@@ -1616,6 +1623,7 @@ class DexydTextualApp(App[None]):
         harness = config["codex"]["harness"]
         self.query_one("#cfg_codex_runtime_path", Input).value = str(config["codex"]["runtimePath"])
         self.query_one("#cfg_codex_workspace_root", Input).value = str(config["codex"]["workspaceRoot"])
+        self.query_one("#cfg_codex_permission_mode", Input).value = str(config["codex"].get("permissionMode") or DEFAULT_CONFIG["codex"]["permissionMode"])
         self.query_one("#cfg_codex_harness_mode", Input).value = str(harness["mode"])
         self.query_one("#cfg_codex_harness_command", Input).value = str(harness["command"])
         self.query_one("#cfg_codex_harness_args", Input).value = shlex.join([str(arg) for arg in harness.get("args", [])])
@@ -1757,6 +1765,7 @@ class DexydTextualApp(App[None]):
             f"{self.store.format} · {'editable' if self.store.editable else 'read-only'}\n\n"
             "LAUNCHER\n\n"
             f"{self.store.config['codex']['runtimePath']} · {harness['mode']}\n"
+            f"permissions: {self.store.config['codex'].get('permissionMode', DEFAULT_CONFIG['codex']['permissionMode'])}\n"
             f"{harness['command']} {shlex.join([str(arg) for arg in harness.get('args', [])])}"
         )
         self.query_one("#settings_summary", Static).update(summary)
@@ -2085,9 +2094,12 @@ class DexydTextualApp(App[None]):
 
         codex_runtime = self.query_one("#cfg_codex_runtime_path", Input).value.strip() or config["codex"]["runtimePath"]
         codex_workspace = self.query_one("#cfg_codex_workspace_root", Input).value.strip() or config["codex"]["workspaceRoot"]
+        permission_mode = self.query_one("#cfg_codex_permission_mode", Input).value.strip() or config["codex"].get("permissionMode", DEFAULT_CONFIG["codex"]["permissionMode"])
         harness_mode = self.query_one("#cfg_codex_harness_mode", Input).value.strip().lower() or config["codex"]["harness"]["mode"]
         harness_command = self.query_one("#cfg_codex_harness_command", Input).value.strip() or config["codex"]["harness"]["command"]
         harness_args_raw = self.query_one("#cfg_codex_harness_args", Input).value.strip()
+        if permission_mode not in PERMISSION_MODES:
+            raise RuntimeError("Permission mode must be one of: inherit, read-only, workspace-write, danger-full-access, bypass")
         if harness_mode not in HARNESS_MODES:
             raise RuntimeError("Harness mode must be one of: direct, omx, custom")
         if harness_mode != "direct" and not harness_command:
@@ -2110,6 +2122,7 @@ class DexydTextualApp(App[None]):
         config["stream"]["heartbeatIdleSeconds"] = idle
         config["codex"]["runtimePath"] = codex_runtime
         config["codex"]["workspaceRoot"] = codex_workspace
+        config["codex"]["permissionMode"] = permission_mode
         config["codex"]["harness"] = {
             "mode": harness_mode,
             "command": harness_command,

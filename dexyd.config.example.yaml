@@ -27,6 +27,10 @@ codex:
   # Project picker, file browsing, diffs, and Codex runs are confined to this directory.
   # Use your home directory for flexible project selection; use a narrower path for stricter security.
   workspaceRoot: /home/you
+  # inherit: use your normal Codex CLI config.
+  # bypass: match an unsandboxed desktop-style session. Use only on trusted machines/networks.
+  # Other values: read-only, workspace-write, danger-full-access.
+  permissionMode: bypass
   # direct: run "codex exec ..."
   # omx: run "omx exec ..." so OMX skills/hooks/commands are available in mobile turns
   # custom: run "<command> <args> exec ..." for another compatible harness wrapper

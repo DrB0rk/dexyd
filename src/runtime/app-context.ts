@@ -98,6 +98,7 @@ export function buildAppContext(config: DexydConfig): AppContext {
     diffService,
     {
       runtimePath: config.codex.runtimePath,
+      permissionMode: config.codex.permissionMode,
       harness: config.codex.harness
     },
     logger

@@ -156,6 +156,8 @@ echo "assistant response"
       const lines = args.trim().split('\n');
       expect(lines.at(-1)).toBe('what is 2+2?');
       expect(lines.at(-1)).not.toContain('create a new release');
+      expect(lines).toContain('--dangerously-bypass-approvals-and-sandbox');
+      expect(args).not.toContain('workspace-write');
       expect(args).not.toContain('Conversation so far');
       expect(args).not.toContain('Latest user message');
       expect(args).not.toContain('You are running inside dexyd');
@@ -633,7 +635,8 @@ echo "raw prompt response"
       }
 
       const args = readFileSync(argsFile, 'utf8').trim().split('\n');
-      expect(args.slice(0, 5)).toEqual(['exec', 'resume', '--all', '--skip-git-repo-check', sessionId]);
+      expect(args.slice(0, 5)).toEqual(['exec', 'resume', '--all', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox']);
+      expect(args).toContain(sessionId);
       expect(args.at(-1)).toBe('new app message only');
       expect(args.at(-1)).not.toContain('Conversation so far');
       expect(args.at(-1)).not.toContain('old assistant answer');

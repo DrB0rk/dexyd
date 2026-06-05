@@ -52,6 +52,7 @@ stream:
 codex:
   runtimePath: codex
   workspaceRoot: /home/you
+  permissionMode: bypass
   harness:
     mode: omx
     command: omx
@@ -137,6 +138,7 @@ If phones reconnect after short Wi-Fi drops, replay fills missed events. If the 
 | --- | --- | --- |
 | `runtimePath` | `codex` | Executable used for direct Codex runs. |
 | `workspaceRoot` | user home | Root directory for project browsing, session workspaces, files, and diffs. |
+| `permissionMode` | `bypass` | Codex permission mode for mobile-started turns. |
 | `harness.mode` | `direct` | Launch mode: `direct`, `omx`, or `custom`. |
 | `harness.command` | `omx` | Wrapper command for `omx` or `custom` mode. |
 | `harness.args` | `[]` | Extra wrapper args before `exec`. |
@@ -156,6 +158,25 @@ codex:
 codex:
   workspaceRoot: /home/you/Projects
 ```
+
+### Permission mode
+
+Dexyd defaults to desktop-style unsandboxed mobile turns:
+
+```yaml
+codex:
+  permissionMode: bypass
+```
+
+Available values:
+
+| Value | Behavior |
+| --- | --- |
+| `bypass` | Passes Codex `--dangerously-bypass-approvals-and-sandbox`. Matches an unsandboxed desktop-style session. Use only on trusted machines and networks. |
+| `inherit` | Does not pass a permission flag. Codex uses your normal CLI configuration/defaults. |
+| `danger-full-access` | Requests Codex full filesystem access without approval bypass where supported. |
+| `workspace-write` | Requests workspace-write sandboxing. |
+| `read-only` | Requests read-only sandboxing. |
 
 ### Harness modes
 

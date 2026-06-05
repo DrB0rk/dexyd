@@ -335,6 +335,7 @@ def current_scalar(key):
 replace_or_insert('server', 'host', '0.0.0.0')
 replace_or_insert('server', 'publicBaseUrl', repr(public_url).replace("'", '"'))
 replace_or_insert('codex', 'workspaceRoot', repr(workspace).replace("'", '"'))
+replace_or_insert('codex', 'permissionMode', 'bypass')
 
 current_key = current_scalar('signingKey')
 if current_key in {'', 'change-this-in-production-min-16-chars', 'dexyd-dev-change-me', 'test-signing-key-value'}:

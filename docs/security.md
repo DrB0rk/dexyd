@@ -119,7 +119,9 @@ Security guidance:
 
 ## Codex/OMX execution
 
-Dexyd can launch Codex directly or through a harness like OMX. These processes run as the bridge user and can modify files in the selected workspace according to Codex behavior and user approvals.
+Dexyd can launch Codex directly or through a harness like OMX. These processes run as the bridge user and can modify files according to the configured Codex permission mode.
+
+By default, `codex.permissionMode` is `bypass`, which passes Codex `--dangerously-bypass-approvals-and-sandbox` for mobile-started turns. This is intended to match an unsandboxed desktop-style session, but it also means a trusted paired phone can start powerful local agents. Set `permissionMode: inherit`, `workspace-write`, or `read-only` if you want Codex's normal config/defaults or a stricter sandbox.
 
 Security guidance:
 

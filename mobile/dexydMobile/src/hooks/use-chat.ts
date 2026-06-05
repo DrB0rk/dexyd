@@ -52,6 +52,21 @@ function stripEnvironmentContextBlocks(text: string): string {
     .trim();
 }
 
+function isRawRuntimePayload(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (/^<environment_context>[\s\S]*<\/environment_context>$/i.test(trimmed))
+    return true;
+  if (/^<hook_prompt\b[\s\S]*<\/hook_prompt>$/i.test(trimmed)) return true;
+  if (
+    /^\{[\s\S]*"(?:tool_uses|sandbox_permissions|recipient_name|function_call|call_id)"[\s\S]*\}$/.test(
+      trimmed,
+    )
+  )
+    return true;
+  return false;
+}
+
 function isDexydPromptEnvelope(text: string): boolean {
   return (
     /You are running inside dexyd as the assistant for a mobile chat session\./i.test(
@@ -66,10 +81,12 @@ function isDexydPromptEnvelope(text: string): boolean {
 function normalizeChatMessageForDisplay(
   message: ChatMessage,
 ): ChatMessage | null {
+  if (isRawRuntimePayload(message.content)) return null;
   const content =
     message.role === 'user'
       ? normalizeDisplayUserContent(message.content)
       : stripEnvironmentContextBlocks(message.content);
+  if (isRawRuntimePayload(content)) return null;
   if (!content) return null;
   return content === message.content ? message : { ...message, content };
 }
@@ -110,7 +127,7 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
   ) {
     const role =
       event.eventType === 'chat.message.assistant' ? 'assistant' : 'user';
-    const content =
+    const rawContent =
       role === 'user'
         ? normalizeDisplayUserContent(
             typeof payload.content === 'string' ? payload.content : '',
@@ -118,6 +135,8 @@ function eventToMessage(event: EventEnvelope): ChatMessage | null {
         : typeof payload.content === 'string'
           ? payload.content
           : '';
+    const content = stripEnvironmentContextBlocks(rawContent);
+    if (isRawRuntimePayload(content)) return null;
     if (!content) return null;
     return {
       id: typeof payload.id === 'string' ? payload.id : `${event.sequence}`,
@@ -725,6 +744,7 @@ export function useChat(
   const pendingUserMessagesRef = useRef<ChatMessage[]>([]);
   const refreshRequestRef = useRef(0);
   const cacheReadyRef = useRef(false);
+  const activeChatKeyRef = useRef<string | null>(null);
   const [cacheReadyVersion, setCacheReadyVersion] = useState(0);
 
   const refreshQueue = useCallback(async () => {
@@ -938,10 +958,16 @@ export function useChat(
 
   useEffect(() => {
     refreshRequestRef.current += 1;
-    pendingUserMessagesRef.current = [];
     cacheReadyRef.current = false;
-    setMessages(current => nextChatMessages(current, []));
-    setQueuedMessages(current => nextQueuedMessages(current, []));
+    const nextCacheKey =
+      tokens && sessionId ? cacheKeyForChat(bridgeUrl, sessionId) : null;
+    const sessionChanged = activeChatKeyRef.current !== nextCacheKey;
+    activeChatKeyRef.current = nextCacheKey;
+    if (sessionChanged) {
+      pendingUserMessagesRef.current = [];
+      setMessages(current => nextChatMessages(current, []));
+      setQueuedMessages(current => nextQueuedMessages(current, []));
+    }
     setError(null);
 
     if (!tokens || !sessionId) {

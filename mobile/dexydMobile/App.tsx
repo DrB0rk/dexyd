@@ -3132,15 +3132,17 @@ function SessionsScreen({
       {usage ? <SessionUsageSummary usage={usage} /> : null}
       {projectGroups.map(group => (
         <View key={group.projectPath} style={styles.sessionProjectGroup}>
-          <Text style={styles.sessionProjectName} numberOfLines={1}>
-            {group.projectName}
-          </Text>
+          <View style={styles.sessionProjectHeader}>
+            <Text style={styles.sessionProjectName} numberOfLines={1}>
+              {group.projectName}
+            </Text>
+            <Text style={styles.sessionProjectCount} numberOfLines={1}>
+              {group.sessions.length} session
+              {group.sessions.length === 1 ? '' : 's'}
+            </Text>
+          </View>
           <Text style={styles.sessionProjectPath} numberOfLines={1}>
-            {group.sessions.length} session
-            {group.sessions.length === 1 ? '' : 's'} · {group.projectPath}
-          </Text>
-          <Text style={styles.sessionProjectStatus} numberOfLines={1}>
-            {projectStatusSummary(group.sessions, pendingBySession)}
+            {group.projectPath}
           </Text>
           {group.sessions.map(session => (
             <SessionListRow
@@ -3382,38 +3384,6 @@ function sessionUiStatus(
   }
 
   return { label: 'idle', detail: session.status, kind: 'idle' };
-}
-
-function projectStatusSummary(
-  sessions: DexydSession[],
-  pendingBySession: Map<string, AttentionItem[]>,
-): string {
-  const counts = new Map<string, number>();
-  for (const session of sessions) {
-    const status = sessionUiStatus(
-      session,
-      pendingBySession.get(session.id) ?? [],
-    );
-    counts.set(status.label, (counts.get(status.label) ?? 0) + 1);
-  }
-
-  const order = [
-    'approval',
-    'question',
-    'error',
-    'busy',
-    'idle',
-    'done',
-    'stopped',
-  ];
-  const parts = order
-    .map(label => {
-      const count = counts.get(label) ?? 0;
-      return count ? `${count} ${label}` : null;
-    })
-    .filter(Boolean);
-
-  return parts.join(' · ') || 'all idle';
 }
 
 function buildProjectOptions(
@@ -6597,51 +6567,54 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   terminalList: {
-    paddingHorizontal: 12,
-    paddingTop: 6,
-    paddingBottom: 16,
+    paddingHorizontal: 14,
+    paddingTop: 4,
+    paddingBottom: 18,
   },
   sessionProjectGroup: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
-  sessionProjectName: {
-    color: palette.text,
-    fontSize: 14,
-    fontWeight: '800',
-    marginBottom: 2,
-  },
-  sessionProjectPath: {
-    color: palette.dim,
-    fontSize: 11,
-    marginBottom: 2,
-  },
-  sessionProjectStatus: {
-    color: palette.muted,
-    fontSize: 11,
-    fontWeight: '800',
-    marginBottom: 7,
-  },
-  sessionUsageSummary: {
-    minHeight: 44,
+  sessionProjectHeader: {
+    minHeight: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
-    marginBottom: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: palette.line,
-    borderRadius: 12,
-    backgroundColor: '#202021',
+  },
+  sessionProjectName: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  sessionProjectCount: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  sessionProjectPath: {
+    color: palette.dim,
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  sessionUsageSummary: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 8,
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.line,
   },
   sessionUsageSummaryWarn: {
-    borderColor: '#5a4a31',
-    backgroundColor: '#312a20',
+    borderBottomColor: '#5a4a31',
   },
   sessionUsageSummaryError: {
-    borderColor: '#5a3431',
-    backgroundColor: '#312220',
+    borderBottomColor: '#5a3431',
   },
   sessionUsageSummaryText: {
     flex: 1,
@@ -6663,30 +6636,27 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   terminalRow: {
-    minHeight: 48,
+    minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 7,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: palette.line,
-    borderRadius: 12,
-    backgroundColor: '#202021',
+    paddingVertical: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.line,
   },
   terminalRowActive: {
-    borderColor: '#4d5f56',
-    backgroundColor: '#222a25',
+    backgroundColor: '#1f2422',
+    borderBottomColor: '#344139',
   },
   terminalTextBlock: {
     flex: 1,
-    paddingRight: 12,
+    minWidth: 0,
+    paddingRight: 10,
   },
   terminalName: {
     color: palette.text,
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   terminalMeta: {
     color: palette.dim,
@@ -6696,31 +6666,16 @@ const styles = StyleSheet.create({
   sessionActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 7,
   },
   sessionStatusPill: {
-    minHeight: 26,
+    minHeight: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#343436',
-    backgroundColor: '#252527',
   },
-  sessionStatusOk: {
-    borderColor: '#315241',
-    backgroundColor: '#203127',
-  },
-  sessionStatusWarn: {
-    borderColor: '#5a4a31',
-    backgroundColor: '#312a20',
-  },
-  sessionStatusError: {
-    borderColor: '#5a3431',
-    backgroundColor: '#312220',
-  },
+  sessionStatusOk: {},
+  sessionStatusWarn: {},
+  sessionStatusError: {},
   sessionStatusDot: {
     width: 6,
     height: 6,
@@ -6728,18 +6683,18 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   sessionStatusText: {
-    color: palette.text,
+    color: palette.muted,
     fontSize: 11,
-    fontWeight: '900',
+    fontWeight: '800',
   },
   hiddenSessionsBlock: {
-    marginTop: 16,
-    paddingTop: 8,
+    marginTop: 10,
+    paddingTop: 4,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: palette.line,
   },
   hiddenSessionsHeader: {
-    minHeight: 44,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -6756,13 +6711,15 @@ const styles = StyleSheet.create({
   },
   stopText: {
     color: palette.error,
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
   },
   deleteText: {
     color: palette.dim,
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
   },
   offlineBanner: {
     color: palette.warn,

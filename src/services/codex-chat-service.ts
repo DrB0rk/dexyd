@@ -19,6 +19,7 @@ type LoggerLike = {
 
 type CodexChatConfig = {
   runtimePath: string;
+  permissionMode: 'inherit' | 'read-only' | 'workspace-write' | 'danger-full-access' | 'bypass';
   harness: {
     mode: 'direct' | 'omx' | 'custom';
     command: string;
@@ -335,9 +336,13 @@ export class CodexChatService {
     let truncated = false;
 
     await new Promise<void>((resolve) => {
-      const codexArgs = input.session.source === 'codex'
-        ? ['exec', 'resume', '--all', '--skip-git-repo-check', input.session.id, prompt]
-        : ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '--color', 'never', '-C', input.session.workspacePath, prompt];
+      const codexArgs = buildCodexArgs({
+        source: input.session.source,
+        sessionId: input.session.id,
+        workspacePath: input.session.workspacePath,
+        prompt,
+        permissionMode: this.config.permissionMode
+      });
       const args = [...this.launch.argsPrefix, ...codexArgs];
       const child = spawn(
         this.launch.command,
@@ -722,6 +727,40 @@ function resolveRuntimeLaunch(config: CodexChatConfig): RuntimeLaunch {
     argsPrefix: config.harness.args,
     label: [configuredCommand, ...config.harness.args].join(' ')
   };
+}
+
+function buildCodexArgs(input: {
+  source: SessionRecord['source'];
+  sessionId: string;
+  workspacePath: string;
+  prompt: string;
+  permissionMode: CodexChatConfig['permissionMode'];
+}): string[] {
+  const permissionArgs = codexPermissionArgs(input.permissionMode, input.source === 'codex');
+  if (input.source === 'codex') {
+    return ['exec', 'resume', '--all', '--skip-git-repo-check', ...permissionArgs, input.sessionId, input.prompt];
+  }
+
+  return [
+    'exec',
+    '--skip-git-repo-check',
+    ...permissionArgs,
+    '--color',
+    'never',
+    '-C',
+    input.workspacePath,
+    input.prompt
+  ];
+}
+
+function codexPermissionArgs(
+  permissionMode: CodexChatConfig['permissionMode'],
+  resume: boolean
+): string[] {
+  if (permissionMode === 'inherit') return [];
+  if (permissionMode === 'bypass') return ['--dangerously-bypass-approvals-and-sandbox'];
+  if (resume) return ['-c', `sandbox_mode="${permissionMode}"`];
+  return ['--sandbox', permissionMode];
 }
 
 function resolveExecutable(configuredPath: string): string {

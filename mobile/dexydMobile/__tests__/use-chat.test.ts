@@ -227,6 +227,49 @@ describe('mergeFetchedChatMessages', () => {
       'Only this should show.',
     ]);
   });
+
+  it('drops raw runtime payload rows instead of showing them in chat', () => {
+    const merged = mergeFetchedChatMessages(
+      [
+        message({
+          id: 'raw-tool-json',
+          role: 'assistant',
+          content:
+            '{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"pwd"}}]}',
+          sequence: 1,
+        }),
+        message({
+          id: 'real-assistant',
+          role: 'assistant',
+          content: 'Done.',
+          sequence: 2,
+        }),
+      ],
+      [],
+    );
+
+    expect(merged.map(item => item.content)).toEqual(['Done.']);
+  });
+
+  it('does not duplicate stable fetched messages', () => {
+    const first = message({
+      id: 'user-1',
+      role: 'user',
+      content: 'hello',
+      sequence: 1,
+    });
+    const duplicate = message({
+      id: 'user-1',
+      role: 'user',
+      content: 'hello',
+      sequence: 1,
+    });
+
+    const merged = mergeFetchedChatMessages([first, duplicate], []);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.content).toBe('hello');
+  });
 });
 
 describe('normalizeDisplayUserContent', () => {

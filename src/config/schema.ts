@@ -32,6 +32,7 @@ const streamDefaults = {
 const codexDefaults = {
   runtimePath: 'codex',
   workspaceRoot: homedir(),
+  permissionMode: 'bypass',
   harness: {
     mode: 'direct',
     command: 'omx',
@@ -96,6 +97,7 @@ const codexHarnessSchema = z.object({
 const codexSchema = z.object({
   runtimePath: z.string().min(1).default(codexDefaults.runtimePath),
   workspaceRoot: z.string().min(1).default(codexDefaults.workspaceRoot),
+  permissionMode: z.enum(['inherit', 'read-only', 'workspace-write', 'danger-full-access', 'bypass']).default(codexDefaults.permissionMode),
   harness: codexHarnessSchema.default(codexDefaults.harness)
 });
 

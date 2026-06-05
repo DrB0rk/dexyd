@@ -115,6 +115,7 @@ Android does not allow normal APK apps to silently self-update; you still confir
 - Pairing is local/private-network restricted and short-lived.
 - Mobile access uses trusted-device credentials and refresh tokens.
 - Old phones can be revoked.
+- Mobile-started Codex turns default to desktop-style unsandboxed execution through `codex.permissionMode: bypass`; change it to `inherit`, `workspace-write`, or `read-only` if you want a stricter mode.
 - Project/file access is confined to `codex.workspaceRoot`.
 - Prefer HTTPS or Cloudflare named tunnels outside your LAN.
 - Keep the bridge on networks you trust.
