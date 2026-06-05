@@ -1,11 +1,9 @@
 package com.dexydmobile
 
 import android.app.Activity
-import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.content.pm.PackageInstaller
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -13,7 +11,10 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -45,7 +46,6 @@ class DexydInstallActivity : Activity() {
   private fun handleIntent(intent: Intent?) {
     when (intent?.action) {
       ACTION_PREPARE_INSTALL -> prepareInstall(intent)
-      ACTION_INSTALL_COMMIT -> handleInstallCommit(intent)
       else -> finish()
     }
   }
@@ -60,110 +60,99 @@ class DexydInstallActivity : Activity() {
 
     setStatus("Preparing Dexyd update", "Downloading $apkName…")
     executor.execute {
-      var sessionId = -1
-      var installer: PackageInstaller? = null
-      var connection: HttpURLConnection? = null
       try {
-        installer = packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-          setAppPackageName(packageName)
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            setPackageSource(PackageInstaller.PACKAGE_SOURCE_DOWNLOADED_FILE)
-          }
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
-          }
-        }
-        sessionId = installer.createSession(params)
+        val apkFile = downloadApkToCache(url, apkName)
+        setStatus("Preparing Dexyd update", "Opening Android update prompt…")
+        runOnUiThread { openSystemInstaller(apkFile) }
+      } catch (error: Exception) {
+        showErrorAndFinish("Dexyd update failed: ${error.message ?: "unknown error"}")
+      }
+    }
+  }
 
-        connection = openApkConnection(url)
-        val contentLength = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
+  private fun downloadApkToCache(url: String, apkName: String): File {
+    val updateDir = File(cacheDir, UPDATE_CACHE_DIR).apply {
+      if (!exists() && !mkdirs()) {
+        throw IOException("Could not create update cache.")
+      }
+    }
+    updateDir.listFiles()?.forEach { file ->
+      if (file.isFile) file.delete()
+    }
 
-        installer.openSession(sessionId).use { session ->
-          BufferedInputStream(connection.inputStream).use { input ->
-            session.openWrite(apkName, 0, contentLength).use { output ->
-              val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-              var copied = 0L
-              var lastProgress = -1
-              while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                output.write(buffer, 0, read)
-                copied += read.toLong()
-                if (contentLength > 0L) {
-                  val progress = ((copied * 100L) / contentLength).toInt().coerceIn(0, 100)
-                  if (progress != lastProgress && (progress == 100 || progress - lastProgress >= 5)) {
-                    lastProgress = progress
-                    setStatus("Preparing Dexyd update", "Downloading $apkName… $progress%")
-                  }
-                }
+    var connection: HttpURLConnection? = null
+    val apkFile = File(updateDir, apkName)
+    try {
+      connection = openApkConnection(url)
+      val contentLength = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
+      BufferedInputStream(connection.inputStream).use { input ->
+        FileOutputStream(apkFile).use { output ->
+          val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+          var copied = 0L
+          var lastProgress = -1
+          while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            output.write(buffer, 0, read)
+            copied += read.toLong()
+            if (contentLength > 0L) {
+              val progress = ((copied * 100L) / contentLength).toInt().coerceIn(0, 100)
+              if (progress != lastProgress && (progress == 100 || progress - lastProgress >= 5)) {
+                lastProgress = progress
+                setStatus("Preparing Dexyd update", "Downloading $apkName… $progress%")
               }
-              session.fsync(output)
             }
           }
-
-          setStatus("Preparing Dexyd update", "Opening Android update prompt…")
-          val callback = Intent(this, DexydInstallActivity::class.java).apply {
-            action = ACTION_INSTALL_COMMIT
-            putExtra(EXTRA_APK_NAME, apkName)
-          }
-          val pendingIntent = PendingIntent.getActivity(
-            this,
-            sessionId,
-            callback,
-            pendingIntentFlags(),
-          )
-          session.commit(pendingIntent.intentSender)
+          output.fd.sync()
         }
-      } catch (error: Exception) {
-        if (sessionId != -1) {
-          try {
-            installer?.abandonSession(sessionId)
-          } catch (_: Exception) {
-            // Best-effort cleanup; original failure is reported below.
-          }
-        }
-        showErrorAndFinish("Dexyd update failed: ${error.message ?: "unknown error"}")
-      } finally {
-        connection?.disconnect()
       }
+      if (apkFile.length() <= 0L) {
+        throw IOException("Downloaded update APK was empty.")
+      }
+      return apkFile
+    } catch (error: Exception) {
+      apkFile.delete()
+      throw error
+    } finally {
+      connection?.disconnect()
     }
   }
 
-  private fun handleInstallCommit(intent: Intent) {
-    when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-      PackageInstaller.STATUS_PENDING_USER_ACTION -> openConfirmation(intent)
-      PackageInstaller.STATUS_SUCCESS -> {
-        Toast.makeText(this, "Dexyd update installed.", Toast.LENGTH_LONG).show()
-        finish()
-      }
-      else -> {
-        val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "unknown error"
-        showErrorAndFinish("Dexyd update failed: $message")
-      }
+  private fun openSystemInstaller(apkFile: File) {
+    val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+    val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+      data = apkUri
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+      putExtra(Intent.EXTRA_RETURN_RESULT, false)
     }
-  }
+    val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
+      setDataAndType(apkUri, APK_MIME_TYPE)
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+    }
 
-  private fun openConfirmation(intent: Intent) {
-    val confirmation = getConfirmationIntent(intent)
-    if (confirmation == null) {
-      showErrorAndFinish("Android installer prompt was unavailable.")
-      return
-    }
     try {
-      startActivity(confirmation)
+      grantInstallerReadAccess(installIntent, apkUri)
+      startActivity(installIntent)
       finish()
+    } catch (_: ActivityNotFoundException) {
+      try {
+        grantInstallerReadAccess(fallbackIntent, apkUri)
+        startActivity(fallbackIntent)
+        finish()
+      } catch (error: Exception) {
+        showErrorAndFinish("Could not open Android update prompt: ${error.message ?: "unknown error"}")
+      }
     } catch (error: Exception) {
       showErrorAndFinish("Could not open Android update prompt: ${error.message ?: "unknown error"}")
     }
   }
 
-  private fun getConfirmationIntent(intent: Intent): Intent? {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-    } else {
-      @Suppress("DEPRECATION")
-      intent.getParcelableExtra(Intent.EXTRA_INTENT)
+  private fun grantInstallerReadAccess(intent: Intent, apkUri: Uri) {
+    val installers = packageManager.queryIntentActivities(intent, 0)
+    installers.forEach { resolveInfo ->
+      grantUriPermission(resolveInfo.activityInfo.packageName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
   }
 
@@ -256,15 +245,6 @@ class DexydInstallActivity : Activity() {
     }
   }
 
-  private fun pendingIntentFlags(): Int {
-    val update = PendingIntent.FLAG_UPDATE_CURRENT
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      update or PendingIntent.FLAG_MUTABLE
-    } else {
-      update
-    }
-  }
-
   private fun isTrustedApkSource(uri: Uri): Boolean {
     val host = uri.host?.lowercase(Locale.US) ?: return false
     return uri.scheme.equals("https", ignoreCase = true) &&
@@ -279,11 +259,11 @@ class DexydInstallActivity : Activity() {
 
   companion object {
     const val ACTION_PREPARE_INSTALL = "com.dexydmobile.UPDATE_PREPARE_INSTALL"
-    const val ACTION_INSTALL_COMMIT = "com.dexydmobile.UPDATE_INSTALL_COMMIT"
     const val EXTRA_APK_URL = "com.dexydmobile.extra.APK_URL"
     const val EXTRA_APK_NAME = "com.dexydmobile.extra.APK_NAME"
 
     private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+    private const val UPDATE_CACHE_DIR = "dexyd-updates"
     private const val MAX_REDIRECTS = 5
     private val HTTP_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
   }

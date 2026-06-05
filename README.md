@@ -85,8 +85,8 @@ Install the APK on your phone, then pair it with the bridge from the TUI.
 
 1. Run `dexyd --tui` on your computer.
 2. Open **Connection** and choose LAN, domain/Caddy, or Cloudflare named tunnel.
-3. Save the connection.
-4. Open **Pair** and generate a fresh QR code.
+3. Save the connection and install/start the Dexyd service.
+4. Generate a fresh QR code in **Connection**.
 5. Scan the QR from the mobile app onboarding or **Settings → Pairing**.
 6. Open **Sessions** on the phone and select a session to chat.
 

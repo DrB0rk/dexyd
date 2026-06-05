@@ -72,7 +72,7 @@ dexyd --tui
 
 Home is the operational dashboard. It shows bridge/storage/security status and the next useful action. Use it to confirm the bridge is reachable before pairing.
 
-Home stays read-only except for refresh/reload actions. Use **Connection** for bridge service and tunnel setup.
+Home stays read-only except for refresh/reload actions. Use **Connection** for service, tunnel, and pairing setup.
 
 ### Connection
 
@@ -80,17 +80,19 @@ Connection is the main setup screen. It keeps all reachability settings together
 
 - local bridge host/port;
 - public bridge URL for domain/Caddy/tunnel use;
-- bridge user-service autostart;
+- one Dexyd user service for both the bridge and optional tunnel;
 - Cloudflare named-tunnel hostname/name;
-- cloudflared install/login/setup/start/stop actions;
-- tunnel service autostart;
-- current bridge and tunnel status.
+- cloudflared install/login/setup actions;
+- pairing QR generation;
+- current bridge, tunnel, and service status.
 
 Connection modes:
 
 - **LAN** — set host to `0.0.0.0`, leave public URL empty, then pair on the LAN URL.
 - **Domain/Caddy** — set public URL to your HTTPS reverse proxy URL, save, then pair.
 - **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL.
+
+The single `dexyd.service` starts the bridge and, when `.dexyd/cloudflared/config.yml` exists, starts the Cloudflare named tunnel too. The old separate `dexyd-cloudflared.service` is disabled/removed when the new service is installed.
 
 The named-tunnel flow can:
 
@@ -100,13 +102,15 @@ The named-tunnel flow can:
 4. create or reuse a named tunnel;
 5. route DNS to the selected hostname;
 6. write tunnel config;
-7. start the tunnel;
+7. install/restart the single Dexyd service;
 8. save `server.publicBaseUrl`;
 9. regenerate pairing with the correct URL.
 
-### Pair
+### Pairing
 
-Pair creates a short-lived QR payload containing:
+Pairing is now part of **Connection**. Generate the QR after Connection shows the URL you want the phone to use.
+
+The QR payload contains:
 
 - protocol version;
 - advertised bridge URL;

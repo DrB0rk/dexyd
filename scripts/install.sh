@@ -168,6 +168,7 @@ cleanup_old_install() {
   local clean_app_dir="${1:-0}"
   stop_service
   rm -f "$SERVICE_LINK" "$SERVICE_PATH" "$COMMAND_PATH"
+  rm -f "$SERVICE_DIR/dexyd-cloudflared.service" "$SERVICE_DIR/default.target.wants/dexyd-cloudflared.service"
   if [[ "$clean_app_dir" == "1" ]]; then
     rm -rf "$INSTALL_DIR"
   fi
@@ -411,7 +412,7 @@ install_tui_deps() {
 install_command() {
   local root="$1"
   mkdir -p "$DEXYD_BIN_HOME"
-  chmod +x "$root/bin/dexyd" "$root/scripts/install.sh"
+  chmod +x "$root/bin/dexyd" "$root/scripts/install.sh" "$root/scripts/run-connection-service.sh"
   ln -sfn "$root/bin/dexyd" "$COMMAND_PATH"
   ok "Installed command: $COMMAND_PATH -> $root/bin/dexyd"
   case ":$PATH:" in
@@ -429,14 +430,14 @@ install_user_service() {
   mkdir -p "$SERVICE_DIR"
   cat > "$SERVICE_PATH" <<SERVICE
 [Unit]
-Description=Dexyd bridge
+Description=Dexyd connection service
 After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=$root
 Environment=DEXYD_CONFIG=$config
-ExecStart=$root/bin/dexyd
+ExecStart=$root/scripts/run-connection-service.sh
 Restart=on-failure
 RestartSec=3
 
@@ -449,7 +450,10 @@ SERVICE
     return 0
   fi
   if systemctl --user enable dexyd.service >/dev/null 2>&1 && systemctl --user restart dexyd.service >/dev/null 2>&1; then
-    ok "Installed and started user service: dexyd.service"
+    systemctl --user disable --now dexyd-cloudflared.service >/dev/null 2>&1 || true
+    rm -f "$SERVICE_DIR/dexyd-cloudflared.service" "$SERVICE_DIR/default.target.wants/dexyd-cloudflared.service"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    ok "Installed and started user service: dexyd.service (bridge + tunnel)"
   else
     warn "Service file installed but could not be enabled/started. Run: systemctl --user status dexyd.service"
   fi

@@ -995,19 +995,39 @@ def user_service_state(name: str) -> tuple[str, str]:
     return active_text, enabled_text
 
 
+def remove_legacy_tunnel_service() -> str:
+    messages: list[str] = []
+    stop = systemctl_user(["disable", "--now", "dexyd-cloudflared.service"], timeout=30)
+    if stop.returncode == 0:
+        messages.append("old tunnel service disabled")
+    service_file = user_service_dir() / "dexyd-cloudflared.service"
+    service_link = user_service_dir() / "default.target.wants" / "dexyd-cloudflared.service"
+    for path in (service_file, service_link):
+        try:
+            path.unlink()
+            messages.append(f"removed {path.name}")
+        except FileNotFoundError:
+            pass
+    systemctl_user(["daemon-reload"], timeout=30)
+    return "; ".join(messages)
+
+
 def install_user_service(config_path: Path) -> str:
-    node = shutil.which("node") or "node"
     repo_root = Path.cwd().resolve()
+    runner = repo_root / "scripts" / "run-connection-service.sh"
+    if not runner.exists():
+        return f"Connection service runner is missing: {runner}"
+    runner.chmod(0o755)
     service_file = user_service_dir() / "dexyd.service"
     service_file.write_text(
         "[Unit]\n"
-        "Description=dexyd bridge\n"
+        "Description=dexyd connection service\n"
         "Wants=network-online.target\n"
         "After=network-online.target\n\n"
         "[Service]\n"
         f"WorkingDirectory={repo_root}\n"
         f"Environment=DEXYD_CONFIG={config_path}\n"
-        f"ExecStart={node} --enable-source-maps {repo_root / 'dist' / 'index.js'}\n"
+        f"ExecStart={runner}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n\n"
         "[Install]\n"
@@ -1021,49 +1041,44 @@ def install_user_service(config_path: Path) -> str:
         result = systemctl_user(list(command), timeout=30)
         if result.returncode != 0:
             return f"Service file written: {service_file}\nCommand failed: systemctl --user {' '.join(command)}\n{result.stderr or result.stdout}"
-    return f"Bridge autostart enabled and running: {service_file}\nCheck with: systemctl --user status dexyd.service"
-
-
-def install_cloudflare_user_service(cloudflared: str | None = None) -> str:
-    if not CLOUDFLARE_CONFIG_FILE.exists():
-        return "Cloudflare config is missing. Run named tunnel setup first."
-    path = cloudflared or cloudflared_path()
-    if not path:
-        return "cloudflared is missing. Install cloudflared first."
-
-    service_file = user_service_dir() / "dexyd-cloudflared.service"
-    service_file.write_text(
-        "[Unit]\n"
-        "Description=dexyd Cloudflare named tunnel\n"
-        "Wants=network-online.target dexyd.service\n"
-        "After=network-online.target dexyd.service\n\n"
-        "[Service]\n"
-        f"ExecStart={path} --config {CLOUDFLARE_CONFIG_FILE} tunnel run\n"
-        "Restart=on-failure\n"
-        "RestartSec=5\n\n"
-        "[Install]\n"
-        "WantedBy=default.target\n",
-        encoding="utf-8",
+    legacy = remove_legacy_tunnel_service()
+    legacy_text = f"\nLegacy cleanup: {legacy}" if legacy else ""
+    return (
+        f"Dexyd connection service enabled and running: {service_file}\n"
+        "This single service starts the bridge and, when configured, the Cloudflare tunnel."
+        f"{legacy_text}\nCheck with: systemctl --user status dexyd.service"
     )
-    for command in (["daemon-reload"], ["enable", "dexyd-cloudflared.service"]):
-        result = systemctl_user(list(command), timeout=30)
-        if result.returncode != 0:
-            return f"Tunnel service file written: {service_file}\nCommand failed: systemctl --user {' '.join(command)}\n{result.stderr or result.stdout}"
-    return f"Tunnel autostart enabled: {service_file}"
 
 
-def start_cloudflare_user_service() -> str:
-    result = systemctl_user(["start", "dexyd-cloudflared.service"], timeout=30)
+def restart_connection_user_service() -> str:
+    result = systemctl_user(["restart", "dexyd.service"], timeout=30)
     if result.returncode != 0:
-        return f"Could not start tunnel service.\n{result.stderr or result.stdout}"
-    return "Tunnel service started."
+        return f"Could not restart Dexyd connection service.\n{result.stderr or result.stdout}"
+    return "Dexyd connection service restarted."
 
 
-def stop_cloudflare_user_service() -> str:
-    result = systemctl_user(["stop", "dexyd-cloudflared.service"], timeout=30)
+def stop_connection_user_service() -> str:
+    result = systemctl_user(["stop", "dexyd.service"], timeout=30)
+    stop_pid(read_pid(CLOUDFLARE_PID_FILE))
     if result.returncode != 0:
-        return f"Could not stop tunnel service.\n{result.stderr or result.stdout}"
-    return "Tunnel service stopped."
+        return f"Could not stop Dexyd connection service.\n{result.stderr or result.stdout}"
+    return "Dexyd connection service stopped."
+
+
+def disable_cloudflare_tunnel_config() -> str:
+    messages: list[str] = []
+    if CLOUDFLARE_CONFIG_FILE.exists():
+        disabled = CLOUDFLARE_CONFIG_FILE.with_suffix(".yml.disabled")
+        CLOUDFLARE_CONFIG_FILE.replace(disabled)
+        messages.append(f"Tunnel config disabled: {disabled}")
+    else:
+        messages.append("No active tunnel config found.")
+    if stop_pid(read_pid(CLOUDFLARE_PID_FILE)):
+        messages.append("Stopped temporary tunnel process.")
+    restart = restart_connection_user_service()
+    messages.append(restart)
+    return "\n".join(messages)
+
 
 def read_session_count(sqlite_path: Path) -> int:
     if not sqlite_path.exists():
@@ -1383,14 +1398,14 @@ class DexydTextualApp(App[None]):
             with TabPane("Connection", id="connection"):
                 with VerticalScroll(classes="page"):
                     yield Static(
-                        "CONNECTION\n\nSet how your phone reaches this bridge. Local bridge, public URL, Cloudflare tunnel, and autostart live here so pairing always uses the right address.",
+                        "CONNECTION\n\nOne place for the bridge, tunnel, autostart service, and pairing QR. The single dexyd.service owns both the local bridge and the Cloudflare tunnel when a tunnel is configured.",
                         classes="hero",
                     )
                     yield Static("", id="bridge_config_status", classes="panel")
 
                     with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
-                            yield Static("LOCAL BRIDGE", classes="section_title")
+                            yield Static("1. LOCAL ACCESS", classes="section_title")
                             yield Static("Server host", classes="field_label")
                             yield Static("Use 0.0.0.0 for LAN phone access. Use 127.0.0.1 behind a local tunnel/proxy.", classes="field_help")
                             yield Input(placeholder="0.0.0.0", id="cfg_server_host")
@@ -1398,43 +1413,31 @@ class DexydTextualApp(App[None]):
                             yield Static("Bridge HTTP/WebSocket port.", classes="field_help")
                             yield Input(placeholder="4242", id="cfg_server_port", type="integer")
                             yield Static("Public bridge URL", classes="field_label")
-                            yield Static("Leave empty for LAN. Set HTTPS domain/tunnel before generating a QR.", classes="field_help")
+                            yield Static("Leave empty for LAN. Set an HTTPS domain/tunnel before generating a remote QR.", classes="field_help")
                             yield Input(placeholder="https://dexyd.example.com", id="cfg_server_public_base_url")
                             with Vertical(classes="actions"):
                                 yield Button("Save connection", id="save_connection", variant="success")
-                                yield Button("Enable bridge service", id="install_service")
-                                yield Button("Refresh", id="bridge_config_refresh", variant="primary")
+                                yield Button("Install/start Dexyd service", id="install_service", variant="primary")
+                                yield Button("Restart service", id="restart_connection_service")
+                                yield Button("Stop service", id="stop_connection_service", variant="error")
 
                         with Vertical(classes="panel col"):
-                            yield Static("CLOUDFLARE NAMED TUNNEL", classes="section_title")
+                            yield Static("2. CLOUDFLARE TUNNEL", classes="section_title")
                             yield Static("Public hostname", classes="field_label")
-                            yield Static("Hostname routed in Cloudflare, e.g. dexyd.example.com.", classes="field_help")
+                            yield Static("Optional. Use a hostname routed in Cloudflare, e.g. dexyd.example.com.", classes="field_help")
                             yield Input(placeholder="dexyd.example.com", id="cf_hostname")
                             yield Static("Tunnel name", classes="field_label")
                             yield Static("Reusable named tunnel label.", classes="field_help")
                             yield Input(placeholder="dexyd", id="cf_tunnel_name", value="dexyd")
                             with Vertical(classes="actions"):
-                                yield Button("Check", id="cf_check", variant="primary")
-                                yield Button("Install cloudflared", id="cf_install")
-                            with Vertical(classes="actions"):
+                                yield Button("Setup/start tunnel", id="cf_start_named", variant="success")
                                 yield Button("Login", id="cf_login")
-                                yield Button("Setup/start named tunnel", id="cf_start_named", variant="success")
-                            with Vertical(classes="actions"):
-                                yield Button("Enable tunnel service", id="cf_install_service")
-                                yield Button("Start service", id="cf_service_start", variant="success")
-                                yield Button("Stop tunnel", id="cf_stop", variant="error")
+                                yield Button("Install cloudflared", id="cf_install")
+                                yield Button("Disable tunnel", id="cf_disable_tunnel", variant="error")
 
-                    yield Static("", id="cloudflare_output")
-
-            with TabPane("Pair", id="pairing"):
-                with VerticalScroll(classes="page"):
-                    yield Static(
-                        "PAIR PHONE\n\nGenerate the QR only after Connection shows the URL you want to use. If you change LAN/domain/tunnel settings, generate a fresh QR.",
-                        classes="hero",
-                    )
                     with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
-                            yield Static("PAIRING SETTINGS", classes="section_title")
+                            yield Static("3. PAIR PHONE", classes="section_title")
                             yield Static("Expiry seconds", classes="field_label")
                             yield Static("Short-lived pairing challenge. 300 seconds is usually enough.", classes="field_help")
                             yield Input(placeholder="300", id="pairing_expiry", type="integer", value="300")
@@ -1442,10 +1445,11 @@ class DexydTextualApp(App[None]):
                                 yield Button("Generate pairing QR", id="generate_pairing", variant="success")
                                 yield Button("Clear", id="clear_qr")
                         yield Static(
-                            "PAIRING CHECKLIST\n\n1. Connection tab: choose LAN, domain, or tunnel.\n2. Save connection if you changed host/port/public URL.\n3. Generate QR here.\n4. Scan from the mobile app.\n\nOld QR screenshots become stale after URL changes.",
+                            "SIMPLE FLOW\n\n1. For LAN: host 0.0.0.0, public URL empty.\n2. For remote: enter Cloudflare hostname and run Setup/start tunnel.\n3. Generate QR after the status shows the URL you want.\n4. Scan from the mobile app.\n\nChanging the URL requires a new QR.",
                             classes="soft_panel col",
                         )
                     yield Static("Generate a QR to pair the mobile app.", id="qr_output")
+                    yield Static("", id="cloudflare_output")
 
             with TabPane("Work", id="sessions"):
                 with VerticalScroll(classes="page"):
@@ -1558,10 +1562,11 @@ class DexydTextualApp(App[None]):
                     yield Static(
                         "DEXYD HELP\n\n"
                         "Recommended setup:\n"
-                        "  1. Connection: choose LAN/domain/Cloudflare and save.\n"
-                        "  2. Pair: generate a fresh QR and scan it in the mobile app.\n"
-                        "  3. Work: verify sessions/projects are visible.\n"
-                        "  4. Updates: check bridge/TUI and APK releases.\n\n"
+                        "  1. Connection: choose LAN or Cloudflare/domain and save.\n"
+                        "  2. Connection: install/start Dexyd service. One service runs bridge + tunnel.\n"
+                        "  3. Connection: generate a fresh QR and scan it in the mobile app.\n"
+                        "  4. Work: verify sessions/projects are visible.\n"
+                        "  5. Updates: check bridge/TUI and APK releases.\n\n"
                         "Commands:\n"
                         "  dexyd --tui          open this console\n"
                         "  dexyd                run bridge in foreground\n"
@@ -1685,8 +1690,7 @@ class DexydTextualApp(App[None]):
         )
         next_steps = (
             "ACTIONS\n\n"
-            "Pair → generate QR\n"
-            "Connection → bridge/tunnel/autostart\n"
+            "Connection → service, tunnel, QR\n"
             "Sessions → inspect chat\n"
             "Updates → check latest release"
         )
@@ -1788,15 +1792,21 @@ class DexydTextualApp(App[None]):
         pid = read_pid(CLOUDFLARE_PID_FILE)
         tunnel_process = "running" if process_is_running(pid) else "stopped"
         config_state = "present" if CLOUDFLARE_CONFIG_FILE.exists() else "missing"
+        cloudflared = cloudflared_path()
+        legacy_line = ""
+        if tunnel_active not in {"inactive", "failed", "unknown"} or tunnel_enabled not in {"disabled", "unknown"}:
+            legacy_line = f"\nLegacy separate tunnel service: {tunnel_active} · {tunnel_enabled}"
         self.query_one("#bridge_config_status", Static).update(
-            "BRIDGE STATUS\n\n"
+            "CONNECTION STATUS\n\n"
             f"Local API: {base_url} · {health}\n"
             f"Public URL: {public_url}\n"
             f"Health: {detail}\n\n"
-            "AUTOSTART\n\n"
-            f"Bridge service: {bridge_active} · {bridge_enabled}\n"
-            f"Tunnel service: {tunnel_active} · {tunnel_enabled}\n\n"
+            "ONE SERVICE\n\n"
+            f"Dexyd service: {bridge_active} · {bridge_enabled}\n"
+            "Runs: bridge + Cloudflare tunnel when tunnel config exists"
+            f"{legacy_line}\n\n"
             "TUNNEL\n\n"
+            f"cloudflared: {'installed' if cloudflared else 'missing'}{f' · {cloudflared}' if cloudflared else ''}\n"
             f"Process: {tunnel_process}{f' · pid {pid}' if process_is_running(pid) else ''}\n"
             f"Config: {config_state} · {CLOUDFLARE_CONFIG_FILE}"
         )
@@ -1949,18 +1959,21 @@ class DexydTextualApp(App[None]):
             self.append_cloudflare_output(route_output)
 
         config_path = write_cloudflare_config(tunnel_id, hostname, origin)
-        autostart_message = install_cloudflare_user_service(path)
         stop_pid(read_pid(CLOUDFLARE_PID_FILE))
-        pid = start_cloudflared_process([path, "--config", str(config_path), "tunnel", "run"])
         public_url = f"https://{hostname}"
         self.save_public_base_url(public_url)
+        service_message = install_user_service(self.store.path)
+        service_active, _service_enabled = user_service_state("dexyd.service")
+        pid: int | None = None
+        if service_active != "active":
+            pid = start_cloudflared_process([path, "--config", str(config_path), "tunnel", "run"])
         self.append_cloudflare_output(
             f"Named tunnel running: {public_url}\n"
             f"Tunnel: {tunnel_name} ({tunnel_id})\n"
             f"Origin: {origin}\n"
             f"Config: {config_path}\n"
-            f"Autostart: {autostart_message}\n"
-            f"PID: {pid}\n"
+            f"Service: {service_message}\n"
+            f"Temporary PID: {pid if pid else 'not needed; managed by dexyd.service'}\n"
             "Waiting for public tunnel health before generating the pairing QR..."
         )
         ready, detail = wait_for_bridge_ready(public_url, timeout_seconds=90, pid=pid)
@@ -2146,6 +2159,15 @@ class DexydTextualApp(App[None]):
             elif button_id == "install_service":
                 self.set_status(install_user_service(self.store.path))
                 self.refresh_bridge_config_status()
+                self.refresh_cloudflare()
+            elif button_id == "restart_connection_service":
+                self.set_status(restart_connection_user_service())
+                self.refresh_bridge_config_status()
+                self.refresh_cloudflare()
+            elif button_id == "stop_connection_service":
+                self.set_status(stop_connection_user_service())
+                self.refresh_bridge_config_status()
+                self.refresh_cloudflare()
             elif button_id == "show_chat":
                 self.refresh_chat_output()
                 self.set_status("Chat refreshed")
@@ -2201,12 +2223,6 @@ class DexydTextualApp(App[None]):
                 self.run_cloudflare_task("Install cloudflared", self.ensure_cloudflared)
             elif button_id == "cf_login":
                 self.run_cloudflare_task("Cloudflare login", lambda: self.cloudflare_login(self.ensure_cloudflared()))
-            elif button_id == "cf_install_service":
-                self.set_status(install_cloudflare_user_service(self.ensure_cloudflared()))
-                self.refresh_bridge_config_status()
-            elif button_id == "cf_service_start":
-                self.set_status(start_cloudflare_user_service())
-                self.refresh_bridge_config_status()
             elif button_id == "cf_start_named":
                 hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
                 tunnel_name = self.query_one("#cf_tunnel_name", Input).value.strip() or "dexyd"
@@ -2216,18 +2232,10 @@ class DexydTextualApp(App[None]):
                     "Named Cloudflare tunnel",
                     lambda: self.start_named_cloudflare_tunnel(hostname, tunnel_name, pairing_expiry),
                 )
-            elif button_id == "cf_stop":
-                pid = read_pid(CLOUDFLARE_PID_FILE)
-                stopped = stop_pid(pid)
-                service_msg = stop_cloudflare_user_service()
+            elif button_id == "cf_disable_tunnel":
+                self.set_status(disable_cloudflare_tunnel_config())
                 self.refresh_cloudflare()
                 self.refresh_bridge_config_status()
-                if stopped:
-                    self.set_status(f"Cloudflare tunnel stopped. {service_msg}")
-                elif process_is_running(pid):
-                    self.set_status("Cloudflare tunnel did not stop; check process permissions")
-                else:
-                    self.set_status("No running Cloudflare tunnel found")
         except Exception as exc:  # pragma: no cover - interactive guard
             self.set_status(f"Error: {exc}")
 
