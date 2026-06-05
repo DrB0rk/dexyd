@@ -1,6 +1,5 @@
 package com.dexydmobile
 
-import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageInstaller
@@ -131,7 +130,6 @@ class DexydUpdaterModule(
             sessionId,
             callback,
             pendingIntentFlags(),
-            pendingIntentOptions(),
           )
           session.commit(pendingIntent.intentSender)
         }
@@ -203,19 +201,6 @@ class DexydUpdaterModule(
     } else {
       update
     }
-  }
-
-  private fun pendingIntentOptions(): android.os.Bundle? {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
-    val mode = if (Build.VERSION.SDK_INT >= 36) {
-      ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
-    } else {
-      @Suppress("DEPRECATION")
-      ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-    }
-    return ActivityOptions.makeBasic().apply {
-      setPendingIntentBackgroundActivityStartMode(mode)
-    }.toBundle()
   }
 
   private fun isTrustedApkSource(uri: Uri): Boolean {
