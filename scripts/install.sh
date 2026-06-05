@@ -16,6 +16,15 @@ INSTALL_SERVICE=1
 OPEN_FIREWALL=0
 USE_CURRENT=0
 CLEAN_ONLY=0
+ORIGINAL_CWD="$(pwd -P 2>/dev/null || pwd)"
+SAFE_WORK_DIR=""
+
+cleanup_safe_workdir() {
+  if [[ -n "${SAFE_WORK_DIR:-}" ]]; then
+    rm -rf "$SAFE_WORK_DIR"
+  fi
+}
+trap cleanup_safe_workdir EXIT
 
 if [[ -t 1 ]]; then
   bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -165,19 +174,43 @@ stop_service() {
 }
 
 cleanup_old_install() {
-  local clean_app_dir="${1:-0}"
+  local clean_app_dir="${1:-0}" suffix=""
   stop_service
   rm -f "$SERVICE_LINK" "$SERVICE_PATH" "$COMMAND_PATH"
   rm -f "$SERVICE_DIR/dexyd-cloudflared.service" "$SERVICE_DIR/default.target.wants/dexyd-cloudflared.service"
   if [[ "$clean_app_dir" == "1" ]]; then
     rm -rf "$INSTALL_DIR"
+    suffix="/app directory"
   fi
-  ok "Removed old Dexyd service/command${clean_app_dir:+/app directory}"
+  ok "Removed old Dexyd service/command${suffix}"
 }
 
 looks_like_dexyd_dir() {
   local dir="$1"
   [[ -d "$dir" && ( -f "$dir/package.json" || -f "$dir/bin/dexyd" || -d "$dir/src" || -f "$dir/dexyd.config.yaml" ) ]]
+}
+
+path_is_inside() {
+  local child="$1" parent="$2"
+  python3 - "$child" "$parent" <<'PY'
+from pathlib import Path
+import sys
+
+child = Path(sys.argv[1]).resolve()
+parent = Path(sys.argv[2]).resolve()
+print("yes" if child == parent or parent in child.parents else "no")
+PY
+}
+
+ensure_safe_workdir_for_replace() {
+  [[ "$USE_CURRENT" == "1" ]] && return 0
+  if [[ "$(path_is_inside "$ORIGINAL_CWD" "$INSTALL_DIR")" != "yes" ]]; then
+    return 0
+  fi
+
+  SAFE_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dexyd-install-cwd.XXXXXX")"
+  cd "$SAFE_WORK_DIR"
+  warn "Installer was launched from inside $INSTALL_DIR; moved working directory to $SAFE_WORK_DIR before replacing the app tree."
 }
 
 safe_prepare_install_dir() {
@@ -247,7 +280,7 @@ resolve_source() {
   safe_prepare_install_dir
   if [[ "$USE_CURRENT" == "1" ]]; then
     bold "Deploying current checkout into $INSTALL_DIR" >&2
-    deploy_current_checkout "$(pwd)" "$INSTALL_DIR" >/dev/null
+    deploy_current_checkout "$ORIGINAL_CWD" "$INSTALL_DIR" >/dev/null
     echo "$INSTALL_DIR"
     return
   fi
@@ -503,6 +536,7 @@ main() {
   fi
 
   check_core_dependencies
+  ensure_safe_workdir_for_replace
   cleanup_old_install 0
 
   local root

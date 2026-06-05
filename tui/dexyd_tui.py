@@ -275,6 +275,7 @@ def run_update_installer(
     env: dict[str, str],
     log: Callable[[str], None] | None = None,
     timeout: int = 900,
+    cwd: Path | None = None,
 ) -> tuple[int, str]:
     output_lines: list[str] = []
     process = subprocess.Popen(
@@ -284,6 +285,7 @@ def run_update_installer(
         stdin=subprocess.DEVNULL,
         text=True,
         env=env,
+        cwd=str(cwd or Path.home()),
         bufsize=1,
     )
     deadline = time.time() + timeout
@@ -347,7 +349,7 @@ def install_latest_bridge_update(
         ]
         if log:
             log(f"Running installer from {temp_dir} for {branch} into {root}")
-        returncode, output = run_update_installer(command, sanitized_update_env(root), log=log)
+        returncode, output = run_update_installer(command, sanitized_update_env(root), log=log, cwd=temp_dir)
         if returncode != 0:
             raise RuntimeError(f"Installer failed with exit {returncode}:\n{output[-4000:]}")
         installed_version = verify_update_result(root, target_version)
