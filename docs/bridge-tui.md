@@ -152,7 +152,7 @@ Updates checks GitHub Releases from inside the TUI. It shows:
 - release page URL;
 - attached Android APK name and URL when present.
 
-**Install bridge update** downloads the official installer and reruns it against the current installed Dexyd app directory. It preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, and restarts the user service when enabled. Restart the TUI after updating so the running interface uses the new code.
+**Install / repair bridge** downloads the official installer to a temporary directory and reruns it against the current installed Dexyd app directory using the latest release tag. It uses a sanitized environment, streams progress, preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, restarts the user service when enabled, and verifies the installed command/version. Restart the TUI after updating so the running interface uses the new code.
 
 For safety, the TUI refuses to self-update a development checkout outside the installed app directory. Use git and the release workflow for development trees.
 

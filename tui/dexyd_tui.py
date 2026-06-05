@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -205,7 +206,7 @@ def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "
         lines.extend(
             [
                 "",
-                "Install bridge update reruns the official installer for this app directory, preserving dexyd.config.yaml and .dexyd data.",
+                "Install / repair bridge reruns the official installer for the latest release, preserving dexyd.config.yaml and .dexyd data.",
                 "The Android app updates from Settings → Updates on the phone; Android will ask before installing APKs.",
             ]
         )
@@ -230,38 +231,130 @@ def safe_update_root(root: Path) -> tuple[bool, str]:
 
 def download_installer_script(target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
-    with request.urlopen(DEXYD_INSTALLER_URL, timeout=30) as response:
-        target.write_bytes(response.read())
+    req = request.Request(DEXYD_INSTALLER_URL, headers={"User-Agent": "Dexyd TUI updater"})
+    with request.urlopen(req, timeout=30) as response:
+        data = response.read()
+    if not data.startswith(b"#!/usr/bin/env bash"):
+        raise RuntimeError("Downloaded installer did not look like the official Dexyd installer.")
+    target.write_bytes(data)
     target.chmod(0o755)
     return target
 
 
-def install_latest_bridge_update(root: Path) -> str:
+def update_branch_name(info: UpdateInfo | None) -> str:
+    candidate = str(info.latest_version if info else "main").strip()
+    if re.match(r"^v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$", candidate):
+        return candidate if candidate.startswith("v") else f"v{candidate}"
+    return "main"
+
+
+def sanitized_update_env(root: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    venv_bin = str(root / ".dexyd" / ".venv-tui" / "bin")
+    path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part and part != venv_bin]
+    for fallback in ("/usr/local/bin", "/usr/bin", "/bin"):
+        if fallback not in path_parts:
+            path_parts.append(fallback)
+    env.update(
+        {
+            "DEXYD_INSTALL_DIR": str(root),
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PIP_NO_CACHE_DIR": "1",
+        }
+    )
+    env["PATH"] = os.pathsep.join(path_parts)
+    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+        env.pop(key, None)
+    return env
+
+
+def run_update_installer(
+    command: list[str],
+    env: dict[str, str],
+    log: Callable[[str], None] | None = None,
+    timeout: int = 900,
+) -> tuple[int, str]:
+    output_lines: list[str] = []
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        bufsize=1,
+    )
+    deadline = time.time() + timeout
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            cleaned = line.rstrip()
+            if cleaned:
+                output_lines.append(cleaned)
+                if len(output_lines) > 500:
+                    output_lines = output_lines[-500:]
+                if log:
+                    log(cleaned)
+            if time.time() > deadline:
+                process.kill()
+                raise TimeoutError("Installer timed out.")
+        return process.wait(timeout=10), "\n".join(output_lines)
+    finally:
+        try:
+            process.stdout.close()
+        except Exception:
+            pass
+
+
+def verify_update_result(root: Path, target_version: str) -> str:
+    installed_version = read_package_version(root)
+    command_target = installed_command_target()
+    expected_command = (root / "bin" / "dexyd").resolve(strict=False)
+    if command_target != expected_command:
+        raise RuntimeError(
+            f"Update finished, but ~/.local/bin/dexyd points to {command_target or 'nothing'} instead of {expected_command}."
+        )
+    if version_is_newer(target_version, installed_version):
+        raise RuntimeError(f"Update finished, but installed version is still {installed_version}; expected {target_version}.")
+    return installed_version
+
+
+def install_latest_bridge_update(
+    root: Path,
+    info: UpdateInfo | None = None,
+    log: Callable[[str], None] | None = None,
+) -> str:
     ok, reason = safe_update_root(root)
     if not ok:
         raise RuntimeError(reason)
 
-    temp_dir = root / ".dexyd" / "updates"
-    installer = download_installer_script(temp_dir / "install-latest.sh")
-    command = [
-        "bash",
-        str(installer),
-        "--repo",
-        DEXYD_REPO_URL,
-        "--branch",
-        "main",
-        "--dir",
-        str(root),
-    ]
-    env = {**os.environ, "DEXYD_INSTALL_DIR": str(root)}
-    venv_bin = str(root / ".dexyd" / ".venv-tui" / "bin")
-    env["PATH"] = os.pathsep.join(part for part in env.get("PATH", "").split(os.pathsep) if part != venv_bin)
-    env.pop("VIRTUAL_ENV", None)
-    result = run_capture(command, timeout=600, env=env)
-    output = (result.stdout + "\n" + result.stderr).strip()
-    if result.returncode != 0:
-        raise RuntimeError(f"Installer failed with exit {result.returncode}:\n{output[-4000:]}")
-    return f"Update installed into {root} ({reason}). Restart this TUI to load the new code.\n\n{output[-4000:]}"
+    branch = update_branch_name(info)
+    target_version = (info.latest_version if info else branch).removeprefix("v")
+    temp_dir = Path(tempfile.mkdtemp(prefix="dexyd-update-"))
+    try:
+        installer = download_installer_script(temp_dir / "install.sh")
+        command = [
+            "bash",
+            str(installer),
+            "--repo",
+            DEXYD_REPO_URL,
+            "--branch",
+            branch,
+            "--dir",
+            str(root),
+        ]
+        if log:
+            log(f"Running installer from {temp_dir} for {branch} into {root}")
+        returncode, output = run_update_installer(command, sanitized_update_env(root), log=log)
+        if returncode != 0:
+            raise RuntimeError(f"Installer failed with exit {returncode}:\n{output[-4000:]}")
+        installed_version = verify_update_result(root, target_version)
+        return (
+            f"Bridge/TUI install repaired at {root} ({reason}). Installed version: {installed_version}. "
+            "Restart this TUI to load updated code."
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -1450,7 +1543,7 @@ class DexydTextualApp(App[None]):
                     )
                     with Horizontal(classes="action_row"):
                         yield Button("Check updates", id="check_updates", variant="primary")
-                        yield Button("Install bridge update", id="install_update", variant="success")
+                        yield Button("Install / repair bridge", id="install_update", variant="success")
                     yield Static("", id="update_output")
 
             with TabPane("Help", id="help"):
@@ -1654,9 +1747,7 @@ class DexydTextualApp(App[None]):
         if self.update_info is None:
             self.update_info = latest_release_info()
             self.call_from_thread(self.refresh_updates)
-        if not self.update_info.update_available:
-            return f"Already up to date ({self.update_info.current_version})."
-        return install_latest_bridge_update(app_root())
+        return install_latest_bridge_update(app_root(), self.update_info, log=self.append_update_output)
 
     def refresh_settings_summary(self) -> None:
         harness = self.store.config["codex"]["harness"]

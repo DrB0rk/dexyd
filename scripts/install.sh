@@ -254,9 +254,15 @@ resolve_source() {
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     bold "Updating Dexyd in $INSTALL_DIR" >&2
     git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
-    git -C "$INSTALL_DIR" fetch --prune origin >&2
-    git -C "$INSTALL_DIR" checkout "$BRANCH" >&2
-    git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" >&2
+    git -C "$INSTALL_DIR" fetch --prune --tags origin >&2
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+      git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH" >&2
+    elif git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/tags/$BRANCH"; then
+      git -C "$INSTALL_DIR" checkout --detach "$BRANCH" >&2
+    else
+      git -C "$INSTALL_DIR" checkout "$BRANCH" >&2
+      git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" >&2
+    fi
   else
     bold "Cloning Dexyd into $INSTALL_DIR" >&2
     git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" >&2

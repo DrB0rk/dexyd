@@ -269,6 +269,6 @@ Use the TUI for installed bridge/TUI updates:
 dexyd --tui
 ```
 
-Open **Updates**, choose **Check updates**, then **Install bridge update** when a newer release is available. The update flow reruns the official installer for the installed app directory and preserves configuration/data.
+Open **Updates**, choose **Check updates**, then **Install / repair bridge**. The update flow reruns the official installer for the latest release tag in the installed app directory, streams progress, verifies the result, and preserves configuration/data. It can also repair an already-current install.
 
 Use the mobile app **Settings → Updates** to update the Android APK from GitHub Releases. Dexyd stages the APK with Android PackageInstaller and opens the update confirmation prompt; Android still requires final confirmation before installing.
