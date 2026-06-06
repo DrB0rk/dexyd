@@ -344,6 +344,7 @@ export class CodexChatService {
       this.startCodexTurn(input).catch((error) => {
         const message = error instanceof Error ? error.message : 'chat turn failed';
         this.emitFailure(input.session.id, input.turnId, message);
+        this.scheduleNextQueuedTurn(input.session);
       });
     });
   }
@@ -372,7 +373,7 @@ export class CodexChatService {
         {
           cwd: input.session.workspacePath,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, NO_COLOR: '1' }
+          env: buildCodexEnvironment()
         }
       );
       let spawnFailed = false;
@@ -407,6 +408,7 @@ export class CodexChatService {
           input.turnId,
           `Failed to start Codex launcher "${this.launch.label}": ${error.message}. Check codex.runtimePath / codex.harness.command or restart the bridge from a shell where the command is in PATH.`
         );
+        this.scheduleNextQueuedTurn(input.session);
         resolve();
       });
 
@@ -445,6 +447,7 @@ export class CodexChatService {
         } else {
           await this.emitTurnDiff(input.session, input.turnId, turnSnapshot);
           this.emitFailure(input.session.id, input.turnId, cleanOutput || formatCodexExit(code, signal));
+          this.scheduleNextQueuedTurn(input.session);
         }
         resolve();
         })().catch((error) => {
@@ -457,6 +460,7 @@ export class CodexChatService {
             'chat turn close handling failed'
           );
           this.emitFailure(input.session.id, input.turnId, 'Chat turn close handling failed.');
+          this.scheduleNextQueuedTurn(input.session);
           resolve();
         });
       });
@@ -729,6 +733,40 @@ function isDuplicateRuntimeMessage(messages: ChatMessage[], next: ChatMessage): 
       Math.abs(chatMessageTime(message) - chatMessageTime(next)) <= 10 * 60 * 1000
     );
   });
+}
+
+
+function buildCodexEnvironment(): NodeJS.ProcessEnv {
+  const home = process.env.HOME || homedir();
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME || join(home, '.config');
+  const xdgDataHome = process.env.XDG_DATA_HOME || join(home, '.local', 'share');
+  const path = mergePathWithUserBins(process.env.PATH || '', home);
+  return {
+    ...process.env,
+    HOME: home,
+    USER: process.env.USER || process.env.LOGNAME || 'user',
+    LOGNAME: process.env.LOGNAME || process.env.USER || 'user',
+    XDG_CONFIG_HOME: xdgConfigHome,
+    XDG_DATA_HOME: xdgDataHome,
+    CODEX_HOME: process.env.CODEX_HOME || join(home, '.codex'),
+    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || join(xdgConfigHome, 'gh'),
+    PATH: path,
+    NO_COLOR: '1'
+  };
+}
+
+function mergePathWithUserBins(existingPath: string, home: string): string {
+  const dirs = existingPath.split(delimiter).filter(Boolean);
+  const additions = [
+    join(home, '.local', 'npm', 'bin'),
+    join(home, '.local', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, 'go', 'bin'),
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin'
+  ];
+  return [...new Set([...dirs, ...additions])].join(delimiter);
 }
 
 function resolveRuntimeLaunch(config: CodexChatConfig): RuntimeLaunch {

@@ -441,6 +441,84 @@ echo "assistant response"
     }
   }, 15_000);
 
+  it('drains queued prompts after a failed active turn', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-queue-failure-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+
+    const counterFile = join(tempDir, 'counter.txt');
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env bash
+count=0
+if [ -f "${counterFile}" ]; then count=$(cat "${counterFile}"); fi
+count=$((count + 1))
+printf '%s' "$count" > "${counterFile}"
+if [ "$count" = "1" ]; then
+  sleep 0.15
+  echo "first failed" >&2
+  exit 2
+fi
+echo "queued prompt completed"
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const first = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'first fails' }
+      });
+      expect(first.statusCode).toBe(202);
+      expect((first.json() as { queued: boolean }).queued).toBe(false);
+
+      const second = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'second should run' }
+      });
+      expect(second.statusCode).toBe(202);
+      expect((second.json() as { queued: boolean }).queued).toBe(true);
+
+      let messages: Array<{ role: string; content: string; status: string }> = [];
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const response = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/chat`, headers: authHeader });
+        messages = (response.json() as { messages: Array<{ role: string; content: string; status: string }> }).messages;
+        if (messages.some((message) => message.role === 'assistant' && message.content.includes('queued prompt completed'))) break;
+        await sleep(25);
+      }
+
+      expect(messages.some((message) => message.status === 'failed')).toBe(true);
+      expect(messages.some((message) => message.role === 'user' && message.content === 'second should run')).toBe(true);
+      expect(messages.some((message) => message.role === 'assistant' && message.content.includes('queued prompt completed'))).toBe(true);
+
+      const empty = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/queue`, headers: authHeader });
+      expect((empty.json() as { queue: unknown[] }).queue).toHaveLength(0);
+    } finally {
+      await service.stop();
+    }
+  }, 15_000);
+
   it('rejects new prompts when Codex usage limits are exhausted', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-limit-'));
     cleanupPaths.push(tempDir);

@@ -32,12 +32,21 @@ export type UsageStatus = {
   };
   total: TokenUsage | null;
   last: TokenUsage | null;
-  limits: {
-    status: 'ok' | 'warn' | 'error' | 'unknown';
-    label: string;
-    detail: string;
-    raw: unknown;
+  accountLimits: {
+    fiveHour: UsageLimit;
+    monthly: UsageLimit;
+    other: UsageLimit[];
   };
+  limits: UsageLimit;
+};
+
+export type UsageLimit = {
+  kind: 'fiveHour' | 'monthly' | 'other' | 'aggregate';
+  status: 'ok' | 'warn' | 'error' | 'unknown';
+  label: string;
+  detail: string;
+  remainingPercent: number | null;
+  raw: unknown;
 };
 
 type UsageContext = UsageStatus['context'];
@@ -224,12 +233,8 @@ export class CodexSessionService {
       },
       total: null,
       last: null,
-      limits: {
-        status: 'unknown',
-        label: 'limits unknown',
-        detail: 'No Codex usage telemetry has been observed yet.',
-        raw: null
-      }
+      accountLimits: unknownAccountLimits('No Codex usage telemetry has been observed yet.'),
+      limits: unknownUsageLimit('aggregate', 'limits unknown', 'No Codex usage telemetry has been observed yet.', null)
     };
     if (!session) return fallback;
 
@@ -246,7 +251,8 @@ export class CodexSessionService {
       const usedTokens = last?.totalTokens ?? total?.totalTokens ?? null;
       const percent = usedTokens !== null && windowTokens ? Math.round((usedTokens / windowTokens) * 1000) / 10 : null;
       const contextStatus = percent === null ? 'unknown' : percent >= 95 ? 'error' : percent >= 80 ? 'warn' : 'ok';
-      const limits = limitStatusFromTelemetry(payload.rate_limits);
+      const accountLimits = accountLimitsFromTelemetry(payload.rate_limits);
+      const limits = aggregateLimitStatus(accountLimits);
       const status = limits.status === 'unknown' ? 'ok' : limits.status;
 
       return {
@@ -261,6 +267,7 @@ export class CodexSessionService {
         },
         total,
         last,
+        accountLimits,
         limits
       };
     }
@@ -717,74 +724,227 @@ function numberField(record: Record<string, unknown>, key: string): number | nul
     : null;
 }
 
-function limitStatusFromTelemetry(raw: unknown): UsageStatus['limits'] {
-  if (!raw) {
-    return {
-      status: 'unknown',
-      label: 'limits unknown',
-      detail: 'Codex did not report rate-limit telemetry.',
-      raw: null
-    };
-  }
+type LimitCandidate = {
+  kind: UsageLimit['kind'];
+  path: string[];
+  limit: UsageLimit;
+};
 
-  const serialized = JSON.stringify(raw);
-  const normalized = serialized.toLowerCase();
-  const hasLimitIssue = /\b(exceeded|limited|throttled|reset|remaining\"?\s*:\s*0)\b/i.test(serialized);
-  const lowRemaining = lowestRemainingPercent(raw);
-  const status =
-    hasLimitIssue || lowRemaining === 0
-      ? 'error'
-      : lowRemaining !== null && lowRemaining <= 15
-        ? 'warn'
-        : 'ok';
+function accountLimitsFromTelemetry(raw: unknown): UsageStatus['accountLimits'] {
+  if (!raw) return unknownAccountLimits('Codex did not report rate-limit telemetry.');
 
+  const candidates = collectLimitCandidates(raw);
+  const fiveHour = selectLimit(candidates, 'fiveHour') ??
+    unknownUsageLimit('fiveHour', '5h unknown', 'No 5h usage limit telemetry was reported.', null);
+  const monthly = selectLimit(candidates, 'monthly') ??
+    unknownUsageLimit('monthly', 'monthly unknown', 'No monthly usage limit telemetry was reported.', null);
+  const selected = new Set([fiveHour.raw, monthly.raw]);
+  const other = candidates
+    .filter((candidate) => candidate.kind === 'other' && !selected.has(candidate.limit.raw))
+    .map((candidate) => candidate.limit);
+
+  return { fiveHour, monthly, other };
+}
+
+function unknownAccountLimits(detail: string): UsageStatus['accountLimits'] {
   return {
-    status,
-    label:
-      status === 'error'
-        ? 'limit reached'
-        : status === 'warn'
-          ? 'limit low'
-          : lowRemaining !== null || normalized.includes('remaining')
-            ? 'limits ok'
-            : 'limits reported',
-    detail:
-      lowRemaining !== null
-        ? `${Math.max(0, Math.round(lowRemaining))}% remaining`
-        : 'Rate-limit telemetry is available from Codex.',
+    fiveHour: unknownUsageLimit('fiveHour', '5h unknown', detail, null),
+    monthly: unknownUsageLimit('monthly', 'monthly unknown', detail, null),
+    other: []
+  };
+}
+
+function unknownUsageLimit(
+  kind: UsageLimit['kind'],
+  label: string,
+  detail: string,
+  raw: unknown
+): UsageLimit {
+  return {
+    kind,
+    status: 'unknown',
+    label,
+    detail,
+    remainingPercent: null,
     raw
   };
 }
 
-function lowestRemainingPercent(value: unknown): number | null {
-  let lowest: number | null = null;
+function collectLimitCandidates(raw: unknown): LimitCandidate[] {
+  const candidates: LimitCandidate[] = [];
 
-  const visit = (candidate: unknown): void => {
+  const visit = (candidate: unknown, path: string[]): void => {
     if (Array.isArray(candidate)) {
-      for (const item of candidate) visit(item);
+      candidate.forEach((item, index) => visit(item, [...path, String(index)]));
       return;
     }
-
     if (!isRecord(candidate)) return;
 
-    const remaining = numberField(candidate, 'remaining');
-    const limit = numberField(candidate, 'limit') ?? numberField(candidate, 'max');
-    const usedPercent = numberField(candidate, 'used_percent') ?? numberField(candidate, 'usedPercentage');
-    const percent =
-      numberField(candidate, 'remaining_percent') ??
-      numberField(candidate, 'remainingPercentage') ??
-      (usedPercent !== null ? Math.max(0, 100 - usedPercent) : null) ??
-      (remaining !== null && limit ? (remaining / limit) * 100 : null);
+    const limit = usageLimitFromRecord(candidate, path);
+    if (limit) candidates.push({ kind: limit.kind, path, limit });
 
-    if (percent !== null) {
-      lowest = lowest === null ? percent : Math.min(lowest, percent);
+    for (const [key, value] of Object.entries(candidate)) {
+      if (value && typeof value === 'object') visit(value, [...path, key]);
     }
-
-    for (const item of Object.values(candidate)) visit(item);
   };
 
-  visit(value);
+  visit(raw, []);
+  return candidates;
+}
+
+function usageLimitFromRecord(record: Record<string, unknown>, path: string[]): UsageLimit | null {
+  const remainingPercent = remainingPercentFromRecord(record);
+  const serialized = JSON.stringify(record);
+  const hasLimitIssue = /\b(exceeded|exhausted|limited|throttled|depleted|remaining\"?\s*:\s*0)\b/i.test(serialized);
+  const hasTelemetry =
+    remainingPercent !== null ||
+    numberField(record, 'remaining') !== null ||
+    numberField(record, 'limit') !== null ||
+    numberField(record, 'max') !== null ||
+    numberField(record, 'used_percent') !== null ||
+    numberField(record, 'window_minutes') !== null ||
+    stringField(record, 'name') !== null ||
+    stringField(record, 'label') !== null;
+  if (!hasTelemetry) return null;
+
+  const kind = classifyLimit(record, path);
+  const status =
+    hasLimitIssue || remainingPercent === 0
+      ? 'error'
+      : remainingPercent !== null && remainingPercent <= 15
+        ? 'warn'
+        : remainingPercent !== null
+          ? 'ok'
+          : 'unknown';
+  const labelBase = kind === 'fiveHour' ? '5h' : kind === 'monthly' ? 'monthly' : limitDisplayName(record, path);
+  return {
+    kind,
+    status,
+    label:
+      status === 'error'
+        ? `${labelBase} limit reached`
+        : status === 'warn'
+          ? `${labelBase} limit low`
+          : status === 'ok'
+            ? `${labelBase} ok`
+            : `${labelBase} reported`,
+    detail:
+      remainingPercent !== null
+        ? `${Math.max(0, Math.round(remainingPercent))}% remaining`
+        : 'Rate-limit telemetry is available from Codex.',
+    remainingPercent,
+    raw: record
+  };
+}
+
+function classifyLimit(record: Record<string, unknown>, path: string[]): UsageLimit['kind'] {
+  const text = [
+    ...path,
+    stringField(record, 'name'),
+    stringField(record, 'label'),
+    stringField(record, 'type'),
+    stringField(record, 'window')
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ')
+    .toLowerCase();
+  const windowMinutes =
+    numberField(record, 'window_minutes') ??
+    numberField(record, 'windowMinutes') ??
+    numberField(record, 'reset_after_minutes') ??
+    numberField(record, 'resetAfterMinutes');
+  const windowSeconds =
+    numberField(record, 'window_seconds') ??
+    numberField(record, 'windowSeconds') ??
+    numberField(record, 'reset_after_seconds') ??
+    numberField(record, 'resetAfterSeconds');
+  const minutes = windowMinutes ?? (windowSeconds !== null ? windowSeconds / 60 : null);
+
+  if (/\b(5h|5 h|five.?hour|5.?hour|five_hour|five-hour|short)\b/.test(text) || (minutes !== null && minutes >= 295 && minutes <= 305)) {
+    return 'fiveHour';
+  }
+  if (/\b(month|monthly|30d|30 d|calendar)\b/.test(text) || (minutes !== null && minutes >= 40_000 && minutes <= 46_000)) {
+    return 'monthly';
+  }
+  return 'other';
+}
+
+function selectLimit(candidates: LimitCandidate[], kind: UsageLimit['kind']): UsageLimit | null {
+  const matches = candidates.filter((candidate) => candidate.kind === kind).map((candidate) => candidate.limit);
+  if (!matches.length) return null;
+  return matches.sort(compareLimitSeverity)[0] ?? null;
+}
+
+function aggregateLimitStatus(limits: UsageStatus['accountLimits']): UsageLimit {
+  const known = [limits.fiveHour, limits.monthly, ...limits.other].filter((limit) => limit.status !== 'unknown');
+  if (!known.length) {
+    return unknownUsageLimit('aggregate', 'limits unknown', 'No Codex account usage telemetry has been observed yet.', null);
+  }
+
+  const worst = [...known].sort(compareLimitSeverity)[0];
+  if (!worst) {
+    return unknownUsageLimit('aggregate', 'limits unknown', 'No Codex account usage telemetry has been observed yet.', null);
+  }
+  const detailParts = [limits.fiveHour, limits.monthly]
+    .filter((limit) => limit.status !== 'unknown')
+    .map((limit) => `${limit.kind === 'fiveHour' ? '5h' : 'monthly'}: ${limit.detail}`);
+  return {
+    kind: 'aggregate',
+    status: worst.status,
+    label:
+      worst.status === 'error'
+        ? 'limit reached'
+        : worst.status === 'warn'
+          ? 'limit low'
+          : 'limits ok',
+    detail: detailParts.length ? detailParts.join(' · ') : worst.detail,
+    remainingPercent: lowestKnownRemaining(known),
+    raw: {
+      fiveHour: limits.fiveHour.raw,
+      monthly: limits.monthly.raw,
+      other: limits.other.map((limit) => limit.raw)
+    }
+  };
+}
+
+function compareLimitSeverity(left: UsageLimit, right: UsageLimit): number {
+  const severity = (limit: UsageLimit): number =>
+    limit.status === 'error' ? 0 : limit.status === 'warn' ? 1 : limit.status === 'ok' ? 2 : 3;
+  const byStatus = severity(left) - severity(right);
+  if (byStatus !== 0) return byStatus;
+  const leftRemaining = left.remainingPercent ?? Number.POSITIVE_INFINITY;
+  const rightRemaining = right.remainingPercent ?? Number.POSITIVE_INFINITY;
+  return leftRemaining - rightRemaining;
+}
+
+function lowestKnownRemaining(limits: UsageLimit[]): number | null {
+  let lowest: number | null = null;
+  for (const limit of limits) {
+    if (limit.remainingPercent === null) continue;
+    lowest = lowest === null ? limit.remainingPercent : Math.min(lowest, limit.remainingPercent);
+  }
   return lowest;
+}
+
+function remainingPercentFromRecord(record: Record<string, unknown>): number | null {
+  const usedPercent = numberField(record, 'used_percent') ?? numberField(record, 'usedPercentage');
+  const percent =
+    numberField(record, 'remaining_percent') ??
+    numberField(record, 'remainingPercentage') ??
+    numberField(record, 'remaining_pct') ??
+    (usedPercent !== null ? Math.max(0, 100 - usedPercent) : null);
+  if (percent !== null) return Math.max(0, Math.min(100, percent));
+
+  const remaining = numberField(record, 'remaining');
+  const limit = numberField(record, 'limit') ?? numberField(record, 'max');
+  if (remaining !== null && limit && limit > 0) {
+    return Math.max(0, Math.min(100, (remaining / limit) * 100));
+  }
+  return null;
+}
+
+function limitDisplayName(record: Record<string, unknown>, path: string[]): string {
+  return stringField(record, 'label') || stringField(record, 'name') || path.at(-1) || 'account';
 }
 
 function upsertToolMessage(messages: ChatMessage[], next: ChatMessage): void {

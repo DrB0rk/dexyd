@@ -554,6 +554,53 @@ describe('codex session transcript chat projection', () => {
     expect(usage.limits.detail).toBe('79% remaining');
   });
 
+  it('keeps Codex 5h and monthly usage limits separate', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-split-limits-'));
+    cleanupPaths.push(tempDir);
+    const workspace = join(tempDir, 'workspace');
+    const codexHome = join(tempDir, 'codex-home');
+    const sessionDir = join(codexHome, 'sessions');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+
+    const sessionId = '68686868-6868-4686-8686-686868686868';
+    writeFileSync(
+      join(sessionDir, `rollout-${sessionId}.jsonl`),
+      [
+        entry('session_meta', { cwd: workspace, timestamp: '2026-06-01T10:00:00.000Z' }),
+        entry('event_msg', {
+          type: 'token_count',
+          info: {
+            last_token_usage: { total_tokens: 100 },
+            model_context_window: 1000
+          },
+          rate_limits: {
+            five_hour: {
+              used_percent: 91,
+              window_minutes: 300
+            },
+            monthly: {
+              remaining_percent: 62,
+              window_minutes: 43200
+            }
+          }
+        }),
+        ''
+      ].join('\n')
+    );
+
+    const service = new CodexSessionService(workspace, { warn: () => undefined });
+    const usage = service.getUsageStatus(sessionId);
+
+    expect(usage.accountLimits.fiveHour.status).toBe('warn');
+    expect(usage.accountLimits.fiveHour.remainingPercent).toBe(9);
+    expect(usage.accountLimits.monthly.status).toBe('ok');
+    expect(usage.accountLimits.monthly.remainingPercent).toBe(62);
+    expect(usage.limits.status).toBe('warn');
+    expect(usage.limits.detail).toBe('5h: 9% remaining · monthly: 62% remaining');
+  });
+
 
   it('does not promote high context usage into a usage warning', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-codex-context-'));

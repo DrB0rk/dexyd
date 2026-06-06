@@ -61,6 +61,7 @@ import {
   ProjectBrowseResponse,
   ProjectSuggestResponse,
   SlashCommand,
+  UsageLimit,
   UsageStatus,
 } from './src/types/api';
 import {
@@ -138,6 +139,15 @@ type AccountUsageSample = {
   remainingPercent: number;
   raw: string;
 };
+type AccountLimitEntry = {
+  key: '5h' | 'monthly' | 'account';
+  label: string;
+  limit: UsageLimit;
+  remainingPercent: number | null;
+};
+type AccountUsageWarning = AccountLimitEntry & {
+  threshold: number;
+};
 type SystemNotification = {
   id: string;
   kind: SystemNotificationKind;
@@ -183,6 +193,7 @@ const REMOVED_PROJECTS_KEY = 'dexyd.projects.removed.v1';
 const SELECTED_PROJECT_KEY = 'dexyd.projects.selected.v1';
 const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
 const USAGE_WARNING_STATE_KEY = 'dexyd.usage.warning.state.v1';
+const CHAT_DRAFT_KEY = 'dexyd.chat.draft.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
   system: true,
@@ -193,6 +204,10 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   usage: true,
   alerts: false,
 };
+
+function chatDraftStorageKey(sessionId: string): string {
+  return `${CHAT_DRAFT_KEY}:${sessionId}`;
+}
 
 function keyboardDockHeight(event: KeyboardEvent): number {
   const frame = event.endCoordinates;
@@ -350,9 +365,10 @@ export default function App() {
   const appUpdater = useAppUpdater();
   const checkForAppUpdate = appUpdater.check;
   const installAppUpdate = appUpdater.install;
-  const usageAlertThresholdsRef = useRef<Set<number>>(new Set());
+  const usageAlertThresholdsRef = useRef<Set<string>>(new Set());
   const account5hUsageRef = useRef<Map<string, AccountUsageSample>>(new Map());
   const lastErrorNotificationRef = useRef<string | null>(null);
+  const promptFinishedNotificationKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     AsyncStorage.getItem(ONBOARDING_DISMISSED_KEY)
@@ -723,6 +739,22 @@ export default function App() {
     [addErrorHistory, notificationSettings, systemNotificationsEnabled],
   );
 
+  const notifyPromptFinished = useCallback(
+    (event: EventEnvelope | null, item: AttentionItem | null) => {
+      const notification = promptFinishedNotificationFromEvent(
+        event,
+        item,
+        sessions.sessions,
+      );
+      if (!notification) return;
+      const key = promptFinishedNotificationKey(event, notification);
+      if (promptFinishedNotificationKeysRef.current.has(key)) return;
+      promptFinishedNotificationKeysRef.current.add(key);
+      notify(notification);
+    },
+    [notify, sessions.sessions],
+  );
+
   useEffect(() => {
     const response = interactionResponseFromEvent(stream.lastEvent);
     if (response) {
@@ -741,20 +773,16 @@ export default function App() {
     }
 
     const item = attentionItemFromEvent(stream.lastEvent, sessions.sessions);
-    if (!item) return;
-    setAttentionItems(current =>
-      [item, ...current.filter(existing => existing.id !== item.id)].slice(
-        0,
-        50,
-      ),
-    );
-    if (
-      item.kind === 'update' &&
-      item.title.toLowerCase().includes('prompt finished')
-    ) {
-      notify(notificationFromAttention(item));
+    if (item) {
+      setAttentionItems(current =>
+        [item, ...current.filter(existing => existing.id !== item.id)].slice(
+          0,
+          50,
+        ),
+      );
     }
-  }, [notify, sessions.sessions, stream.lastEvent]);
+    notifyPromptFinished(stream.lastEvent, item);
+  }, [notifyPromptFinished, sessions.sessions, stream.lastEvent]);
 
   useEffect(() => {
     if (!stream.socketError) {
@@ -783,37 +811,51 @@ export default function App() {
   useEffect(() => {
     const current = usage.usage;
     if (!current) return;
-    const remaining = accountRemainingPercent(current);
-    if (remaining !== null && remaining > 50) {
-      usageAlertThresholdsRef.current.clear();
-      AsyncStorage.removeItem(USAGE_WARNING_STATE_KEY).catch(() => undefined);
+    const warnings = accountUsageWarningEntries(current);
+    if (warnings.length === 0) {
+      for (const limit of accountLimitEntries(current)) {
+        if (
+          limit.remainingPercent !== null &&
+          limit.remainingPercent > 50
+        ) {
+          usageAlertThresholdsRef.current.delete(limit.key);
+        }
+      }
       return;
     }
-    const threshold = accountUsageWarningThreshold(current);
-    if (threshold === null) return;
-    const warningKey = accountUsageWarningKey(
-      current,
-      threshold,
-      bridgeSettings.activeBridgeId || bridgeSettings.bridgeUrl,
-    );
-    if (usageAlertThresholdsRef.current.has(threshold)) return;
     AsyncStorage.getItem(USAGE_WARNING_STATE_KEY)
       .then(raw => {
         const sent = parseStringSet(raw);
-        if (sent.has(warningKey)) return;
-        sent.add(warningKey);
-        usageAlertThresholdsRef.current.add(threshold);
+        let changed = false;
+        for (const warning of warnings) {
+          const warningKey = accountUsageWarningKey(
+            current,
+            warning,
+            bridgeSettings.activeBridgeId || bridgeSettings.bridgeUrl,
+          );
+          const memoryKey = `${warning.key}:${warning.threshold}`;
+          if (
+            usageAlertThresholdsRef.current.has(memoryKey) ||
+            sent.has(warningKey)
+          ) {
+            continue;
+          }
+          sent.add(warningKey);
+          usageAlertThresholdsRef.current.add(memoryKey);
+          changed = true;
+          notify({
+            id: `account-usage-${warning.key}-${warning.threshold}`,
+            kind: 'usage',
+            title: `${warning.label} usage warning: below ${warning.threshold}%`,
+            body: accountUsageWarningBody(warning),
+            sessionId: current.sessionId,
+          });
+        }
+        if (!changed) return;
         AsyncStorage.setItem(
           USAGE_WARNING_STATE_KEY,
           JSON.stringify([...sent].slice(-80)),
         ).catch(() => undefined);
-        notify({
-          id: `account-usage-${threshold}`,
-          kind: 'usage',
-          title: `Account usage warning: below ${threshold}%`,
-          body: accountUsageWarningBody(current, threshold),
-          sessionId: current.sessionId,
-        });
       })
       .catch(() => undefined);
   }, [
@@ -2084,6 +2126,8 @@ function ChatScreen({
   const scrollRef = useRef<FlatList<ChatMessage> | null>(null);
   const nearBottomRef = useRef(true);
   const latestButtonVisibleRef = useRef(false);
+  const draftReadyRef = useRef(false);
+  const draftSessionRef = useRef<string | null>(null);
   const { height: windowHeight } = useWindowDimensions();
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
@@ -2199,6 +2243,48 @@ function ChatScreen({
   }, [activeSession?.id, setLatestButtonVisible]);
 
   useEffect(() => {
+    const sessionId = activeSession?.id ?? null;
+    draftReadyRef.current = false;
+    draftSessionRef.current = sessionId;
+    if (!sessionId) {
+      setText('');
+      draftReadyRef.current = true;
+      return undefined;
+    }
+
+    let cancelled = false;
+    AsyncStorage.getItem(chatDraftStorageKey(sessionId))
+      .then(value => {
+        if (cancelled || draftSessionRef.current !== sessionId) return;
+        setText(value ?? '');
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled && draftSessionRef.current === sessionId) {
+          draftReadyRef.current = true;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession?.id]);
+
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    if (!sessionId || !draftReadyRef.current) return undefined;
+    const timer = setTimeout(() => {
+      const key = chatDraftStorageKey(sessionId);
+      const value = text;
+      const action = value.trim()
+        ? AsyncStorage.setItem(key, value)
+        : AsyncStorage.removeItem(key);
+      action.catch(() => undefined);
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [activeSession?.id, text]);
+
+  useEffect(() => {
     if (keyboardLift > 0 && nearBottomRef.current) {
       scrollToLatest(false);
     }
@@ -2306,6 +2392,11 @@ function ChatScreen({
     if (!ok) {
       // Keep the composer cleared to avoid text jumping back in after a failed send.
       return;
+    }
+    if (activeSession?.id) {
+      AsyncStorage.removeItem(chatDraftStorageKey(activeSession.id)).catch(
+        () => undefined,
+      );
     }
     scrollToLatest();
   };
@@ -3715,31 +3806,20 @@ function SessionsScreen({
     () => pendingAttentionBySession(attentionItems),
     [attentionItems],
   );
-  const sections = useMemo(
-    () => sessionSections(visibleSessions, pendingBySession),
+  const sortedVisibleSessions = useMemo(
+    () => sortSessionsForList(visibleSessions, pendingBySession),
     [pendingBySession, visibleSessions],
   );
   const visibleCount = visibleSessions.length;
   const sessionListItems = useMemo(() => {
-    const items: SessionListItem[] = [];
-    for (const section of sections) {
-      if (section.sessions.length === 0) continue;
-      items.push({
-        type: 'section',
-        key: `section-${section.key}`,
-        title: section.title,
-        count: section.sessions.length,
-      });
-      for (const session of section.sessions) {
-        items.push({
-          type: 'session',
-          key: `session-${session.id}`,
-          session,
-          pendingAttention: pendingBySession.get(session.id) ?? [],
-          active: activeSessionId === session.id,
-        });
-      }
-    }
+    const items: SessionListItem[] = sortedVisibleSessions.map(session => ({
+      type: 'session',
+      key: `session-${session.id}`,
+      session,
+      pendingAttention: pendingBySession.get(session.id) ?? [],
+      active: activeSessionId === session.id,
+    }));
+
     if (visibleCount === 0 && hiddenSessions.length > 0) {
       items.push({ type: 'hidden-empty', key: 'hidden-empty' });
     }
@@ -3751,7 +3831,7 @@ function SessionsScreen({
         showHidden,
       });
       if (showHidden) {
-        for (const session of hiddenSessions) {
+        for (const session of sortSessionsForList(hiddenSessions, pendingBySession)) {
           items.push({
             type: 'hidden-session',
             key: `hidden-session-${session.id}`,
@@ -3767,8 +3847,8 @@ function SessionsScreen({
     activeSessionId,
     hiddenSessions,
     pendingBySession,
-    sections,
     showHidden,
+    sortedVisibleSessions,
     visibleCount,
   ]);
 
@@ -3784,20 +3864,13 @@ function SessionsScreen({
 
   const renderSessionItem = useCallback(
     ({ item }: { item: SessionListItem }) => {
-      if (item.type === 'section') {
-        return (
-          <View style={styles.sessionSectionHeader}>
-            <Text style={styles.sessionSectionTitle}>{item.title}</Text>
-            <Text style={styles.sessionSectionCount}>{item.count}</Text>
-          </View>
-        );
-      }
+      if (item.type === 'section') return null;
 
       if (item.type === 'hidden-empty') {
         return (
-          <View style={styles.sessionSection}>
-            <Text style={styles.sessionEmptyText}>
-              Only hidden Dexyd helper sessions exist in this project.
+          <View style={styles.sessionInlineNote}>
+            <Text style={styles.sessionInlineNoteText}>
+              Only hidden helper sessions exist here.
             </Text>
           </View>
         );
@@ -3805,21 +3878,19 @@ function SessionsScreen({
 
       if (item.type === 'hidden-toggle') {
         return (
-          <View style={styles.hiddenSessionsBlock}>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setShowHidden(open => !open)}
-              style={({ pressed }) => [
-                styles.hiddenSessionsHeader,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text style={styles.hiddenSessionsTitle}>Hidden sessions</Text>
-              <Text style={styles.hiddenSessionsCount}>
-                {item.count} · {item.showHidden ? 'hide' : 'show'}
-              </Text>
-            </Pressable>
-          </View>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setShowHidden(open => !open)}
+            style={({ pressed }) => [
+              styles.hiddenSessionsHeader,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.hiddenSessionsTitle}>
+              {item.showHidden ? 'Hide helper sessions' : 'Show helper sessions'}
+            </Text>
+            <Text style={styles.hiddenSessionsCount}>{item.count}</Text>
+          </Pressable>
         );
       }
 
@@ -3852,17 +3923,18 @@ function SessionsScreen({
         contentContainerStyle={styles.emptyFill}
         refreshControl={refreshControl}
       >
-        <Pressable
-          style={styles.emptyTapArea}
-          onPress={() => onRefresh().catch(() => undefined)}
-        >
-          <Text style={styles.sessionEmptyTitle}>No sessions here</Text>
-          <Text style={styles.sessionEmptyText}>
-            {selectedProject.label} has no Codex sessions yet. Pull to refresh
-            or tap + to create one.
-          </Text>
-          {error ? <Text style={styles.errorLine}>{error}</Text> : null}
-        </Pressable>
+        <AnimatedEmptyState>
+          <Pressable
+            style={styles.emptyTapArea}
+            onPress={() => onRefresh().catch(() => undefined)}
+          >
+            <Text style={styles.sessionEmptyTitle}>No sessions</Text>
+            <Text style={styles.sessionEmptyText}>
+              Pull to refresh or tap + to start one in {selectedProject.label}.
+            </Text>
+            {error ? <Text style={styles.errorLine}>{error}</Text> : null}
+          </Pressable>
+        </AnimatedEmptyState>
       </ScrollView>
     );
   }
@@ -3874,18 +3946,13 @@ function SessionsScreen({
       keyExtractor={item => item.key}
       renderItem={renderSessionItem}
       ListHeaderComponent={
-        <View>
+        <View style={styles.sessionHeaderWrap}>
           {connectivity === 'offline' ? (
-            <Text style={styles.offlineBanner}>
-              Bridge offline · showing saved sessions
-            </Text>
+            <Text style={styles.offlineBanner}>Offline · saved sessions</Text>
           ) : connectivity === 'error' ? (
-            <Text style={styles.errorLine}>
-              Could not refresh sessions. Showing saved data.
-            </Text>
+            <Text style={styles.errorLine}>Refresh failed · showing saved data</Text>
           ) : null}
           {error ? <Text style={styles.errorLine}>{error}</Text> : null}
-          {usage ? <SessionUsageSummary usage={usage} /> : null}
           <View style={styles.sessionProjectSummary}>
             <View style={styles.sessionProjectHeader}>
               <View style={styles.sessionProjectTitleBlock}>
@@ -3893,13 +3960,26 @@ function SessionsScreen({
                   {selectedProject.label}
                 </Text>
                 <Text style={styles.sessionProjectPath} numberOfLines={1}>
-                  {selectedProject.detail}
+                  {visibleCount} session{visibleCount === 1 ? '' : 's'} · {projectPathShortLabel(selectedProject.detail)}
                 </Text>
               </View>
-              <Text style={styles.sessionProjectCount} numberOfLines={1}>
-                {visibleCount} session{visibleCount === 1 ? '' : 's'}
-              </Text>
+              <View style={styles.sessionHeaderStatus}>
+                <View
+                  style={[
+                    styles.sessionHeaderDot,
+                    { backgroundColor: connectivityColor(connectivity) },
+                  ]}
+                />
+                <Text style={styles.sessionHeaderStatusText}>
+                  {connectivity === 'online' ? 'live' : connectivity}
+                </Text>
+              </View>
             </View>
+            {usage && usage.limits.status !== 'ok' && usage.limits.status !== 'unknown' ? (
+              <Text style={styles.sessionUsageInline} numberOfLines={1}>
+                Account usage · {accountUsageLabel(usage)}
+              </Text>
+            ) : null}
           </View>
         </View>
       }
@@ -3915,31 +3995,31 @@ function SessionsScreen({
   );
 }
 
-function SessionUsageSummary({ usage }: { usage: UsageStatus }) {
-  const remaining = accountRemainingPercent(usage);
-  const accountText = accountUsageLabel(usage);
-  const tone = usage.limits.status;
+function AnimatedEmptyState({ children }: { children: React.ReactNode }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(8)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY]);
 
   return (
-    <View
-      style={[
-        styles.sessionUsageSummary,
-        tone === 'warn' && styles.sessionUsageSummaryWarn,
-        tone === 'error' && styles.sessionUsageSummaryError,
-      ]}
+    <Animated.View
+      style={{ opacity, transform: [{ translateY }] }}
     >
-      <View style={styles.sessionUsageSummaryText}>
-        <Text style={styles.sessionUsageTitle}>Account usage</Text>
-        <Text style={styles.sessionUsageMeta} numberOfLines={1}>
-          {accountText}
-        </Text>
-      </View>
-      {remaining !== null ? (
-        <Text style={styles.sessionUsagePercent}>
-          {Math.max(0, Math.round(remaining))}% left
-        </Text>
-      ) : null}
-    </View>
+      {children}
+    </Animated.View>
   );
 }
 
@@ -3960,65 +4040,90 @@ const SessionListRow = React.memo(function SessionListRow({
 }) {
   const status = sessionUiStatus(session, pendingAttention);
   const contextLabel = sessionContextLabel(session);
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(6)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY]);
 
   return (
-    <Pressable
-      onPress={() => onSelect(session.id)}
-      style={({ pressed }) => [
-        styles.terminalRow,
-        active && styles.terminalRowActive,
-        pressed && styles.pressed,
-      ]}
-    >
-      <View style={styles.terminalTextBlock}>
-        <Text style={styles.terminalName} numberOfLines={1}>
-          {session.title || shortId(session.id)}
-        </Text>
-        <Text style={styles.terminalMeta}>
-          {session.omx ? 'omx' : session.source || 'codex'} ·{' '}
-          {formatDate(session.updatedAt)}
-          {contextLabel ? ` · ${contextLabel}` : ''}
-        </Text>
-      </View>
-      <View style={styles.sessionActions}>
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+      <Pressable
+        onPress={() => onSelect(session.id)}
+        style={({ pressed }) => [
+          styles.terminalRow,
+          active && styles.terminalRowActive,
+          pressed && styles.terminalRowPressed,
+        ]}
+      >
         <View
           style={[
-            styles.sessionStatusPill,
-            status.kind === 'ok' && styles.sessionStatusOk,
-            status.kind === 'warn' && styles.sessionStatusWarn,
-            status.kind === 'error' && styles.sessionStatusError,
+            styles.sessionStatusRail,
+            { backgroundColor: statusColor(status.kind) },
           ]}
-        >
-          <View
-            style={[
-              styles.sessionStatusDot,
-              { backgroundColor: statusColor(status.kind) },
-            ]}
-          />
-          <Text style={styles.sessionStatusText}>{status.label}</Text>
+        />
+        <View style={styles.terminalTextBlock}>
+          <View style={styles.sessionTitleLine}>
+            <Text style={styles.terminalName} numberOfLines={1}>
+              {session.title || shortId(session.id)}
+            </Text>
+            {pendingAttention.length > 0 ? (
+              <View style={styles.sessionAttentionDot} />
+            ) : null}
+          </View>
+          <Text style={styles.terminalMeta} numberOfLines={1}>
+            {status.detail} · {formatDate(session.updatedAt)}
+            {contextLabel ? ` · ${contextLabel}` : ''}
+          </Text>
         </View>
-        {session.status === 'running' ? (
+        <View style={styles.sessionActions}>
+          <Text
+            style={[
+              styles.sessionStatusText,
+              status.kind === 'ok' && styles.sessionStatusTextOk,
+              status.kind === 'warn' && styles.sessionStatusTextWarn,
+              status.kind === 'error' && styles.sessionStatusTextError,
+            ]}
+          >
+            {status.label}
+          </Text>
+          {session.status === 'running' ? (
+            <Pressable
+              onPress={event => {
+                event.stopPropagation();
+                onCancel(session.id);
+              }}
+              hitSlop={12}
+              style={styles.sessionMiniAction}
+            >
+              <Text style={styles.stopText}>stop</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             onPress={event => {
               event.stopPropagation();
-              onCancel(session.id);
+              onDelete(session.id);
             }}
-            hitSlop={10}
+            hitSlop={12}
+            style={styles.sessionMiniAction}
           >
-            <Text style={styles.stopText}>stop</Text>
+            <Text style={styles.deleteText}>×</Text>
           </Pressable>
-        ) : null}
-        <Pressable
-          onPress={event => {
-            event.stopPropagation();
-            onDelete(session.id);
-          }}
-          hitSlop={10}
-        >
-          <Text style={styles.deleteText}>delete</Text>
-        </Pressable>
-      </View>
-    </Pressable>
+        </View>
+      </Pressable>
+    </Animated.View>
   );
 });
 
@@ -4067,54 +4172,46 @@ function sessionBelongsToProject(
   );
 }
 
-function sortSessionsByUpdatedAt(items: DexydSession[]): DexydSession[] {
-  return [...items].sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-  );
-}
-
-function sessionSections(
+function sortSessionsForList(
   sessions: DexydSession[],
   pendingBySession: Map<string, AttentionItem[]>,
-) {
-  const waiting: DexydSession[] = [];
-  const active: DexydSession[] = [];
-  const errored: DexydSession[] = [];
-  const recent: DexydSession[] = [];
+): DexydSession[] {
+  return [...sessions].sort((left, right) => {
+    const byPriority =
+      sessionListPriority(left, pendingBySession) -
+      sessionListPriority(right, pendingBySession);
+    if (byPriority !== 0) return byPriority;
+    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  });
+}
 
-  for (const session of sessions) {
-    const status = sessionUiStatus(
-      session,
-      pendingBySession.get(session.id) ?? [],
-    );
-    if (status.kind === 'warn') waiting.push(session);
-    else if (session.status === 'running') active.push(session);
-    else if (status.kind === 'error') errored.push(session);
-    else recent.push(session);
-  }
+function sessionListPriority(
+  session: DexydSession,
+  pendingBySession: Map<string, AttentionItem[]>,
+): number {
+  const status = sessionUiStatus(
+    session,
+    pendingBySession.get(session.id) ?? [],
+  );
+  if (status.kind === 'warn') return 0;
+  if (session.status === 'running') return 1;
+  if (status.kind === 'error') return 2;
+  return 3;
+}
 
-  return [
-    {
-      key: 'waiting',
-      title: 'Waiting for you',
-      sessions: sortSessionsByUpdatedAt(waiting),
-    },
-    {
-      key: 'active',
-      title: 'Working',
-      sessions: sortSessionsByUpdatedAt(active),
-    },
-    {
-      key: 'errored',
-      title: 'Needs attention',
-      sessions: sortSessionsByUpdatedAt(errored),
-    },
-    {
-      key: 'recent',
-      title: 'Recent',
-      sessions: sortSessionsByUpdatedAt(recent),
-    },
-  ];
+function connectivityColor(connectivity: 'idle' | 'online' | 'offline' | 'error') {
+  if (connectivity === 'online') return palette.ok;
+  if (connectivity === 'offline') return palette.dim;
+  if (connectivity === 'error') return palette.error;
+  return palette.muted;
+}
+
+function projectPathShortLabel(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '.') return 'workspace';
+  const parts = trimmed.split('/').filter(Boolean);
+  if (parts.length <= 2) return trimmed;
+  return `…/${parts.slice(-2).join('/')}`;
 }
 
 function pendingAttentionBySession(
@@ -5464,13 +5561,24 @@ function UsagePanel({
         tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
       <StatusRow
-        label="Limits"
-        value={usage?.limits.label ?? 'unknown'}
-        tone={usageStatusTone(usage?.limits.status)}
+        label="5h limit"
+        value={
+          usage?.accountLimits?.fiveHour
+            ? usageLimitValue(usage.accountLimits.fiveHour)
+            : 'unknown'
+        }
+        tone={usageStatusTone(usage?.accountLimits?.fiveHour.status)}
       />
-      {usage?.limits.detail ? (
-        <Text style={styles.settingHint}>{usage.limits.detail}</Text>
-      ) : null}
+      <StatusRow
+        label="Monthly"
+        value={
+          usage?.accountLimits?.monthly
+            ? usageLimitValue(usage.accountLimits.monthly)
+            : 'unknown'
+        }
+        tone={usageStatusTone(usage?.accountLimits?.monthly.status)}
+      />
+      {usage?.limits.detail ? <Text style={styles.settingHint}>{usage.limits.detail}</Text> : null}
       <View
         style={[
           styles.usageMeter,
@@ -5816,26 +5924,65 @@ function attentionItemFromEvent(
   return null;
 }
 
-function notificationFromAttention(item: AttentionItem): SystemNotification {
-  const kind: SystemNotificationKind =
-    item.kind === 'message'
-      ? 'response'
-      : item.kind === 'approval'
-      ? 'approval'
-      : item.kind === 'question'
-      ? 'question'
-      : item.title.toLowerCase().includes('failed')
-      ? 'alert'
-      : 'response';
+
+function promptFinishedNotificationFromEvent(
+  event: EventEnvelope | null,
+  item: AttentionItem | null,
+  sessions: DexydSession[],
+): SystemNotification | null {
+  if (!event) return null;
+  const eventType = event.eventType.toLowerCase();
+  if (
+    eventType !== 'chat.turn.completed' &&
+    eventType !== 'chat.message.assistant'
+  ) {
+    return null;
+  }
+
+  const timestampMs = new Date(event.timestamp).getTime();
+  if (Number.isFinite(timestampMs)) {
+    const ageMs = Date.now() - timestampMs;
+    if (ageMs > 30 * 60 * 1000) return null;
+  }
+
+  const session = sessions.find(candidate => candidate.id === event.sessionId);
+  const sessionTitle = session?.title || session?.workspacePath || 'Session';
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const responseBody =
+    typeof payload.content === 'string' && payload.content.trim()
+      ? `Response ready: ${payload.content.trim().replace(/\s+/g, ' ').slice(0, 120)}`
+      : '';
 
   return {
-    id: `notice-${item.id}`,
-    kind,
-    title: item.title,
-    body: item.body,
-    timestamp: item.timestamp,
-    sessionId: item.sessionId,
+    id: `prompt-finished-${promptFinishedEventIdentity(event)}`,
+    kind: 'response',
+    title: `Prompt finished · ${sessionTitle}`,
+    body:
+      item?.body ||
+      responseBody ||
+      'The agent finished the current prompt.',
+    timestamp: event.timestamp,
+    sessionId: event.sessionId,
   };
+}
+
+function promptFinishedNotificationKey(
+  event: EventEnvelope | null,
+  notification: SystemNotification,
+): string {
+  return `${notification.sessionId ?? 'global'}:${promptFinishedEventIdentity(
+    event,
+  )}`;
+}
+
+function promptFinishedEventIdentity(event: EventEnvelope | null): string {
+  if (!event) return 'unknown';
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const turnId = typeof payload.turnId === 'string' ? payload.turnId : '';
+  if (turnId) return turnId;
+  const id = typeof payload.id === 'string' ? payload.id : '';
+  if (id) return id;
+  return String(event.sequence);
 }
 
 function shouldSendSystemNotification(
@@ -5995,9 +6142,19 @@ function usageSummary(usage: UsageStatus): string {
 }
 
 function accountUsageLabel(usage: UsageStatus): string {
-  const remaining = accountRemainingPercent(usage);
-  if (remaining !== null) {
-    return `account ${Math.max(0, Math.round(remaining))}% left`;
+  const entries = accountLimitEntries(usage).filter(
+    entry => entry.key !== 'account' && entry.remainingPercent !== null,
+  );
+  if (entries.length) {
+    return entries
+      .map(
+        entry =>
+          `${entry.label} ${Math.max(
+            0,
+            Math.round(entry.remainingPercent ?? 0),
+          )}%`,
+      )
+      .join(' · ');
   }
   if (usage.limits.label && usage.limits.label !== 'limits unknown') {
     return usage.limits.label;
@@ -6005,10 +6162,58 @@ function accountUsageLabel(usage: UsageStatus): string {
   return 'account usage unknown';
 }
 
-function accountUsageWarningThreshold(
+function usageLimitValue(limit: UsageLimit): string {
+  const remaining = accountLimitRemainingPercent(limit);
+  if (remaining !== null) {
+    return `${Math.max(0, Math.round(remaining))}% left`;
+  }
+  return limit.label && !/unknown/i.test(limit.label) ? limit.label : 'unknown';
+}
+
+function accountLimitEntries(usage: UsageStatus | null): AccountLimitEntry[] {
+  if (!usage) return [];
+  const entries: AccountLimitEntry[] = [];
+  const fiveHour = usage.accountLimits?.fiveHour;
+  const monthly = usage.accountLimits?.monthly;
+  if (fiveHour) {
+    entries.push({
+      key: '5h',
+      label: '5h',
+      limit: fiveHour,
+      remainingPercent: accountLimitRemainingPercent(fiveHour),
+    });
+  }
+  if (monthly) {
+    entries.push({
+      key: 'monthly',
+      label: 'Monthly',
+      limit: monthly,
+      remainingPercent: accountLimitRemainingPercent(monthly),
+    });
+  }
+  if (entries.length) return entries;
+  return [
+    {
+      key: 'account',
+      label: 'Account',
+      limit: usage.limits,
+      remainingPercent: accountLimitRemainingPercent(usage.limits),
+    },
+  ];
+}
+
+function accountUsageWarningEntries(
   usage: UsageStatus | null,
-): number | null {
-  const remaining = accountRemainingPercent(usage);
+): AccountUsageWarning[] {
+  return accountLimitEntries(usage)
+    .map(entry => {
+      const threshold = accountUsageWarningThreshold(entry.remainingPercent);
+      return threshold === null ? null : { ...entry, threshold };
+    })
+    .filter((entry): entry is AccountUsageWarning => entry !== null);
+}
+
+function accountUsageWarningThreshold(remaining: number | null): number | null {
   if (remaining === null) return null;
   if (remaining <= 10) return 10;
   if (remaining <= 25) return 25;
@@ -6031,25 +6236,22 @@ function parseStringSet(raw: string | null): Set<string> {
 
 function accountUsageWarningKey(
   usage: UsageStatus,
-  threshold: number,
+  warning: AccountUsageWarning,
   computerKey: string,
 ): string {
-  const label = usage.limits.label || 'account';
-  const detail = usage.limits.detail || '';
-  return `${computerKey || 'default'}:${label}:${detail}:${threshold}`;
+  const detail = warning.limit.detail || usage.limits.detail || '';
+  return `${computerKey || 'default'}:${warning.key}:${warning.label}:${detail}:${
+    warning.threshold
+  }`;
 }
 
-function accountUsageWarningBody(
-  usage: UsageStatus,
-  threshold: number,
-): string {
-  const remaining = accountRemainingPercent(usage);
+function accountUsageWarningBody(warning: AccountUsageWarning): string {
+  const remaining = warning.remainingPercent;
   const remainingText =
     remaining === null
-      ? `below ${threshold}% remaining`
+      ? `below ${warning.threshold}% remaining`
       : `${Math.max(0, Math.round(remaining))}% remaining`;
-  const label = usage.limits.label ? ` · ${usage.limits.label}` : '';
-  return `Account usage is ${remainingText}${label}`;
+  return `${warning.label} usage is ${remainingText}`;
 }
 
 function parseAccount5hUsage(value: string): AccountUsageSample | null {
@@ -6081,11 +6283,11 @@ function isFiveHourLimitRefresh(
   );
 }
 
-function accountRemainingPercent(usage: UsageStatus | null): number | null {
-  if (!usage) return null;
-  const rawRemaining = lowestRemainingPercent(usage.limits.raw);
+function accountLimitRemainingPercent(limit: UsageLimit): number | null {
+  if (typeof limit.remainingPercent === 'number') return limit.remainingPercent;
+  const rawRemaining = lowestRemainingPercent(limit.raw);
   if (rawRemaining !== null) return rawRemaining;
-  const match = usage.limits.detail.match(/(\d+(?:\.\d+)?)%\s+remaining/i);
+  const match = limit.detail.match(/(\d+(?:\.\d+)?)%\s+remaining/i);
   if (!match) return null;
   const parsed = Number(match[1]);
   return Number.isFinite(parsed) ? parsed : null;
@@ -7775,18 +7977,21 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   terminalList: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingTop: 2,
     paddingBottom: 18,
   },
+  sessionHeaderWrap: {
+    paddingBottom: 6,
+  },
   sessionProjectSummary: {
-    paddingBottom: 10,
-    marginBottom: 4,
+    paddingVertical: 8,
+    marginBottom: 2,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: palette.line,
   },
   sessionProjectHeader: {
-    minHeight: 34,
+    minHeight: 30,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -7798,9 +8003,9 @@ const styles = StyleSheet.create({
   },
   sessionProjectName: {
     color: palette.text,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '900',
-    letterSpacing: -0.25,
+    letterSpacing: -0.2,
   },
   sessionProjectCount: {
     color: palette.text,
@@ -7811,6 +8016,40 @@ const styles = StyleSheet.create({
     color: palette.dim,
     fontSize: 11,
     marginTop: 2,
+  },
+  sessionHeaderStatus: {
+    minHeight: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+    backgroundColor: '#222224',
+  },
+  sessionHeaderDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  sessionHeaderStatusText: {
+    color: palette.muted,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  sessionUsageInline: {
+    marginTop: 6,
+    color: '#d7b56c',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  sessionInlineNote: {
+    paddingVertical: 14,
+  },
+  sessionInlineNoteText: {
+    color: palette.dim,
+    fontSize: 12,
+    textAlign: 'center',
   },
   sessionSection: {
     marginTop: 10,
@@ -7886,37 +8125,62 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   terminalRow: {
-    minHeight: 44,
+    minHeight: 50,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 9,
+    marginVertical: 1,
+    paddingVertical: 8,
+    paddingRight: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.line,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   terminalRowActive: {
-    backgroundColor: '#1f2422',
-    borderBottomColor: '#344139',
+    backgroundColor: 'rgba(118, 180, 142, 0.07)',
+  },
+  terminalRowPressed: {
+    transform: [{ scale: 0.992 }],
+    opacity: 0.86,
+  },
+  sessionStatusRail: {
+    width: 3,
+    height: 28,
+    borderRadius: 3,
+    marginRight: 9,
+    opacity: 0.85,
   },
   terminalTextBlock: {
     flex: 1,
     minWidth: 0,
     paddingRight: 10,
   },
+  sessionTitleLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   terminalName: {
+    flexShrink: 1,
     color: palette.text,
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
+    letterSpacing: -0.1,
+  },
+  sessionAttentionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#f1c36d',
   },
   terminalMeta: {
     color: palette.dim,
     fontSize: 11,
-    marginTop: 2,
+    marginTop: 3,
   },
   sessionActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
+    gap: 6,
   },
   sessionStatusPill: {
     minHeight: 20,
@@ -7935,7 +8199,24 @@ const styles = StyleSheet.create({
   sessionStatusText: {
     color: palette.muted,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  sessionStatusTextOk: {
+    color: palette.ok,
+  },
+  sessionStatusTextWarn: {
+    color: '#e4bd66',
+  },
+  sessionStatusTextError: {
+    color: palette.error,
+  },
+  sessionMiniAction: {
+    minWidth: 26,
+    minHeight: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
   },
   deletedSessionRow: {
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -7957,25 +8238,25 @@ const styles = StyleSheet.create({
   },
   hiddenSessionsBlock: {
     marginTop: 10,
-    paddingTop: 4,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: palette.line,
   },
   hiddenSessionsHeader: {
-    minHeight: 38,
+    minHeight: 36,
+    marginTop: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.06)',
   },
   hiddenSessionsTitle: {
-    color: palette.muted,
-    fontSize: 13,
-    fontWeight: '900',
+    color: palette.dim,
+    fontSize: 12,
+    fontWeight: '800',
   },
   hiddenSessionsCount: {
     color: palette.dim,
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '800',
   },
   stopText: {
     color: palette.error,

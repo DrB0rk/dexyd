@@ -89,6 +89,15 @@ export type TokenUsage = {
   totalTokens: number;
 };
 
+export type UsageLimit = {
+  kind: 'fiveHour' | 'monthly' | 'other' | 'aggregate';
+  status: 'ok' | 'warn' | 'error' | 'unknown';
+  label: string;
+  detail: string;
+  remainingPercent: number | null;
+  raw: unknown;
+};
+
 export type UsageStatus = {
   status: 'ok' | 'warn' | 'error' | 'unknown';
   updatedAt: string | null;
@@ -101,12 +110,12 @@ export type UsageStatus = {
   };
   total: TokenUsage | null;
   last: TokenUsage | null;
-  limits: {
-    status: 'ok' | 'warn' | 'error' | 'unknown';
-    label: string;
-    detail: string;
-    raw: unknown;
+  accountLimits?: {
+    fiveHour: UsageLimit;
+    monthly: UsageLimit;
+    other: UsageLimit[];
   };
+  limits: UsageLimit;
 };
 
 export type CodexAuthAccount = {

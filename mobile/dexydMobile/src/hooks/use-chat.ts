@@ -879,19 +879,26 @@ export function useChat(
             );
           if (sent.status === 'queued') {
             const queued = eventToQueuedMessage(response.userEvent);
-            if (queued)
+            if (queued) {
               setQueuedMessages(current =>
                 mergeQueuedMessages(current, queued),
               );
+            }
+            setMessages(current =>
+              nextChatMessages(
+                current,
+                current.filter(item => item.id !== optimistic.id),
+              ),
+            );
           } else {
             pendingUserMessagesRef.current = dedupeMessages([
               ...pendingUserMessagesRef.current,
               sent,
             ]).filter(item => item.role === 'user');
+            setMessages(current =>
+              nextChatMessages(current, mergeMessage(current, sent)),
+            );
           }
-          setMessages(current =>
-            nextChatMessages(current, mergeMessage(current, sent)),
-          );
         }
         setTimeout(() => {
           refresh(true).catch(() => undefined);

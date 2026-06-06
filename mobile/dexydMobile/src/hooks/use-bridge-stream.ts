@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { normalizeBridgeHttpUrl } from '../config/bridge';
 import { EventEnvelope } from '../types/dexyd';
@@ -37,6 +37,36 @@ export function useBridgeStream(
   const pollingRef = useRef(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
   const streamKeyRef = useRef('');
+  const eventQueueRef = useRef<EventEnvelope[]>([]);
+  const eventDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearQueuedEvents = useCallback(() => {
+    eventQueueRef.current = [];
+    if (eventDrainTimerRef.current) {
+      clearTimeout(eventDrainTimerRef.current);
+      eventDrainTimerRef.current = null;
+    }
+  }, []);
+
+  const drainQueuedEvents = useCallback(() => {
+    eventDrainTimerRef.current = null;
+    const next = eventQueueRef.current.shift();
+    if (!next) return;
+    setLastEvent(next);
+    if (eventQueueRef.current.length > 0) {
+      eventDrainTimerRef.current = setTimeout(drainQueuedEvents, 0);
+    }
+  }, []);
+
+  const enqueueEvent = useCallback(
+    (event: EventEnvelope) => {
+      eventQueueRef.current.push(event);
+      if (!eventDrainTimerRef.current) {
+        eventDrainTimerRef.current = setTimeout(drainQueuedEvents, 0);
+      }
+    },
+    [drainQueuedEvents],
+  );
 
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
@@ -46,6 +76,7 @@ export function useBridgeStream(
     if (!accessToken) {
       setSocketState('idle');
       setLastEvent(null);
+      clearQueuedEvents();
       setSocketError(null);
       lastSeenSequenceRef.current = 0;
       reconnectAttemptsRef.current = 0;
@@ -126,7 +157,7 @@ export function useBridgeStream(
               lastSeenSequenceRef.current,
               sequence,
             );
-            setLastEvent({
+            enqueueEvent({
               sequence,
               eventType: 'replay.expired',
               source: 'stream',
@@ -146,7 +177,7 @@ export function useBridgeStream(
               lastSeenSequenceRef.current,
               event.sequence,
             );
-            setLastEvent(event);
+            enqueueEvent(event);
           }
         }
         lastSeenSequenceRef.current = Math.max(
@@ -206,6 +237,7 @@ export function useBridgeStream(
         pollingRef.current = false;
         if (retryTimer) clearTimeout(retryTimer);
         if (pollTimer) clearTimeout(pollTimer);
+        clearQueuedEvents();
       };
     }
 
@@ -266,7 +298,7 @@ export function useBridgeStream(
             lastSeenSequenceRef.current,
             parsed.sequence,
           );
-          setLastEvent(parsed);
+          enqueueEvent(parsed);
           return;
         }
         if (
@@ -287,7 +319,7 @@ export function useBridgeStream(
             lastSeenSequenceRef.current,
             parsed.snapshot.sequence,
           );
-          setLastEvent({
+          enqueueEvent({
             sequence: parsed.snapshot.sequence,
             eventType: 'replay.expired',
             source: 'stream',
@@ -307,9 +339,10 @@ export function useBridgeStream(
       pollingRef.current = false;
       if (retryTimer) clearTimeout(retryTimer);
       if (pollTimer) clearTimeout(pollTimer);
+      clearQueuedEvents();
       socket.close(1000, 'client reconnect/reset');
     };
-  }, [accessToken, httpBaseUrl, retryNonce, wsBaseUrl]);
+  }, [accessToken, clearQueuedEvents, enqueueEvent, httpBaseUrl, retryNonce, wsBaseUrl]);
 
   useEffect(() => {
     if (!accessToken) return undefined;
