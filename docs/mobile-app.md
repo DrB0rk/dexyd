@@ -68,7 +68,7 @@ Common statuses:
 | `done` / `completed` | The last run completed. |
 | `stopped` / `cancelled` | The session was stopped. |
 
-Swipe down to refresh Sessions. Cached sessions remain visible if the bridge is temporarily offline.
+Swipe down to refresh Sessions. Cached sessions remain visible if the bridge is temporarily offline. If you leave the page while a refresh is still running, the refresh finishes in the background without navigating you back.
 
 ## Creating sessions
 
@@ -132,7 +132,7 @@ Inbox is not a general session list. It is only for items that need attention:
 - connection problems;
 - account usage warnings when remaining usage crosses important thresholds.
 
-Swipe down to refresh Inbox.
+Swipe down to refresh Inbox. Refreshes can finish in the background after you switch pages.
 
 ## Approvals and questions
 

@@ -45,6 +45,7 @@ export type QueuedChatMessage = {
 };
 
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const QUEUE_DRAIN_DELAY_MS = 50;
 
 export class CodexChatService {
   private readonly launch: RuntimeLaunch;
@@ -52,6 +53,7 @@ export class CodexChatService {
   private readonly runtimeStatuses = new Map<string, { status: SessionRecord['status']; updatedAt: string }>();
   private readonly queues = new Map<string, QueuedChatMessage[]>();
   private readonly drainingSessions = new Set<string>();
+  private readonly queueDrainTimers = new Map<string, NodeJS.Timeout>();
   private readonly cancelTimers = new WeakMap<ChildProcess, NodeJS.Timeout>();
 
   constructor(
@@ -206,6 +208,12 @@ export class CodexChatService {
   }
 
   cancelSession(sessionId: string): boolean {
+    const drainTimer = this.queueDrainTimers.get(sessionId);
+    if (drainTimer) {
+      clearTimeout(drainTimer);
+      this.queueDrainTimers.delete(sessionId);
+      this.drainingSessions.delete(sessionId);
+    }
     const children = this.activeTurns.get(sessionId);
     if (!children?.size) {
       this.setSessionStatus(sessionId, 'cancelled');
@@ -269,6 +277,20 @@ export class CodexChatService {
       }
     });
     return { item, event };
+  }
+
+  private scheduleNextQueuedTurn(session: SessionRecord): void {
+    if (this.queueDrainTimers.has(session.id)) return;
+    if ((this.queues.get(session.id) ?? []).length === 0) return;
+
+    this.drainingSessions.add(session.id);
+    const timer = setTimeout(() => {
+      this.queueDrainTimers.delete(session.id);
+      this.drainingSessions.delete(session.id);
+      this.startNextQueuedTurn(session);
+    }, QUEUE_DRAIN_DELAY_MS);
+    timer.unref();
+    this.queueDrainTimers.set(session.id, timer);
   }
 
   private startNextQueuedTurn(session: SessionRecord): void {
@@ -419,7 +441,7 @@ export class CodexChatService {
           }
           this.emitCompletion(input.session.id, input.turnId, code ?? 0, Boolean(cleanOutput), truncated);
           this.setSessionStatus(input.session.id, 'idle');
-          this.startNextQueuedTurn(input.session);
+          this.scheduleNextQueuedTurn(input.session);
         } else {
           await this.emitTurnDiff(input.session, input.turnId, turnSnapshot);
           this.emitFailure(input.session.id, input.turnId, cleanOutput || formatCodexExit(code, signal));

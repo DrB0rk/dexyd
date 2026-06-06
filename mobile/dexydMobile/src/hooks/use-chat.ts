@@ -749,6 +749,10 @@ export function useChat(
   const cacheReadyRef = useRef(false);
   const activeChatKeyRef = useRef<string | null>(null);
   const [cacheReadyVersion, setCacheReadyVersion] = useState(0);
+  const hasRunningMessages = useMemo(
+    () => messages.some(message => message.status === 'running'),
+    [messages],
+  );
 
   const refreshQueue = useCallback(async () => {
     if (!tokens || !sessionId) {
@@ -1034,15 +1038,18 @@ export function useChat(
 
   useEffect(() => {
     if (!tokens || !sessionId || !cacheReadyRef.current) return;
-    const cached: CachedChatState = {
-      messages: cacheableMessages(messages),
-      queuedMessages,
-      updatedAt: new Date().toISOString(),
-    };
-    AsyncStorage.setItem(
-      cacheKeyForChat(bridgeUrl, sessionId),
-      JSON.stringify(cached),
-    ).catch(() => undefined);
+    const timer = setTimeout(() => {
+      const cached: CachedChatState = {
+        messages: cacheableMessages(messages),
+        queuedMessages,
+        updatedAt: new Date().toISOString(),
+      };
+      AsyncStorage.setItem(
+        cacheKeyForChat(bridgeUrl, sessionId),
+        JSON.stringify(cached),
+      ).catch(() => undefined);
+    }, 250);
+    return () => clearTimeout(timer);
   }, [
     bridgeUrl,
     cacheReadyVersion,
@@ -1058,14 +1065,14 @@ export function useChat(
 
   useEffect(() => {
     if (!tokens || !sessionId) return undefined;
-    const delay = messages.some(message => message.status === 'running')
+    const delay = hasRunningMessages
       ? CHAT_ACTIVE_POLL_INTERVAL_MS
       : CHAT_POLL_INTERVAL_MS;
     const timer = setInterval(() => {
       refresh(true).catch(() => undefined);
     }, delay);
     return () => clearInterval(timer);
-  }, [messages, refresh, sessionId, tokens]);
+  }, [hasRunningMessages, refresh, sessionId, tokens]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {

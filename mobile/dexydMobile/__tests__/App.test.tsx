@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
-import App from '../App';
+import App, { refreshCodexSessionsInBackground } from '../App';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue(null),
@@ -159,4 +159,28 @@ test('renders correctly', async () => {
     ReactTestRenderer.create(<App />);
     await Promise.resolve();
   });
+});
+
+test('session refresh completion stays in the background when authenticated', async () => {
+  const refresh = jest.fn().mockResolvedValue(undefined);
+  const routeToSettings = jest.fn();
+
+  await refreshCodexSessionsInBackground(
+    { accessToken: 'access-token', refreshToken: 'refresh-token' },
+    refresh,
+    routeToSettings,
+  );
+
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(routeToSettings).not.toHaveBeenCalled();
+});
+
+test('session refresh routes unauthenticated users to settings', async () => {
+  const refresh = jest.fn().mockResolvedValue(undefined);
+  const routeToSettings = jest.fn();
+
+  await refreshCodexSessionsInBackground(null, refresh, routeToSettings);
+
+  expect(refresh).not.toHaveBeenCalled();
+  expect(routeToSettings).toHaveBeenCalledTimes(1);
 });

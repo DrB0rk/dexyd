@@ -116,6 +116,24 @@ type SessionUiStatus = {
   detail: string;
   kind: StatusKind;
 };
+type SessionListItem =
+  | { type: 'section'; key: string; title: string; count: number }
+  | {
+      type: 'session';
+      key: string;
+      session: DexydSession;
+      pendingAttention: AttentionItem[];
+      active: boolean;
+    }
+  | { type: 'hidden-empty'; key: string }
+  | { type: 'hidden-toggle'; key: string; count: number; showHidden: boolean }
+  | {
+      type: 'hidden-session';
+      key: string;
+      session: DexydSession;
+      pendingAttention: AttentionItem[];
+      active: boolean;
+    };
 type AccountUsageSample = {
   remainingPercent: number;
   raw: string;
@@ -206,9 +224,23 @@ const bottomTabOrder = tabs.map(item => item.key);
 const PAGE_SWIPE_DISTANCE = 72;
 const PAGE_SWIPE_CLAIM_DISTANCE = 28;
 const PAGE_SWIPE_VELOCITY = 0.45;
+const CHAT_INITIAL_MESSAGE_RENDER_LIMIT = 80;
+const CHAT_MESSAGE_RENDER_BATCH = 60;
 
 function storageScopeKey(base: string, scope: string): string {
   return `${base}:${scope || 'unconfigured'}`;
+}
+
+export async function refreshCodexSessionsInBackground(
+  tokens: { accessToken: string; refreshToken: string } | null,
+  refresh: () => Promise<void>,
+  routeToSettings: () => void,
+): Promise<void> {
+  if (!tokens) {
+    routeToSettings();
+    return;
+  }
+  await refresh();
 }
 
 function formatRelativeTime(value: string): string {
@@ -812,13 +844,10 @@ export default function App() {
   }, [codexAuth.status]);
 
   const refreshCodexSessions = useCallback(async () => {
-    if (!tokens) {
-      setTab('settings');
-      return;
-    }
-    await sessions.refresh();
-    setTab('sessions');
-  }, [sessions, tokens]);
+    await refreshCodexSessionsInBackground(tokens, sessions.refresh, () =>
+      setTab('settings'),
+    );
+  }, [sessions.refresh, tokens]);
 
   const onPlus = useCallback(() => {
     if (!tokens) {
@@ -2049,6 +2078,9 @@ function ChatScreen({
   );
   const [composerHeight, setComposerHeight] = useState(54);
   const [steeringQueueId, setSteeringQueueId] = useState<string | null>(null);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(
+    CHAT_INITIAL_MESSAGE_RENDER_LIMIT,
+  );
   const scrollRef = useRef<FlatList<ChatMessage> | null>(null);
   const nearBottomRef = useRef(true);
   const latestButtonVisibleRef = useRef(false);
@@ -2075,9 +2107,13 @@ function ChatScreen({
           ).slice(0, 8),
     [availableSlashCommands, commandQuery],
   );
-  const renderedMessages = useMemo(
+  const allVisibleMessages = useMemo(
     () => visibleChatMessages(chat.messages),
     [chat.messages],
+  );
+  const renderedMessages = useMemo(
+    () => allVisibleMessages.slice(0, visibleMessageCount),
+    [allVisibleMessages, visibleMessageCount],
   );
   const activeSessionKey = activeSession?.id ?? null;
   const activeSessionStatus = activeSession?.status ?? null;
@@ -2159,6 +2195,7 @@ function ChatScreen({
     setDiffViewerOpen(false);
     setSelectedDiffTurnId(null);
     setSteeringQueueId(null);
+    setVisibleMessageCount(CHAT_INITIAL_MESSAGE_RENDER_LIMIT);
   }, [activeSession?.id, setLatestButtonVisible]);
 
   useEffect(() => {
@@ -2171,10 +2208,7 @@ function ChatScreen({
     if (!activeSessionKey || activeSessionStatus !== 'running')
       return undefined;
     refreshChat(true).catch(() => undefined);
-    const timer = setInterval(() => {
-      refreshChat(true).catch(() => undefined);
-    }, 1200);
-    return () => clearInterval(timer);
+    return undefined;
   }, [activeSessionKey, activeSessionStatus, refreshChat]);
 
   useEffect(() => {
@@ -2201,6 +2235,31 @@ function ChatScreen({
       diff.refresh(turnId).catch(() => undefined);
     },
     [diff],
+  );
+  const loadOlderMessages = useCallback(() => {
+    setVisibleMessageCount(count =>
+      Math.min(count + CHAT_MESSAGE_RENDER_BATCH, allVisibleMessages.length),
+    );
+  }, [allVisibleMessages.length]);
+  const renderChatMessage = useCallback(
+    ({ item }: { item: ChatMessage }) => (
+      <MessageRow
+        message={item}
+        showDiffButton={
+          item.role === 'assistant' &&
+          item.status === 'sent' &&
+          assistantDiffMessageIds.has(item.id)
+        }
+        diffLoading={diff.loading && diff.loadingTurnId === item.turnId}
+        onViewDiff={() => openMessageDiff(item.turnId)}
+      />
+    ),
+    [
+      assistantDiffMessageIds,
+      diff.loading,
+      diff.loadingTurnId,
+      openMessageDiff,
+    ],
   );
 
   const workingInfo = workingStatusText(
@@ -2315,18 +2374,7 @@ function ChatScreen({
         data={renderedMessages}
         inverted
         keyExtractor={chatMessageKey}
-        renderItem={({ item }) => (
-          <MessageRow
-            message={item}
-            showDiffButton={
-              item.role === 'assistant' &&
-              item.status === 'sent' &&
-              assistantDiffMessageIds.has(item.id)
-            }
-            diffLoading={diff.loading && diff.loadingTurnId === item.turnId}
-            onViewDiff={() => openMessageDiff(item.turnId)}
-          />
-        )}
+        renderItem={renderChatMessage}
         ListHeaderComponent={
           <View>
             <View style={{ height: composerSpacer }} />
@@ -2340,6 +2388,12 @@ function ChatScreen({
         updateCellsBatchingPeriod={32}
         windowSize={7}
         removeClippedSubviews={Platform.OS === 'android'}
+        onEndReached={
+          renderedMessages.length < allVisibleMessages.length
+            ? loadOlderMessages
+            : undefined
+        }
+        onEndReachedThreshold={0.35}
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={() => {
           if (nearBottomRef.current) {
@@ -2799,100 +2853,126 @@ function InboxScreen({
     />
   );
 
-  const respond = async (
-    item: AttentionItem,
-    response:
-      | { kind: 'approval'; decision: 'approved' | 'denied'; note?: string }
-      | { kind: 'question'; answer: string; choiceId?: string },
-  ) => {
-    if (pendingId || item.responded) return;
-    setPendingId(item.id);
-    try {
-      await onRespond(item, response);
-    } finally {
-      setPendingId(null);
-    }
-  };
+  const respond = useCallback(
+    async (
+      item: AttentionItem,
+      response:
+        | { kind: 'approval'; decision: 'approved' | 'denied'; note?: string }
+        | { kind: 'question'; answer: string; choiceId?: string },
+    ) => {
+      if (pendingId || item.responded) return;
+      setPendingId(item.id);
+      try {
+        await onRespond(item, response);
+      } finally {
+        setPendingId(null);
+      }
+    },
+    [onRespond, pendingId],
+  );
+
+  const renderInboxItem = useCallback(
+    ({ item }: { item: AttentionItem }) => (
+      <InboxItemRow
+        item={item}
+        pending={pendingId === item.id}
+        onOpenSession={onOpenSession}
+        onRespond={response => respond(item, response).catch(() => undefined)}
+      />
+    ),
+    [onOpenSession, pendingId, respond],
+  );
 
   if (!authReady) {
     return <QuietCenter text="Pair in Settings" />;
   }
 
-  if (items.length === 0) {
-    return (
-      <ScrollView
-        style={styles.fill}
-        contentContainerStyle={styles.inboxEmpty}
-        refreshControl={refreshControl}
-      >
-        <InboxStatusSummary
-          bridgeHealth={bridgeHealth}
-          socketState={socketState}
-          sessionsCount={sessionsCount}
-          usage={usage}
-        />
-        <Text style={styles.inboxEmptyTitle}>No inbox items</Text>
-        <Text style={styles.inboxEmptyText}>
-          New agent messages, status updates, approval requests, and questions
-          will appear here.
-        </Text>
-      </ScrollView>
-    );
-  }
-
   return (
-    <ScrollView
+    <FlatList
       style={styles.fill}
-      contentContainerStyle={styles.inboxList}
-      refreshControl={refreshControl}
-    >
-      <View style={styles.inboxHeader}>
-        <Text style={styles.inboxSummary}>
-          {items.length} attention item{items.length === 1 ? '' : 's'}
-        </Text>
-        <TextButton label="Clear" onPress={onClear} />
-      </View>
-      <InboxStatusSummary
-        bridgeHealth={bridgeHealth}
-        socketState={socketState}
-        sessionsCount={sessionsCount}
-        usage={usage}
-      />
-      {items.map(item => (
-        <Pressable
-          key={item.id}
-          onPress={() => onOpenSession(item.sessionId)}
-          style={({ pressed }) => [
-            styles.inboxItem,
-            item.kind === 'approval' && styles.inboxItemApproval,
-            item.kind === 'question' && styles.inboxItemQuestion,
-            pressed && styles.pressed,
-          ]}
-        >
-          <View style={styles.inboxItemTop}>
-            <Text style={styles.inboxKind}>
-              {attentionKindLabel(item.kind)}
-            </Text>
-            <Text style={styles.inboxTime}>{formatDate(item.timestamp)}</Text>
-          </View>
-          <Text style={styles.inboxTitle} numberOfLines={1}>
-            {item.title}
-          </Text>
-          <Text style={styles.inboxBody} numberOfLines={3}>
-            {item.body}
-          </Text>
-          <InboxActions
-            item={item}
-            pending={pendingId === item.id}
-            onRespond={response =>
-              respond(item, response).catch(() => undefined)
-            }
+      data={items}
+      keyExtractor={item => item.id}
+      renderItem={renderInboxItem}
+      ListHeaderComponent={
+        <View>
+          {items.length > 0 ? (
+            <View style={styles.inboxHeader}>
+              <Text style={styles.inboxSummary}>
+                {items.length} attention item{items.length === 1 ? '' : 's'}
+              </Text>
+              <TextButton label="Clear" onPress={onClear} />
+            </View>
+          ) : null}
+          <InboxStatusSummary
+            bridgeHealth={bridgeHealth}
+            socketState={socketState}
+            sessionsCount={sessionsCount}
+            usage={usage}
           />
-        </Pressable>
-      ))}
-    </ScrollView>
+        </View>
+      }
+      ListEmptyComponent={
+        <View>
+          <Text style={styles.inboxEmptyTitle}>No inbox items</Text>
+          <Text style={styles.inboxEmptyText}>
+            New agent messages, status updates, approval requests, and questions
+            will appear here.
+          </Text>
+        </View>
+      }
+      contentContainerStyle={
+        items.length === 0 ? styles.inboxEmpty : styles.inboxList
+      }
+      refreshControl={refreshControl}
+      initialNumToRender={8}
+      maxToRenderPerBatch={8}
+      updateCellsBatchingPeriod={32}
+      windowSize={7}
+      removeClippedSubviews={Platform.OS === 'android'}
+      keyboardShouldPersistTaps="handled"
+    />
   );
 }
+
+const InboxItemRow = React.memo(function InboxItemRow({
+  item,
+  pending,
+  onOpenSession,
+  onRespond,
+}: {
+  item: AttentionItem;
+  pending: boolean;
+  onOpenSession: (sessionId: string | null) => void;
+  onRespond: (
+    response:
+      | { kind: 'approval'; decision: 'approved' | 'denied'; note?: string }
+      | { kind: 'question'; answer: string; choiceId?: string },
+  ) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => onOpenSession(item.sessionId)}
+      style={({ pressed }) => [
+        styles.inboxItem,
+        item.kind === 'approval' && styles.inboxItemApproval,
+        item.kind === 'question' && styles.inboxItemQuestion,
+        pressed && styles.pressed,
+      ]}
+    >
+      <View style={styles.inboxItemTop}>
+        <Text style={styles.inboxKind}>{attentionKindLabel(item.kind)}</Text>
+        <Text style={styles.inboxTime}>{formatDate(item.timestamp)}</Text>
+      </View>
+      <Text style={styles.inboxTitle} numberOfLines={1}>
+        {item.title}
+      </Text>
+      <Text style={styles.inboxBody} numberOfLines={3}>
+        {item.body}
+      </Text>
+      <InboxActions item={item} pending={pending} onRespond={onRespond} />
+    </Pressable>
+  );
+});
 
 function InboxStatusSummary({
   bridgeHealth,
@@ -3616,17 +3696,81 @@ function SessionsScreen({
 }) {
   const [showHidden, setShowHidden] = useState(false);
 
-  if (!authReady) {
-    return <QuietSpinner />;
-  }
-
-  const projectSessions = sessions.filter(session =>
-    sessionBelongsToProject(session, selectedProject),
+  const projectSessions = useMemo(
+    () =>
+      sessions.filter(session =>
+        sessionBelongsToProject(session, selectedProject),
+      ),
+    [selectedProject, sessions],
   );
-
-  if (loading && sessions.length === 0) {
-    return <QuietSpinner />;
-  }
+  const visibleSessions = useMemo(
+    () => projectSessions.filter(session => !isHiddenDexydSession(session)),
+    [projectSessions],
+  );
+  const hiddenSessions = useMemo(
+    () => projectSessions.filter(isHiddenDexydSession),
+    [projectSessions],
+  );
+  const pendingBySession = useMemo(
+    () => pendingAttentionBySession(attentionItems),
+    [attentionItems],
+  );
+  const sections = useMemo(
+    () => sessionSections(visibleSessions, pendingBySession),
+    [pendingBySession, visibleSessions],
+  );
+  const visibleCount = visibleSessions.length;
+  const sessionListItems = useMemo(() => {
+    const items: SessionListItem[] = [];
+    for (const section of sections) {
+      if (section.sessions.length === 0) continue;
+      items.push({
+        type: 'section',
+        key: `section-${section.key}`,
+        title: section.title,
+        count: section.sessions.length,
+      });
+      for (const session of section.sessions) {
+        items.push({
+          type: 'session',
+          key: `session-${session.id}`,
+          session,
+          pendingAttention: pendingBySession.get(session.id) ?? [],
+          active: activeSessionId === session.id,
+        });
+      }
+    }
+    if (visibleCount === 0 && hiddenSessions.length > 0) {
+      items.push({ type: 'hidden-empty', key: 'hidden-empty' });
+    }
+    if (hiddenSessions.length > 0) {
+      items.push({
+        type: 'hidden-toggle',
+        key: 'hidden-toggle',
+        count: hiddenSessions.length,
+        showHidden,
+      });
+      if (showHidden) {
+        for (const session of hiddenSessions) {
+          items.push({
+            type: 'hidden-session',
+            key: `hidden-session-${session.id}`,
+            session,
+            pendingAttention: pendingBySession.get(session.id) ?? [],
+            active: activeSessionId === session.id,
+          });
+        }
+      }
+    }
+    return items;
+  }, [
+    activeSessionId,
+    hiddenSessions,
+    pendingBySession,
+    sections,
+    showHidden,
+    visibleCount,
+  ]);
 
   const refreshControl = (
     <RefreshControl
@@ -3638,13 +3782,68 @@ function SessionsScreen({
     />
   );
 
-  const visibleSessions = projectSessions.filter(
-    session => !isHiddenDexydSession(session),
+  const renderSessionItem = useCallback(
+    ({ item }: { item: SessionListItem }) => {
+      if (item.type === 'section') {
+        return (
+          <View style={styles.sessionSectionHeader}>
+            <Text style={styles.sessionSectionTitle}>{item.title}</Text>
+            <Text style={styles.sessionSectionCount}>{item.count}</Text>
+          </View>
+        );
+      }
+
+      if (item.type === 'hidden-empty') {
+        return (
+          <View style={styles.sessionSection}>
+            <Text style={styles.sessionEmptyText}>
+              Only hidden Dexyd helper sessions exist in this project.
+            </Text>
+          </View>
+        );
+      }
+
+      if (item.type === 'hidden-toggle') {
+        return (
+          <View style={styles.hiddenSessionsBlock}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setShowHidden(open => !open)}
+              style={({ pressed }) => [
+                styles.hiddenSessionsHeader,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.hiddenSessionsTitle}>Hidden sessions</Text>
+              <Text style={styles.hiddenSessionsCount}>
+                {item.count} · {item.showHidden ? 'hide' : 'show'}
+              </Text>
+            </Pressable>
+          </View>
+        );
+      }
+
+      return (
+        <SessionListRow
+          session={item.session}
+          pendingAttention={item.pendingAttention}
+          active={item.active}
+          onSelect={onSelect}
+          onCancel={onCancel}
+          onDelete={onDelete}
+        />
+      );
+    },
+    [onCancel, onDelete, onSelect],
   );
-  const hiddenSessions = projectSessions.filter(isHiddenDexydSession);
-  const pendingBySession = pendingAttentionBySession(attentionItems);
-  const sections = sessionSections(visibleSessions, pendingBySession);
-  const visibleCount = visibleSessions.length;
+
+  if (!authReady) {
+    return <QuietSpinner />;
+  }
+
+  if (loading && sessions.length === 0) {
+    return <QuietSpinner />;
+  }
 
   if (projectSessions.length === 0) {
     return (
@@ -3669,98 +3868,50 @@ function SessionsScreen({
   }
 
   return (
-    <ScrollView
+    <FlatList
       style={styles.fill}
-      contentContainerStyle={styles.terminalList}
-      refreshControl={refreshControl}
-    >
-      {connectivity === 'offline' ? (
-        <Text style={styles.offlineBanner}>
-          Bridge offline · showing saved sessions
-        </Text>
-      ) : connectivity === 'error' ? (
-        <Text style={styles.errorLine}>
-          Could not refresh sessions. Showing saved data.
-        </Text>
-      ) : null}
-      {error ? <Text style={styles.errorLine}>{error}</Text> : null}
-      {usage ? <SessionUsageSummary usage={usage} /> : null}
-      <View style={styles.sessionProjectSummary}>
-        <View style={styles.sessionProjectHeader}>
-          <View style={styles.sessionProjectTitleBlock}>
-            <Text style={styles.sessionProjectName} numberOfLines={1}>
-              {selectedProject.label}
+      data={sessionListItems}
+      keyExtractor={item => item.key}
+      renderItem={renderSessionItem}
+      ListHeaderComponent={
+        <View>
+          {connectivity === 'offline' ? (
+            <Text style={styles.offlineBanner}>
+              Bridge offline · showing saved sessions
             </Text>
-            <Text style={styles.sessionProjectPath} numberOfLines={1}>
-              {selectedProject.detail}
+          ) : connectivity === 'error' ? (
+            <Text style={styles.errorLine}>
+              Could not refresh sessions. Showing saved data.
             </Text>
-          </View>
-          <Text style={styles.sessionProjectCount} numberOfLines={1}>
-            {visibleCount} session{visibleCount === 1 ? '' : 's'}
-          </Text>
-        </View>
-      </View>
-      {sections.map(section =>
-        section.sessions.length > 0 ? (
-          <View key={section.key} style={styles.sessionSection}>
-            <View style={styles.sessionSectionHeader}>
-              <Text style={styles.sessionSectionTitle}>{section.title}</Text>
-              <Text style={styles.sessionSectionCount}>
-                {section.sessions.length}
+          ) : null}
+          {error ? <Text style={styles.errorLine}>{error}</Text> : null}
+          {usage ? <SessionUsageSummary usage={usage} /> : null}
+          <View style={styles.sessionProjectSummary}>
+            <View style={styles.sessionProjectHeader}>
+              <View style={styles.sessionProjectTitleBlock}>
+                <Text style={styles.sessionProjectName} numberOfLines={1}>
+                  {selectedProject.label}
+                </Text>
+                <Text style={styles.sessionProjectPath} numberOfLines={1}>
+                  {selectedProject.detail}
+                </Text>
+              </View>
+              <Text style={styles.sessionProjectCount} numberOfLines={1}>
+                {visibleCount} session{visibleCount === 1 ? '' : 's'}
               </Text>
             </View>
-            {section.sessions.map(session => (
-              <SessionListRow
-                key={session.id}
-                session={session}
-                pendingAttention={pendingBySession.get(session.id) ?? []}
-                active={activeSessionId === session.id}
-                onSelect={onSelect}
-                onCancel={onCancel}
-                onDelete={onDelete}
-              />
-            ))}
           </View>
-        ) : null,
-      )}
-      {visibleCount === 0 && hiddenSessions.length > 0 ? (
-        <View style={styles.sessionSection}>
-          <Text style={styles.sessionEmptyText}>
-            Only hidden Dexyd helper sessions exist in this project.
-          </Text>
         </View>
-      ) : null}
-      {hiddenSessions.length > 0 ? (
-        <View style={styles.hiddenSessionsBlock}>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setShowHidden(open => !open)}
-            style={({ pressed }) => [
-              styles.hiddenSessionsHeader,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={styles.hiddenSessionsTitle}>Hidden sessions</Text>
-            <Text style={styles.hiddenSessionsCount}>
-              {hiddenSessions.length} · {showHidden ? 'hide' : 'show'}
-            </Text>
-          </Pressable>
-          {showHidden
-            ? hiddenSessions.map(session => (
-                <SessionListRow
-                  key={session.id}
-                  session={session}
-                  pendingAttention={pendingBySession.get(session.id) ?? []}
-                  active={activeSessionId === session.id}
-                  onSelect={onSelect}
-                  onCancel={onCancel}
-                  onDelete={onDelete}
-                />
-              ))
-            : null}
-        </View>
-      ) : null}
-    </ScrollView>
+      }
+      contentContainerStyle={styles.terminalList}
+      refreshControl={refreshControl}
+      initialNumToRender={12}
+      maxToRenderPerBatch={10}
+      updateCellsBatchingPeriod={32}
+      windowSize={8}
+      removeClippedSubviews={Platform.OS === 'android'}
+      keyboardShouldPersistTaps="handled"
+    />
   );
 }
 
@@ -3792,7 +3943,7 @@ function SessionUsageSummary({ usage }: { usage: UsageStatus }) {
   );
 }
 
-function SessionListRow({
+const SessionListRow = React.memo(function SessionListRow({
   session,
   pendingAttention,
   active,
@@ -3869,7 +4020,7 @@ function SessionListRow({
       </View>
     </Pressable>
   );
-}
+});
 
 function isHiddenDexydSession(session: DexydSession): boolean {
   return (
@@ -7669,6 +7820,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    marginTop: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: palette.line,
   },
