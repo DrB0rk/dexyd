@@ -456,10 +456,13 @@ install_command() {
 
 install_user_service() {
   local root="$1" config="$root/dexyd.config.yaml"
+  local node_bin path_value
   if ! has systemctl; then
     warn "systemctl not found; skipping user service."
     return 0
   fi
+  node_bin="$(command -v node)"
+  path_value="$(dirname "$node_bin"):$HOME/.local/bin:$HOME/.local/npm/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
   mkdir -p "$SERVICE_DIR"
   cat > "$SERVICE_PATH" <<SERVICE
 [Unit]
@@ -470,6 +473,8 @@ After=network-online.target
 Type=simple
 WorkingDirectory=$root
 Environment=DEXYD_CONFIG=$config
+Environment=DEXYD_NODE_BINARY=$node_bin
+Environment=PATH=$path_value
 ExecStart=$root/scripts/run-connection-service.sh
 Restart=on-failure
 RestartSec=3

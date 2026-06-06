@@ -817,10 +817,20 @@ function codexPermissionArgs(
   permissionMode: CodexChatConfig['permissionMode'],
   resume: boolean
 ): string[] {
-  if (permissionMode === 'inherit') return [];
-  if (permissionMode === 'bypass') return ['--dangerously-bypass-approvals-and-sandbox'];
-  if (resume) return ['-c', `sandbox_mode="${permissionMode}"`];
-  return ['--sandbox', permissionMode];
+  const desktopShellEnvironmentArgs = ['-c', 'shell_environment_policy.inherit=all'];
+  if (permissionMode === 'inherit') return desktopShellEnvironmentArgs;
+  if (permissionMode === 'bypass') {
+    return [
+      '--dangerously-bypass-approvals-and-sandbox',
+      '-c',
+      'sandbox_mode="danger-full-access"',
+      '-c',
+      'approval_policy="never"',
+      ...desktopShellEnvironmentArgs
+    ];
+  }
+  if (resume) return ['-c', `sandbox_mode="${permissionMode}"`, ...desktopShellEnvironmentArgs];
+  return ['--sandbox', permissionMode, ...desktopShellEnvironmentArgs];
 }
 
 function resolveExecutable(configuredPath: string): string {

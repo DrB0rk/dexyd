@@ -20,11 +20,11 @@ afterEach(() => {
   }
 });
 
-function writeConfig(tempDir: string, fakeCodex: string): string {
+function writeConfig(tempDir: string, fakeCodex: string, codexConfig = ''): string {
   const configPath = join(tempDir, 'dexyd.yaml');
   writeFileSync(
     configPath,
-    `server:\n  host: 127.0.0.1\n  port: 4555\nstorage:\n  sqlitePath: ${join(tempDir, 'dexyd.db')}\nauth:\n  signingKey: test-signing-key-value\nstream:\n  replayWindowSeconds: 600\n  maxReplayEvents: 500\ncodex:\n  runtimePath: ${fakeCodex}\n  workspaceRoot: ${tempDir}\n`
+    `server:\n  host: 127.0.0.1\n  port: 4555\nstorage:\n  sqlitePath: ${join(tempDir, 'dexyd.db')}\nauth:\n  signingKey: test-signing-key-value\nstream:\n  replayWindowSeconds: 600\n  maxReplayEvents: 500\ncodex:\n  runtimePath: ${fakeCodex}\n  workspaceRoot: ${tempDir}\n${codexConfig}`
   );
   return configPath;
 }
@@ -157,10 +157,68 @@ echo "assistant response"
       expect(lines.at(-1)).toBe('what is 2+2?');
       expect(lines.at(-1)).not.toContain('create a new release');
       expect(lines).toContain('--dangerously-bypass-approvals-and-sandbox');
+      expect(lines).toContain('sandbox_mode="danger-full-access"');
+      expect(lines).toContain('approval_policy="never"');
+      expect(lines).toContain('shell_environment_policy.inherit=all');
       expect(args).not.toContain('workspace-write');
       expect(args).not.toContain('Conversation so far');
       expect(args).not.toContain('Latest user message');
       expect(args).not.toContain('You are running inside dexyd');
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('passes desktop shell environment inheritance for explicit sandbox modes', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-shell-env-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+
+    const argsFile = join(tempDir, 'codex-args.txt');
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env bash
+printf '%s\n' "$@" > "${argsFile}"
+echo "assistant response"
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex, '  permissionMode: workspace-write\n');
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const sent = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/chat`,
+        headers: authHeader,
+        payload: { message: 'check env inheritance' }
+      });
+      expect(sent.statusCode).toBe(202);
+
+      for (let attempt = 0; attempt < 20 && !existsSync(argsFile); attempt += 1) {
+        await sleep(25);
+      }
+
+      const args = readFileSync(argsFile, 'utf8').trim().split('\n');
+      expect(args).toContain('--sandbox');
+      expect(args).toContain('workspace-write');
+      expect(args).toContain('shell_environment_policy.inherit=all');
+      expect(args.at(-1)).toBe('check env inheritance');
     } finally {
       await service.stop();
     }
@@ -713,7 +771,16 @@ echo "raw prompt response"
       }
 
       const args = readFileSync(argsFile, 'utf8').trim().split('\n');
-      expect(args.slice(0, 5)).toEqual(['exec', 'resume', '--all', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox']);
+      expect(args.slice(0, 5)).toEqual([
+        'exec',
+        'resume',
+        '--all',
+        '--skip-git-repo-check',
+        '--dangerously-bypass-approvals-and-sandbox'
+      ]);
+      expect(args).toContain('sandbox_mode="danger-full-access"');
+      expect(args).toContain('approval_policy="never"');
+      expect(args).toContain('shell_environment_policy.inherit=all');
       expect(args).toContain(sessionId);
       expect(args.at(-1)).toBe('new app message only');
       expect(args.at(-1)).not.toContain('Conversation so far');

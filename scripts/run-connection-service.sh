@@ -88,7 +88,8 @@ if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
 fi
 
 log "Starting bridge"
-node --enable-source-maps "$ROOT_DIR/dist/index.js" &
+NODE_BIN="${DEXYD_NODE_BINARY:-node}"
+"$NODE_BIN" --enable-source-maps "$ROOT_DIR/dist/index.js" &
 BRIDGE_PID="$!"
 
 if [[ -f "$CLOUDFLARE_CONFIG" ]]; then
