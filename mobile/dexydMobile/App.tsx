@@ -335,13 +335,13 @@ export default function App() {
     tokens?.accessToken ?? null,
     auth.refresh,
   );
+  const projects = useProjects(bridgeSettings.bridgeUrl, tokens);
   const sessions = useSessions(
     bridgeSettings.bridgeUrl,
     tokens,
     stream.lastEvent,
-    selectedProjectPath === '.' ? null : selectedProjectPath,
+    selectedProjectPath,
   );
-  const projects = useProjects(bridgeSettings.bridgeUrl, tokens);
   const chat = useChat(
     bridgeSettings.bridgeUrl,
     tokens,
@@ -3810,6 +3810,13 @@ function SessionsScreen({
     () => sortSessionsForList(visibleSessions, pendingBySession),
     [pendingBySession, visibleSessions],
   );
+  const sortedHiddenSessions = useMemo(
+    () =>
+      showHidden
+        ? sortSessionsForList(hiddenSessions, pendingBySession)
+        : hiddenSessions,
+    [hiddenSessions, pendingBySession, showHidden],
+  );
   const visibleCount = visibleSessions.length;
   const sessionListItems = useMemo(() => {
     const items: SessionListItem[] = sortedVisibleSessions.map(session => ({
@@ -3831,7 +3838,7 @@ function SessionsScreen({
         showHidden,
       });
       if (showHidden) {
-        for (const session of sortSessionsForList(hiddenSessions, pendingBySession)) {
+        for (const session of sortedHiddenSessions) {
           items.push({
             type: 'hidden-session',
             key: `hidden-session-${session.id}`,
@@ -3848,6 +3855,7 @@ function SessionsScreen({
     hiddenSessions,
     pendingBySession,
     showHidden,
+    sortedHiddenSessions,
     sortedVisibleSessions,
     visibleCount,
   ]);
@@ -4040,90 +4048,71 @@ const SessionListRow = React.memo(function SessionListRow({
 }) {
   const status = sessionUiStatus(session, pendingAttention);
   const contextLabel = sessionContextLabel(session);
-  const opacity = useRef(new Animated.Value(0)).current;
-  const translateY = useRef(new Animated.Value(6)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 180,
-        useNativeDriver: true,
-      }),
-      Animated.timing(translateY, {
-        toValue: 0,
-        duration: 180,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [opacity, translateY]);
 
   return (
-    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
-      <Pressable
-        onPress={() => onSelect(session.id)}
-        style={({ pressed }) => [
-          styles.terminalRow,
-          active && styles.terminalRowActive,
-          pressed && styles.terminalRowPressed,
+    <Pressable
+      onPress={() => onSelect(session.id)}
+      style={({ pressed }) => [
+        styles.terminalRow,
+        active && styles.terminalRowActive,
+        pressed && styles.terminalRowPressed,
+      ]}
+    >
+      <View
+        style={[
+          styles.sessionStatusRail,
+          { backgroundColor: statusColor(status.kind) },
         ]}
-      >
-        <View
-          style={[
-            styles.sessionStatusRail,
-            { backgroundColor: statusColor(status.kind) },
-          ]}
-        />
-        <View style={styles.terminalTextBlock}>
-          <View style={styles.sessionTitleLine}>
-            <Text style={styles.terminalName} numberOfLines={1}>
-              {session.title || shortId(session.id)}
-            </Text>
-            {pendingAttention.length > 0 ? (
-              <View style={styles.sessionAttentionDot} />
-            ) : null}
-          </View>
-          <Text style={styles.terminalMeta} numberOfLines={1}>
-            {status.detail} · {formatDate(session.updatedAt)}
-            {contextLabel ? ` · ${contextLabel}` : ''}
+      />
+      <View style={styles.terminalTextBlock}>
+        <View style={styles.sessionTitleLine}>
+          <Text style={styles.terminalName} numberOfLines={1}>
+            {session.title || shortId(session.id)}
           </Text>
-        </View>
-        <View style={styles.sessionActions}>
-          <Text
-            style={[
-              styles.sessionStatusText,
-              status.kind === 'ok' && styles.sessionStatusTextOk,
-              status.kind === 'warn' && styles.sessionStatusTextWarn,
-              status.kind === 'error' && styles.sessionStatusTextError,
-            ]}
-          >
-            {status.label}
-          </Text>
-          {session.status === 'running' ? (
-            <Pressable
-              onPress={event => {
-                event.stopPropagation();
-                onCancel(session.id);
-              }}
-              hitSlop={12}
-              style={styles.sessionMiniAction}
-            >
-              <Text style={styles.stopText}>stop</Text>
-            </Pressable>
+          {pendingAttention.length > 0 ? (
+            <View style={styles.sessionAttentionDot} />
           ) : null}
+        </View>
+        <Text style={styles.terminalMeta} numberOfLines={1}>
+          {status.detail} · {formatDate(session.updatedAt)}
+          {contextLabel ? ` · ${contextLabel}` : ''}
+        </Text>
+      </View>
+      <View style={styles.sessionActions}>
+        <Text
+          style={[
+            styles.sessionStatusText,
+            status.kind === 'ok' && styles.sessionStatusTextOk,
+            status.kind === 'warn' && styles.sessionStatusTextWarn,
+            status.kind === 'error' && styles.sessionStatusTextError,
+          ]}
+        >
+          {status.label}
+        </Text>
+        {session.status === 'running' ? (
           <Pressable
             onPress={event => {
               event.stopPropagation();
-              onDelete(session.id);
+              onCancel(session.id);
             }}
             hitSlop={12}
             style={styles.sessionMiniAction}
           >
-            <Text style={styles.deleteText}>×</Text>
+            <Text style={styles.stopText}>stop</Text>
           </Pressable>
-        </View>
-      </Pressable>
-    </Animated.View>
+        ) : null}
+        <Pressable
+          onPress={event => {
+            event.stopPropagation();
+            onDelete(session.id);
+          }}
+          hitSlop={12}
+          style={styles.sessionMiniAction}
+        >
+          <Text style={styles.deleteText}>×</Text>
+        </Pressable>
+      </View>
+    </Pressable>
   );
 });
 
@@ -4159,17 +4148,9 @@ function sessionBelongsToProject(
   const sessionPath = normalizeProjectPath(session.workspacePath);
   const projectPath = normalizeProjectPath(project.path);
   const projectDetail = normalizeProjectPath(project.detail);
+  const targetPath = projectPath === '.' ? projectDetail : projectPath;
 
-  if (projectPath === '.') {
-    return (
-      sessionPath === projectDetail ||
-      sessionPath.startsWith(`${projectDetail}/`)
-    );
-  }
-
-  return (
-    sessionPath === projectPath || sessionPath.startsWith(`${projectPath}/`)
-  );
+  return sessionPath === targetPath;
 }
 
 function sortSessionsForList(
@@ -4220,8 +4201,9 @@ function pendingAttentionBySession(
   const grouped = new Map<string, AttentionItem[]>();
   for (const item of items) {
     if (!item.sessionId || item.responded) continue;
-    const current = grouped.get(item.sessionId) ?? [];
-    grouped.set(item.sessionId, [...current, item]);
+    const current = grouped.get(item.sessionId);
+    if (current) current.push(item);
+    else grouped.set(item.sessionId, [item]);
   }
   return grouped;
 }
@@ -7977,18 +7959,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   terminalList: {
-    paddingHorizontal: 12,
-    paddingTop: 2,
+    paddingHorizontal: 10,
+    paddingTop: 4,
     paddingBottom: 18,
   },
   sessionHeaderWrap: {
-    paddingBottom: 6,
+    paddingBottom: 8,
   },
   sessionProjectSummary: {
-    paddingVertical: 8,
-    marginBottom: 2,
+    paddingVertical: 7,
+    marginBottom: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.line,
+    borderBottomColor: 'rgba(255,255,255,0.05)',
   },
   sessionProjectHeader: {
     minHeight: 30,
@@ -8125,29 +8107,32 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   terminalRow: {
-    minHeight: 50,
+    minHeight: 54,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginVertical: 1,
-    paddingVertical: 8,
-    paddingRight: 4,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.06)',
+    marginVertical: 3,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.025)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.045)',
   },
   terminalRowActive: {
-    backgroundColor: 'rgba(118, 180, 142, 0.07)',
+    backgroundColor: 'rgba(118, 180, 142, 0.08)',
+    borderColor: 'rgba(118, 180, 142, 0.2)',
   },
   terminalRowPressed: {
     transform: [{ scale: 0.992 }],
     opacity: 0.86,
   },
   sessionStatusRail: {
-    width: 3,
-    height: 28,
-    borderRadius: 3,
-    marginRight: 9,
-    opacity: 0.85,
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginRight: 10,
+    opacity: 0.9,
   },
   terminalTextBlock: {
     flex: 1,
@@ -8162,7 +8147,7 @@ const styles = StyleSheet.create({
   terminalName: {
     flexShrink: 1,
     color: palette.text,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     letterSpacing: -0.1,
   },
@@ -8174,13 +8159,13 @@ const styles = StyleSheet.create({
   },
   terminalMeta: {
     color: palette.dim,
-    fontSize: 11,
+    fontSize: 10.5,
     marginTop: 3,
   },
   sessionActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
   },
   sessionStatusPill: {
     minHeight: 20,
@@ -8198,7 +8183,7 @@ const styles = StyleSheet.create({
   },
   sessionStatusText: {
     color: palette.muted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '900',
     textTransform: 'uppercase',
   },
@@ -8212,11 +8197,11 @@ const styles = StyleSheet.create({
     color: palette.error,
   },
   sessionMiniAction: {
-    minWidth: 26,
-    minHeight: 26,
+    minWidth: 24,
+    minHeight: 24,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 8,
+    borderRadius: 10,
   },
   deletedSessionRow: {
     borderTopWidth: StyleSheet.hairlineWidth,
