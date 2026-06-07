@@ -7,6 +7,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 import {
   chatMessageKey,
+  chatMessageRenderKey,
   mergeFetchedChatMessages,
   normalizeDisplayUserContent,
   visibleChatMessages,
@@ -156,6 +157,46 @@ describe('mergeFetchedChatMessages', () => {
     ]);
   });
 
+
+  it('keeps existing visible history when a refresh returns a partial snapshot', () => {
+    const oldUser = message({
+      id: 'user-old',
+      role: 'user',
+      turnId: 'turn-old',
+      content: 'old question',
+      createdAt: '2026-06-04T08:00:00.000Z',
+      sequence: 1,
+    });
+    const oldAssistant = message({
+      id: 'assistant-old',
+      role: 'assistant',
+      turnId: 'turn-old',
+      content: 'old answer that should not flicker away',
+      createdAt: '2026-06-04T08:00:05.000Z',
+      sequence: 2,
+    });
+    const newUser = message({
+      id: 'user-new',
+      role: 'user',
+      turnId: 'turn-new',
+      content: 'new question',
+      createdAt: '2026-06-04T08:01:00.000Z',
+      sequence: 3,
+    });
+
+    const merged = mergeFetchedChatMessages([newUser], [], undefined, [
+      oldUser,
+      oldAssistant,
+      newUser,
+    ]);
+
+    expect(merged.map(item => item.id)).toEqual([
+      'user-old',
+      'assistant-old',
+      'user-new',
+    ]);
+  });
+
   it('removes pending user echoes confirmed by transcript content with a different turn id', () => {
     const merged = mergeFetchedChatMessages(
       [
@@ -293,6 +334,21 @@ describe('normalizeDisplayUserContent', () => {
     );
   });
 });
+
+describe('chatMessageRenderKey', () => {
+  it('stays stable when assistant content changes', () => {
+    const first = message({
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'partial',
+    });
+    const updated = { ...first, content: 'partial response expanded' };
+
+    expect(chatMessageRenderKey(updated)).toBe(chatMessageRenderKey(first));
+    expect(chatMessageKey(updated)).not.toBe(chatMessageKey(first));
+  });
+});
+
 
 describe('visibleChatMessages', () => {
   it('keeps tool progress rows out of the visible message list', () => {

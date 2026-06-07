@@ -42,7 +42,7 @@ import {
 } from './src/hooks/use-bridge-settings';
 import { useBridgeStream } from './src/hooks/use-bridge-stream';
 import {
-  chatMessageKey,
+  chatMessageRenderKey,
   useChat,
   visibleChatMessages,
 } from './src/hooks/use-chat';
@@ -2464,7 +2464,7 @@ function ChatScreen({
         contentContainerStyle={styles.messages}
         data={renderedMessages}
         inverted
-        keyExtractor={chatMessageKey}
+        keyExtractor={chatMessageRenderKey}
         renderItem={renderChatMessage}
         ListHeaderComponent={
           <View>

@@ -364,6 +364,14 @@ export function chatMessageKey(message: ChatMessage): string {
   )}`;
 }
 
+export function chatMessageRenderKey(message: ChatMessage): string {
+  if (message.queueId) return `queue:${message.queueId}:${message.status}`;
+  if (message.id) return `message:${message.id}`;
+  const turnId = stableTurnId(message.turnId);
+  if (turnId) return `${message.role}:${message.status}:${turnId}`;
+  return `${message.role}:${message.status}:${timeBucket(message.createdAt)}:${message.sequence}`;
+}
+
 function sameMessageIdentity(left: ChatMessage, right: ChatMessage): boolean {
   return chatMessageKey(left) === chatMessageKey(right);
 }
@@ -554,13 +562,21 @@ export function mergeFetchedChatMessages(
     .filter((message): message is ChatMessage => message !== null)
     .map(message => preserveStableMessageFields(message, existingMessages));
   const incomingKeys = new Set(incoming.map(chatMessageKey));
-  const transientExisting = existingMessages.filter(
-    message =>
-      !incomingKeys.has(chatMessageKey(message)) &&
-      isRecentTransientMessage(message),
-  );
+  const incomingRenderKeys = new Set(incoming.map(chatMessageRenderKey));
+  const retainedExisting = existingMessages
+    .map(normalizeChatMessageForDisplay)
+    .filter((message): message is ChatMessage => message !== null)
+    .filter(message => {
+      if (incomingKeys.has(chatMessageKey(message))) return false;
+      if (incomingRenderKeys.has(chatMessageRenderKey(message))) return false;
+      if (message.status === 'queued') return false;
+      if (message.role === 'tool' && message.status === 'running') {
+        return isRecentTransientMessage(message);
+      }
+      return true;
+    });
   const merged = dedupeMessages(
-    [...incoming, ...transientExisting].sort(compareChatMessages),
+    [...incoming, ...retainedExisting].sort(compareChatMessages),
   );
   if (!activeQueueIds) return merged;
   return merged.filter(
