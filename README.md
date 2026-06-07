@@ -104,6 +104,8 @@ docker compose up -d --build
 
 Open `http://localhost:8080` or `http://<computer-lan-ip>:8080`. The container only serves the web page and proxies to the host bridge at `http://127.0.0.1:4242` using Docker host networking; it does not run Codex, the bridge, or the TUI.
 
+The web UI supports project selection, session chat, queued messages, approvals/questions, command insertion, per-turn diffs, hidden-session restore, usage/account status, and local chat drafts/cache.
+
 See [Self-hosted web control app](docs/web-app.md).
 
 ## Install the Android app

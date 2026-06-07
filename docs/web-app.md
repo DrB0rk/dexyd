@@ -1,12 +1,27 @@
 # Self-hosted web control app
 
-Dexyd includes a small browser control app that can run in Docker while your normal Dexyd bridge and TUI keep running on the host system.
+Dexyd includes a clean browser control app that can run in Docker while your normal Dexyd bridge and TUI keep running on the host system.
 
 The Docker container does **not** run Codex, the bridge, or the TUI. It only:
 
 - serves the browser UI;
 - proxies REST/WebSocket traffic to the host bridge;
 - uses the bridge's normal auth/session/diff/queue APIs.
+
+## What you can do from the web UI
+
+The web UI mirrors the core Android app workflows:
+
+- choose or type any project path, with autocomplete and an up-directory button;
+- create Codex sessions in the selected project;
+- view project-scoped sessions with live status;
+- read and send chat messages with local draft/message caching;
+- insert dynamic `/` and `$` commands;
+- see queued messages, steer or remove them;
+- answer approvals and agent questions from Inbox;
+- view per-turn code diffs and copy chat text;
+- monitor bridge, realtime, account, and usage state;
+- hide and restore Dexyd sessions.
 
 ## Requirements
 

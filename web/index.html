@@ -19,28 +19,63 @@
           </div>
         </header>
 
+        <nav class="nav" aria-label="Dexyd sections">
+          <button class="nav-item active" data-page="sessionsPage">Sessions</button>
+          <button class="nav-item" data-page="inboxPage">Inbox <span id="inboxBadge" class="badge" hidden>0</span></button>
+          <button class="nav-item" data-page="settingsPage">Settings</button>
+        </nav>
+
         <section class="project-box">
           <label for="projectPath">Project</label>
           <div class="path-row">
-            <input id="projectPath" autocomplete="off" spellcheck="false" placeholder="/workspace" />
+            <input id="projectPath" autocomplete="off" spellcheck="false" placeholder="Type a project path" />
+            <button id="upProject" title="Go up one folder">↑</button>
             <button id="loadProject" title="Load project">↻</button>
           </div>
           <div id="suggestions" class="suggestions" hidden></div>
           <button id="newSession" class="primary wide">+ New session</button>
         </section>
 
-        <section class="sessions-head">
-          <h2>Sessions</h2>
-          <button id="refreshSessions" title="Refresh sessions">↻</button>
+        <section id="sessionsPage" class="side-page active">
+          <section class="sessions-head">
+            <h2>Sessions</h2>
+            <button id="refreshSessions" title="Refresh sessions">↻</button>
+          </section>
+          <div id="sessions" class="sessions"></div>
         </section>
-        <div id="sessions" class="sessions"></div>
+
+        <section id="inboxPage" class="side-page">
+          <section class="sessions-head">
+            <h2>Inbox</h2>
+            <button id="clearInbox" title="Clear resolved inbox items">Clear</button>
+          </section>
+          <div id="systemSummary" class="system-summary"></div>
+          <div id="inboxList" class="inbox-list"></div>
+        </section>
+
+        <section id="settingsPage" class="side-page">
+          <section class="settings-block">
+            <h2>Connection</h2>
+            <dl id="settingsConnection"></dl>
+            <button id="resetWebAuth" class="ghost wide">Reset web auth</button>
+          </section>
+          <section class="settings-block">
+            <h2>Account</h2>
+            <dl id="accountStatus"></dl>
+          </section>
+          <section class="settings-block">
+            <h2>Hidden sessions</h2>
+            <button id="loadHiddenSessions" class="ghost wide">Load hidden sessions</button>
+            <div id="hiddenSessions" class="hidden-sessions"></div>
+          </section>
+        </section>
       </aside>
 
       <main class="main">
         <section id="emptyState" class="empty">
           <h1>Dexyd Web</h1>
           <p>Select a session or create one for the current project.</p>
-          <p class="muted">Served by the bridge container. No pairing QR needed on local/private hosts.</p>
+          <p class="muted">Browser control surface for the host bridge. No QR needed on local/private hosts.</p>
         </section>
 
         <section id="chatView" class="chat" hidden>
@@ -51,15 +86,18 @@
             </div>
             <div class="chat-actions">
               <span id="usagePill" class="pill">usage unknown</span>
+              <button id="deleteSession" class="ghost danger">Hide</button>
               <button id="cancelTurn" class="ghost">Cancel</button>
               <button id="refreshChat" class="ghost">Refresh</button>
             </div>
           </header>
 
           <div id="queueBox" class="queue" hidden></div>
+          <div id="commandBar" class="command-bar" hidden></div>
           <div id="messages" class="messages"></div>
 
           <form id="composer" class="composer">
+            <button id="commandButton" type="button" class="ghost" title="Commands">/</button>
             <textarea id="messageInput" rows="1" placeholder="Message Codex…"></textarea>
             <button id="sendButton" class="primary" type="submit">Send</button>
           </form>
@@ -73,6 +111,19 @@
         <button id="closeDiff" class="ghost">Close</button>
       </header>
       <pre id="diffText"></pre>
+    </dialog>
+
+    <dialog id="answerDialog" class="answer-dialog">
+      <form method="dialog">
+        <h2 id="answerTitle">Respond</h2>
+        <p id="answerPrompt" class="muted"></p>
+        <div id="answerOptions" class="answer-options"></div>
+        <textarea id="answerText" rows="4" placeholder="Type response…"></textarea>
+        <footer>
+          <button value="cancel" class="ghost">Cancel</button>
+          <button id="submitAnswer" value="default" class="primary">Send</button>
+        </footer>
+      </form>
     </dialog>
 
     <div id="toast" class="toast" hidden></div>
