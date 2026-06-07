@@ -1,5 +1,12 @@
+const DEFAULT_BRIDGE_ID = 'proxy';
+const SETTINGS_PANES = ['connection', 'pairing', 'account', 'security', 'notifications', 'workspace', 'recovery', 'history', 'updates', 'diagnostics'];
+const initialBridgeProfiles = loadBridgeProfiles();
+const initialBridgeId = localStorage.getItem('dexyd.web.activeBridgeId') || initialBridgeProfiles[0]?.id || DEFAULT_BRIDGE_ID;
+
 const state = {
-  tokens: readJson('dexyd.web.tokens'),
+  tokens: readTokensForBridge(initialBridgeId),
+  bridgeProfiles: initialBridgeProfiles,
+  activeBridgeId: initialBridgeId,
   sessions: [],
   hiddenSessions: [],
   selectedSession: null,
@@ -15,6 +22,13 @@ const state = {
   account: null,
   activePage: 'sessionsPage',
   answerItem: null,
+  settingsPane: localStorage.getItem('dexyd.web.settingsPane') || 'connection',
+  devices: [],
+  usageDetails: null,
+  notificationSettings: readJson('dexyd.web.notificationSettings') || defaultNotificationSettings(),
+  errorHistory: readJson('dexyd.web.errorHistory') || [],
+  updateInfo: null,
+  pairingResult: null,
 };
 
 const els = {
@@ -33,11 +47,8 @@ const els = {
   inboxList: id('inboxList'),
   clearInbox: id('clearInbox'),
   systemSummary: id('systemSummary'),
-  settingsConnection: id('settingsConnection'),
-  accountStatus: id('accountStatus'),
-  resetWebAuth: id('resetWebAuth'),
-  loadHiddenSessions: id('loadHiddenSessions'),
-  hiddenSessions: id('hiddenSessions'),
+  settingsMenu: id('settingsMenu'),
+  settingsBody: id('settingsBody'),
   emptyState: id('emptyState'),
   chatView: id('chatView'),
   chatTitle: id('chatTitle'),
@@ -73,8 +84,8 @@ async function init() {
   restoreDraft();
   renderInbox();
   renderSettings();
-  await ensureAuth();
-  await Promise.allSettled([refreshHealth(), refreshSessions(), refreshAccount(), refreshCommands()]);
+  await ensureAuth().catch(error => recordError('warn', 'Web auth unavailable', errorMessage(error)));
+  await Promise.allSettled([refreshHealth(), refreshSessions(), refreshAccount(), refreshCommands(), refreshDevices(), refreshUsage()]);
   connectStream();
   setInterval(refreshHealth, 15000);
   setInterval(refreshAccount, 60000);
@@ -102,8 +113,6 @@ function bindUi() {
   els.deleteSession.addEventListener('click', hideSession);
   els.commandButton.addEventListener('click', toggleCommandBar);
   els.clearInbox.addEventListener('click', clearInbox);
-  els.resetWebAuth.addEventListener('click', resetWebAuth);
-  els.loadHiddenSessions.addEventListener('click', loadHiddenSessions);
   els.closeDiff.addEventListener('click', () => els.diffDialog.close());
   els.settingsDialog.addEventListener('click', event => closeDialogOnBackdrop(event, els.settingsDialog));
   els.diffDialog.addEventListener('click', event => closeDialogOnBackdrop(event, els.diffDialog));
@@ -139,7 +148,7 @@ function setPage(page) {
 }
 
 function openSettingsDialog() {
-  refreshAccount().catch(() => {});
+  Promise.allSettled([refreshHealth(), refreshAccount(), refreshDevices(), refreshUsage(), loadHiddenSessions()]).finally(renderSettings);
   renderSettings();
   els.settingsDialog.showModal();
 }
@@ -160,6 +169,8 @@ async function ensureAuth() {
 }
 
 function saveTokens() {
+  if (!state.activeBridgeId) return;
+  localStorage.setItem(tokenKey(state.activeBridgeId), JSON.stringify(state.tokens));
   localStorage.setItem('dexyd.web.tokens', JSON.stringify(state.tokens));
 }
 
@@ -167,7 +178,7 @@ async function api(path, options = {}, auth = true) {
   const headers = { ...(options.headers || {}) };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (auth && state.tokens?.accessToken) headers.Authorization = `Bearer ${state.tokens.accessToken}`;
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path, options.baseUrl), {
     method: options.method || 'GET',
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -442,9 +453,15 @@ function renderQueue() {
 }
 
 async function refreshUsage() {
-  if (!state.selectedSession) return;
+  if (!state.selectedSession) {
+    state.usageDetails = null;
+    els.usagePill.textContent = 'usage unknown';
+    renderSettings();
+    return;
+  }
   try {
     const result = await api(`/usage/status?sessionId=${encodeURIComponent(state.selectedSession.id)}`);
+    state.usageDetails = result.usage || null;
     const context = result.usage?.context;
     const five = result.usage?.accountLimits?.fiveHour?.remainingPercent;
     const monthly = result.usage?.accountLimits?.monthly?.remainingPercent;
@@ -453,10 +470,25 @@ async function refreshUsage() {
     if (typeof five === 'number') parts.push(`5h ${Math.round(five)}% left`);
     if (typeof monthly === 'number') parts.push(`mo ${Math.round(monthly)}% left`);
     els.usagePill.textContent = parts.join(' · ') || 'usage unknown';
-  } catch {
+  } catch (error) {
+    state.usageDetails = null;
     els.usagePill.textContent = 'usage unavailable';
+    recordError('warn', 'Usage unavailable', errorMessage(error));
   }
+  renderSettings();
 }
+
+async function refreshDevices() {
+  try {
+    const result = await api('/devices');
+    state.devices = result.devices || [];
+  } catch (error) {
+    state.devices = [];
+    recordError('warn', 'Devices unavailable', errorMessage(error));
+  }
+  renderSettings();
+}
+
 
 async function cancelTurn() {
   if (!state.selectedSession) return;
@@ -485,8 +517,7 @@ async function showDiff(turnId) {
 
 function connectStream() {
   if (!state.tokens?.accessToken) return;
-  const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = `${wsScheme}://${location.host}/ws?access_token=${encodeURIComponent(state.tokens.accessToken)}`;
+  const wsUrl = websocketUrl('/ws', state.tokens.accessToken);
   try {
     state.socket?.close();
     state.socket = new WebSocket(wsUrl);
@@ -690,54 +721,176 @@ function renderSystemSummary() {
 }
 
 function renderSettings() {
-  renderDl(els.settingsConnection, {
-    Bridge: state.health ? `${state.health.status} · ${state.health.version}` : 'offline',
-    Realtime: state.socket?.readyState === WebSocket.OPEN ? 'connected' : state.polling ? 'polling fallback' : 'connecting',
-    Project: state.projectPath,
-    URL: location.origin,
+  if (!els.settingsMenu || !els.settingsBody) return;
+  const panes = settingsPanes();
+  if (!panes.some(pane => pane.key === state.settingsPane)) state.settingsPane = 'connection';
+  els.settingsMenu.replaceChildren(...panes.map(renderSettingsMenuButton));
+  const pane = panes.find(item => item.key === state.settingsPane) || panes[0];
+  els.settingsBody.replaceChildren(renderSettingsPane(pane.key));
+}
+
+function renderSettingsMenuButton(pane) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `settings-menu-item ${pane.key === state.settingsPane ? 'active' : ''} ${pane.attention ? 'attention' : ''}`;
+  button.innerHTML = `<span class="settings-icon">${escapeHtml(pane.icon)}</span><span><strong>${escapeHtml(pane.title)}</strong><small>${escapeHtml(pane.detail)}</small></span>`;
+  button.addEventListener('click', () => {
+    state.settingsPane = pane.key;
+    localStorage.setItem('dexyd.web.settingsPane', pane.key);
+    renderSettings();
   });
-  const account = state.account;
-  renderDl(els.accountStatus, {
-    Status: account?.available === false ? 'unavailable' : 'available',
-    Account: account?.activeAccount?.label || account?.activeAccount?.email || 'unknown',
-    Details: account?.message || account?.status || 'not reported',
-  });
+  return button;
+}
+
+function settingsPanes() {
+  const active = activeBridgeProfile();
+  const realtime = state.socket?.readyState === WebSocket.OPEN ? 'connected' : state.polling ? 'polling' : 'connecting';
+  const usageWarn = state.usageDetails?.limits?.status === 'warn' || state.usageDetails?.limits?.status === 'error';
+  return [
+    { key: 'connection', icon: '⌁', title: 'Computers', detail: active.label || active.url || 'proxy', attention: !state.health },
+    { key: 'pairing', icon: '◇', title: 'Pairing', detail: state.tokens ? 'paired' : 'pair required', attention: !state.tokens },
+    { key: 'account', icon: '%', title: 'Account & usage', detail: accountLabel(), attention: usageWarn || state.account?.codexAuth?.installed === false },
+    { key: 'security', icon: '◈', title: 'Security', detail: `${state.devices.length} device${state.devices.length === 1 ? '' : 's'}`, attention: false },
+    { key: 'notifications', icon: '◌', title: 'Notifications', detail: notificationsSupported() ? Notification.permission : 'browser only', attention: notificationsSupported() && state.notificationSettings.system && Notification.permission !== 'granted' },
+    { key: 'workspace', icon: '▦', title: 'Workspace', detail: `${state.sessions.length} session${state.sessions.length === 1 ? '' : 's'}`, attention: false },
+    { key: 'recovery', icon: '↺', title: 'Deleted sessions', detail: `${state.hiddenSessions.length} hidden`, attention: state.hiddenSessions.length > 0 },
+    { key: 'history', icon: '!', title: 'Error history', detail: `${state.errorHistory.length} event${state.errorHistory.length === 1 ? '' : 's'}`, attention: state.errorHistory.length > 0 },
+    { key: 'updates', icon: '⇧', title: 'Updates', detail: state.updateInfo?.updateAvailable ? `new ${state.updateInfo.latestVersion}` : 'GitHub releases', attention: Boolean(state.updateInfo?.updateAvailable) },
+    { key: 'diagnostics', icon: '⌬', title: 'Diagnostics', detail: realtime, attention: !state.health },
+  ];
+}
+
+function renderSettingsPane(key) {
+  switch (key) {
+    case 'connection': return connectionPane();
+    case 'pairing': return pairingPane();
+    case 'account': return accountPane();
+    case 'security': return securityPane();
+    case 'notifications': return notificationsPane();
+    case 'workspace': return workspacePane();
+    case 'recovery': return recoveryPane();
+    case 'history': return historyPane();
+    case 'updates': return updatesPane();
+    case 'diagnostics': return diagnosticsPane();
+    default: return connectionPane();
+  }
+}
+
+function paneShell(title, subtitle, children = []) {
+  const section = document.createElement('section');
+  section.className = 'settings-pane';
+  section.append(el('div', 'settings-pane-head', `<h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle)}</p>`));
+  for (const child of children) section.append(child);
+  return section;
+}
+
+function connectionPane() {
+  const active = activeBridgeProfile();
+  const label = inputRow('Computer label', active.label || 'Local bridge', 'bridgeLabelInput');
+  const url = inputRow('Bridge URL', active.url || '', 'bridgeUrlInput', 'Leave empty to use this web proxy');
+  const actions = actionRow([
+    button('Save computer', async () => saveBridgeProfile(label.input.value, url.input.value), 'primary'),
+    button('Check bridge', refreshHealth),
+    button('Reset web auth', resetWebAuth, 'danger'),
+  ]);
+  const list = el('div', 'bridge-list');
+  for (const profile of state.bridgeProfiles) {
+    const row = el('div', 'bridge-profile');
+    row.innerHTML = `<span><strong>${escapeHtml(profile.label)}</strong><small>${escapeHtml(profile.url || 'this web proxy')}</small></span>`;
+    row.append(actionRow([
+      button(profile.id === state.activeBridgeId ? 'Active' : 'Switch', () => switchBridge(profile.id), profile.id === state.activeBridgeId ? '' : 'primary'),
+      ...(profile.id === DEFAULT_BRIDGE_ID ? [] : [button('Remove', () => removeBridge(profile.id), 'danger')]),
+    ]));
+    list.append(row);
+  }
+  return paneShell('Computers & connection', 'Pair and switch between separate Dexyd bridge computers.', [statusGrid({ Bridge: bridgeLabel(), Realtime: realtimeLabel(), Active: active.label, URL: active.url || location.origin }), label.row, url.row, actions, list, hint('Use an empty URL for the Docker/Portainer web proxy. Use a full http(s) URL for a direct bridge. Direct cross-origin bridges may need Caddy to serve this web UI on the same origin.')]);
+}
+
+function pairingPane() {
+  const uri = textareaRow('Pairing URI', 'pairingUriInput', 'Paste dexyd://pair?... from the TUI QR screen');
+  const device = inputRow('Device label', 'dexyd web', 'pairDeviceLabel');
+  const manualUrl = inputRow('Fallback bridge URL', activeBridgeProfile().url || '', 'pairBridgeUrl', 'Optional, used if the URI cannot be decoded');
+  const result = state.pairingResult ? pairingResultView(state.pairingResult) : hint('Paste a pairing URI to add/switch to that bridge, or generate a pairing URI on the active bridge for another device.');
+  return paneShell('Pairing', 'Connect this browser to a bridge or generate a pairing URI from the active bridge.', [uri.row, device.row, manualUrl.row, actionRow([button('Pair pasted URI', () => pairPastedUri(uri.input.value, device.input.value, manualUrl.input.value), 'primary'), button('Generate pairing URI', startPairing)]), result]);
+}
+
+function accountPane() {
+  const auth = state.account?.codexAuth || state.account || {};
+  const usage = state.usageDetails;
+  return paneShell('Account & usage', 'Codex identity and per-session/account usage state.', [statusGrid({ Status: auth.installed === false ? 'codex-auth unavailable' : 'available', Account: auth.activeAccount?.label || auth.activeAccount?.email || auth.account || 'unknown', Details: auth.message || auth.status || 'not reported', Context: usage?.context?.percent != null ? `${Math.round(usage.context.percent)}%` : 'select a session', '5h limit': percentText(usage?.accountLimits?.fiveHour?.remainingPercent), Monthly: percentText(usage?.accountLimits?.monthly?.remainingPercent) }), actionRow([button('Refresh account', refreshAccount, 'primary'), button('Refresh usage', refreshUsage)]), accountList(auth)]);
+}
+
+function securityPane() {
+  return paneShell('Security', 'Local web credentials and trusted bridge devices.', [statusGrid({ 'Device ID': state.tokens?.deviceId ? shortId(state.tokens.deviceId) : 'none', 'Access token': state.tokens?.accessExpiresAt ? `expires ${formatTime(state.tokens.accessExpiresAt)}` : 'none', 'Refresh token': state.tokens?.refreshExpiresAt ? `expires ${formatTime(state.tokens.refreshExpiresAt)}` : 'none' }), actionRow([button('Refresh token', () => ensureAuth().then(refreshHealth), 'primary'), button('Sign out this browser', signOut, 'danger'), button('Reload devices', refreshDevices)]), devicesList()]);
+}
+
+function notificationsPane() {
+  return paneShell('Notifications', 'Browser notifications and in-app event behavior.', [statusGrid({ Browser: notificationsSupported() ? Notification.permission : 'not supported', 'In-app': state.notificationSettings.inApp ? 'on' : 'off', System: state.notificationSettings.system ? 'on' : 'off' }), toggleRow('In-app banners', 'inApp'), toggleRow('Browser notifications', 'system'), toggleRow('Prompt finished', 'promptFinished'), toggleRow('Approvals', 'approvals'), toggleRow('Questions', 'questions'), toggleRow('Usage limits', 'usage'), actionRow([button('Allow browser notifications', requestNotificationPermission, 'primary'), button('Test notification', () => notify('Dexyd test', 'Notifications are working.'))])]);
+}
+
+function workspacePane() {
+  return paneShell('Workspace', 'Project and session overview from the selected bridge.', [statusGrid({ Project: state.projectPath || '~', Sessions: String(state.sessions.length), Running: String(state.sessions.filter(s => s.status === 'running').length), Commands: String(state.commands.length || fallbackCommands().length) }), actionRow([button('Refresh sessions', refreshSessions, 'primary'), button('Refresh commands', refreshCommands), button('Open project', () => setPage('sessionsPage'))])]);
+}
+
+function recoveryPane() {
+  const list = el('div', 'hidden-sessions');
+  if (!state.hiddenSessions.length) list.append(hint('No hidden sessions.'));
+  for (const item of state.hiddenSessions) {
+    const session = item.session || item;
+    const row = el('div', 'hidden-item');
+    row.innerHTML = `<span><strong>${escapeHtml(session.title || shortId(item.id))}</strong><small>${escapeHtml(session.workspacePath || (item.hiddenAt ? `hidden ${formatTime(item.hiddenAt)}` : ''))}</small></span>`;
+    row.append(button('Restore', async () => { await api(`/sessions/${encodeURIComponent(item.id)}/restore`, { method: 'POST', body: {} }); await Promise.all([loadHiddenSessions(), refreshSessions()]); }, 'primary'));
+    list.append(row);
+  }
+  return paneShell('Deleted sessions', 'Restore sessions hidden from Dexyd. Project files are never changed.', [actionRow([button('Refresh hidden sessions', loadHiddenSessions, 'primary')]), list]);
+}
+
+function historyPane() {
+  const list = el('div', 'history-list');
+  if (!state.errorHistory.length) list.append(hint('No warnings or errors recorded.'));
+  for (const item of state.errorHistory) {
+    list.append(el('article', `history-item ${item.level}`, `<strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.body)}</p><span>${escapeHtml(formatTime(item.timestamp))}</span>`));
+  }
+  return paneShell('Error history', 'Recent warnings without repeated popups.', [actionRow([button('Clear history', clearErrorHistory, 'danger')]), list]);
+}
+
+function updatesPane() {
+  return paneShell('Updates', 'Check GitHub releases. The web container is updated from Portainer or docker compose.', [statusGrid({ Current: state.health?.version || 'unknown', Latest: state.updateInfo?.latestVersion || 'not checked', Status: state.updateInfo?.updateAvailable ? 'update available' : state.updateInfo ? 'up to date' : 'not checked' }), actionRow([button('Check releases', checkUpdates, 'primary'), button('Open releases', () => window.open('https://github.com/DrB0rk/dexyd/releases/latest', '_blank'))]), hint('For Docker/Portainer: pull the branch/image and redeploy the stack. Android APK updates are only available inside the Android app.')]);
+}
+
+function diagnosticsPane() {
+  return paneShell('Diagnostics', 'Connection state useful when bridge, pairing, or realtime fails.', [statusGrid({ Origin: location.origin, 'API base': activeBridgeProfile().url || 'same origin proxy', WebSocket: websocketUrl('/ws', 'token').replace(/access_token=.*/, 'access_token=…'), 'Last event': String(state.lastSequence || 0), Polling: state.polling ? 'on' : 'off' }), actionRow([button('Reconnect realtime', connectStream, 'primary'), button('Full local reset', fullLocalReset, 'danger')])]);
 }
 
 async function resetWebAuth() {
+  localStorage.removeItem(tokenKey(state.activeBridgeId));
   localStorage.removeItem('dexyd.web.tokens');
   state.tokens = null;
   await ensureAuth();
   connectStream();
+  renderSettings();
   showToast('Web auth reset');
 }
 
-async function loadHiddenSessions() {
-  const result = await api('/sessions/hidden');
-  state.hiddenSessions = result.sessions || [];
-  renderHiddenSessions();
+async function signOut() {
+  try { if (state.tokens?.refreshToken) await api('/auth/revoke', { method: 'POST', body: { refreshToken: state.tokens.refreshToken } }); } catch {}
+  localStorage.removeItem(tokenKey(state.activeBridgeId));
+  state.tokens = null;
+  renderSettings();
+  showToast('Signed out');
 }
 
-function renderHiddenSessions() {
-  els.hiddenSessions.replaceChildren();
-  if (!state.hiddenSessions.length) {
-    const empty = document.createElement('p');
-    empty.className = 'muted empty-list';
-    empty.textContent = 'No hidden sessions.';
-    els.hiddenSessions.append(empty);
-    return;
+async function loadHiddenSessions() {
+  try {
+    const result = await api('/sessions/hidden');
+    state.hiddenSessions = result.sessions || [];
+  } catch (error) {
+    state.hiddenSessions = [];
+    recordError('warn', 'Hidden sessions unavailable', errorMessage(error));
   }
-  for (const session of state.hiddenSessions) {
-    const row = document.createElement('div');
-    row.className = 'hidden-item';
-    row.innerHTML = `<span>${escapeHtml(session.title || shortId(session.id))}</span>`;
-    row.append(actionButton('Restore', async () => {
-      await api(`/sessions/${encodeURIComponent(session.id)}/restore`, { method: 'POST', body: {} });
-      await Promise.all([loadHiddenSessions(), refreshSessions()]);
-    }));
-    els.hiddenSessions.append(row);
-  }
+  renderSettings();
 }
+
 
 function toggleCommandBar() {
   renderCommandBar();
@@ -839,7 +992,131 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ '&
 function debounce(fn, ms) { let timer; return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); }; }
 function closeDialogOnBackdrop(event, dialog) { const rect = dialog.getBoundingClientRect(); const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom; if (!inside) dialog.close(); }
 function actionButton(label, onClick) { const button = document.createElement('button'); button.type = 'button'; button.className = 'ghost mini'; button.textContent = label; button.addEventListener('click', event => { event.stopPropagation(); Promise.resolve(onClick()).catch(showError); }); return button; }
+
+function loadBridgeProfiles() {
+  const stored = readJson('dexyd.web.bridges');
+  const profiles = Array.isArray(stored) ? stored.filter(item => item && item.id && typeof item.label === 'string') : [];
+  if (!profiles.some(item => item.id === DEFAULT_BRIDGE_ID)) profiles.unshift({ id: DEFAULT_BRIDGE_ID, label: 'Web proxy', url: '' });
+  return profiles;
+}
+function saveBridgeProfiles() { localStorage.setItem('dexyd.web.bridges', JSON.stringify(state.bridgeProfiles)); }
+function tokenKey(id) { return `dexyd.web.tokens.${id || DEFAULT_BRIDGE_ID}`; }
+function readTokensForBridge(id) { return readJson(tokenKey(id)) || (id === DEFAULT_BRIDGE_ID ? readJson('dexyd.web.tokens') : null); }
+function activeBridgeProfile() { return state.bridgeProfiles.find(item => item.id === state.activeBridgeId) || state.bridgeProfiles[0] || { id: DEFAULT_BRIDGE_ID, label: 'Web proxy', url: '' }; }
+function activeBridgeBaseUrl() { return normalizeBridgeUrl(activeBridgeProfile().url || ''); }
+function normalizeBridgeUrl(value) { return String(value || '').trim().replace(/\/+$/g, ''); }
+function apiUrl(path, baseUrl = activeBridgeBaseUrl()) { return baseUrl ? new URL(path, `${baseUrl}/`).toString() : path; }
+function websocketUrl(path, accessToken) {
+  const base = activeBridgeBaseUrl();
+  const url = base ? new URL(path, `${base}/`) : new URL(path, location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('access_token', accessToken);
+  return url.toString();
+}
+function bridgeLabel() { return state.health ? `${state.health.status} · ${state.health.version}` : 'offline'; }
+function realtimeLabel() { return state.socket?.readyState === WebSocket.OPEN ? 'connected' : state.polling ? 'polling fallback' : 'connecting'; }
+function accountLabel() { const auth = state.account?.codexAuth || state.account || {}; return auth.activeAccount?.label || auth.activeAccount?.email || auth.account || auth.message || 'unknown'; }
+function defaultNotificationSettings() { return { inApp: true, system: false, promptFinished: true, approvals: true, questions: true, usage: true, alerts: false }; }
+function notificationsSupported() { return typeof Notification !== 'undefined'; }
+function percentText(value) { return typeof value === 'number' ? `${Math.round(value)}% left` : 'not reported'; }
+function errorMessage(error) { return error instanceof Error ? error.message : String(error); }
+function recordError(level, title, body) {
+  const message = String(body || '').slice(0, 800);
+  state.errorHistory = [{ id: `${Date.now()}-${Math.random()}`, level, title, body: message, timestamp: new Date().toISOString() }, ...state.errorHistory].slice(0, 40);
+  localStorage.setItem('dexyd.web.errorHistory', JSON.stringify(state.errorHistory));
+}
+function clearErrorHistory() { state.errorHistory = []; localStorage.setItem('dexyd.web.errorHistory', '[]'); renderSettings(); }
+function el(tag, className, html) { const node = document.createElement(tag); if (className) node.className = className; if (html !== undefined) node.innerHTML = html; return node; }
+function hint(text) { const node = document.createElement('p'); node.className = 'setting-hint'; node.textContent = text; return node; }
+function button(label, onClick, variant = '') { const node = document.createElement('button'); node.type = 'button'; node.textContent = label; node.className = variant ? `settings-action ${variant}` : 'settings-action'; node.addEventListener('click', event => { event.preventDefault(); Promise.resolve(onClick()).catch(showError); }); return node; }
+function actionRow(buttons) { const row = el('div', 'settings-actions'); row.append(...buttons); return row; }
+function inputRow(label, value, idName, placeholder = '') { const row = el('label', 'field-row'); const span = el('span', '', escapeHtml(label)); const input = document.createElement('input'); input.id = idName; input.value = value || ''; input.placeholder = placeholder; row.append(span, input); return { row, input }; }
+function textareaRow(label, idName, placeholder = '') { const row = el('label', 'field-row'); const span = el('span', '', escapeHtml(label)); const input = document.createElement('textarea'); input.id = idName; input.rows = 4; input.placeholder = placeholder; row.append(span, input); return { row, input }; }
+function statusGrid(rows) { const dl = document.createElement('dl'); dl.className = 'settings-dl'; for (const [key, value] of Object.entries(rows)) { const dt = document.createElement('dt'); dt.textContent = key; const dd = document.createElement('dd'); dd.textContent = value ?? 'unknown'; dl.append(dt, dd); } return dl; }
+function toggleRow(label, key) { const row = el('label', 'toggle-row'); const text = el('span', '', `<strong>${escapeHtml(label)}</strong>`); const input = document.createElement('input'); input.type = 'checkbox'; input.checked = Boolean(state.notificationSettings[key]); input.addEventListener('change', () => { state.notificationSettings[key] = input.checked; localStorage.setItem('dexyd.web.notificationSettings', JSON.stringify(state.notificationSettings)); renderSettings(); }); row.append(text, input); return row; }
+async function requestNotificationPermission() { if (!notificationsSupported()) return showToast('Browser notifications unsupported'); const permission = await Notification.requestPermission(); showToast(`Notifications ${permission}`); renderSettings(); }
+function notify(title, body) { if (state.notificationSettings.inApp) showToast(`${title}: ${body}`); if (notificationsSupported() && state.notificationSettings.system && Notification.permission === 'granted') new Notification(title, { body }); }
+async function saveBridgeProfile(label, url) {
+  const normalized = normalizeBridgeUrl(url);
+  if (normalized && !/^https?:\/\//i.test(normalized)) throw new Error('Bridge URL must start with http:// or https://');
+  const existing = activeBridgeProfile();
+  const id = existing.id || `bridge-${Date.now()}`;
+  const next = { id, label: label.trim() || normalized || 'Dexyd bridge', url: normalized };
+  state.bridgeProfiles = state.bridgeProfiles.map(item => item.id === id ? next : item);
+  if (!state.bridgeProfiles.some(item => item.id === id)) state.bridgeProfiles.push(next);
+  saveBridgeProfiles();
+  await switchBridge(id);
+}
+async function switchBridge(id) {
+  state.activeBridgeId = id;
+  localStorage.setItem('dexyd.web.activeBridgeId', id);
+  state.tokens = readTokensForBridge(id);
+  stopPolling();
+  state.socket?.close();
+  if (!state.tokens) await ensureAuth().catch(error => recordError('warn', 'Web auth unavailable', errorMessage(error)));
+  await Promise.allSettled([refreshHealth(), refreshSessions(), refreshAccount(), refreshDevices(), refreshUsage()]);
+  connectStream();
+  renderSettings();
+}
+async function removeBridge(id) {
+  if (id === DEFAULT_BRIDGE_ID) return;
+  state.bridgeProfiles = state.bridgeProfiles.filter(item => item.id !== id);
+  localStorage.removeItem(tokenKey(id));
+  saveBridgeProfiles();
+  if (state.activeBridgeId === id) await switchBridge(DEFAULT_BRIDGE_ID);
+  renderSettings();
+}
+function parsePairingUri(uri) {
+  const url = new URL(uri.trim());
+  if (url.protocol !== 'dexyd:') throw new Error('Not a dexyd pairing URI');
+  const encoded = url.searchParams.get('payload');
+  if (!encoded) throw new Error('Missing pairing payload');
+  const json = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
+  return JSON.parse(json);
+}
+async function pairPastedUri(uri, deviceLabel, fallbackBridgeUrl) {
+  const payload = parsePairingUri(uri);
+  const bridgeBaseUrl = normalizeBridgeUrl(payload.bridgeBaseUrl || fallbackBridgeUrl || activeBridgeBaseUrl());
+  const body = { pairingUri: uri.trim(), deviceLabel: deviceLabel.trim() || 'dexyd web' };
+  let tokens;
+  try {
+    tokens = await api('/pairing/complete', { method: 'POST', body, baseUrl: bridgeBaseUrl }, false);
+  } catch (error) {
+    if (!activeBridgeBaseUrl()) tokens = await api('/pairing/complete', { method: 'POST', body }, false);
+    else throw error;
+  }
+  const id = `bridge-${crypto.randomUUID?.() || Date.now()}`;
+  state.bridgeProfiles.push({ id, label: bridgeBaseUrl || payload.bridgeBaseUrl || 'Dexyd bridge', url: bridgeBaseUrl });
+  state.activeBridgeId = id;
+  state.tokens = tokens;
+  saveBridgeProfiles();
+  saveTokens();
+  localStorage.setItem('dexyd.web.activeBridgeId', id);
+  await Promise.allSettled([refreshHealth(), refreshSessions(), refreshAccount(), refreshDevices()]);
+  connectStream();
+  renderSettings();
+  showToast('Bridge paired');
+}
+async function startPairing() {
+  const result = await api('/pairing/start', { method: 'POST', body: { bridgeBaseUrl: activeBridgeBaseUrl() || location.origin, expiresInSeconds: 300 } });
+  state.pairingResult = result;
+  renderSettings();
+}
+function pairingResultView(result) { const box = el('div', 'pairing-result'); box.append(el('strong', '', 'Pairing URI generated')); const code = document.createElement('textarea'); code.rows = 4; code.readOnly = true; code.value = result.pairingUri || ''; box.append(code); if (result.qrCodeDataUrl) { const img = document.createElement('img'); img.src = result.qrCodeDataUrl; img.alt = 'Pairing QR'; box.append(img); } box.append(button('Copy URI', () => copyText(result.pairingUri || ''))); return box; }
+function accountList(auth) { const box = el('div', 'account-list'); const accounts = auth.accounts || auth.availableAccounts || []; if (!accounts.length) { box.append(hint('No alternate Codex accounts reported.')); return box; } for (const account of accounts) { const row = el('div', 'account-row'); const label = account.label || account.email || account.id || String(account); row.innerHTML = `<span>${escapeHtml(label)}</span>`; row.append(button('Switch', () => api('/codex-auth/switch', { method: 'POST', body: { query: label } }).then(refreshAccount), 'primary')); box.append(row); } return box; }
+function devicesList() { const box = el('div', 'devices-list'); if (!state.devices.length) { box.append(hint('No trusted devices returned by the bridge.')); return box; } for (const device of state.devices) { const row = el('div', 'device-row'); row.innerHTML = `<span><strong>${escapeHtml(device.label || shortId(device.id))}</strong><small>${escapeHtml(device.trustState || device.trust_state || 'trusted')} · ${escapeHtml(shortId(device.id))}</small></span>`; if (device.id !== state.tokens?.deviceId) row.append(button('Revoke', async () => { await api(`/devices/${encodeURIComponent(device.id)}`, { method: 'DELETE' }); await refreshDevices(); }, 'danger')); else row.append(el('small', 'muted', 'this browser')); box.append(row); } return box; }
+async function checkUpdates() {
+  const response = await fetch('https://api.github.com/repos/DrB0rk/dexyd/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+  if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+  const release = await response.json();
+  const latestVersion = release.tag_name || '';
+  const currentVersion = state.health?.version || '0.0.0';
+  state.updateInfo = { latestVersion, currentVersion, releaseUrl: release.html_url || 'https://github.com/DrB0rk/dexyd/releases/latest', updateAvailable: compareVersions(latestVersion, currentVersion) > 0 };
+  renderSettings();
+}
+function compareVersions(left, right) { const a = String(left).replace(/^v/i, '').split('-')[0].split('.').map(Number); const b = String(right).replace(/^v/i, '').split('-')[0].split('.').map(Number); for (let i = 0; i < Math.max(a.length, b.length); i++) { const diff = (a[i] || 0) - (b[i] || 0); if (diff) return diff > 0 ? 1 : -1; } return 0; }
+function fullLocalReset() { if (!confirm('Reset this browser profile, tokens, inbox, and cached chat?')) return; Object.keys(localStorage).filter(key => key.startsWith('dexyd.web.')).forEach(key => localStorage.removeItem(key)); location.reload(); }
 function copyText(text) { navigator.clipboard?.writeText(text).then(() => showToast('Copied')).catch(() => showToast('Copy failed')); }
 function renderDl(element, rows) { element.replaceChildren(); for (const [key, value] of Object.entries(rows)) { const dt = document.createElement('dt'); dt.textContent = key; const dd = document.createElement('dd'); dd.textContent = value ?? 'unknown'; element.append(dt, dd); } }
-function showError(error) { showToast(error instanceof Error ? error.message : String(error)); }
+function showError(error) { const message = errorMessage(error); recordError('error', 'Web UI error', message); showToast(message); renderSettings(); }
 function showToast(message) { els.toast.textContent = message; els.toast.hidden = false; clearTimeout(showToast.timer); showToast.timer = setTimeout(() => { els.toast.hidden = true; }, 3600); }

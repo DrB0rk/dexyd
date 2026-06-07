@@ -150,3 +150,41 @@ dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-s
   .settings-content { grid-template-columns: 1fr; }
 }
 #chatView[hidden], #emptyState[hidden], #queueBox[hidden], #commandBar[hidden], #suggestions[hidden], #toast[hidden], #inboxBadge[hidden] { display: none !important; }
+.settings-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: min(680px, 78vh); max-height: 78vh; }
+.settings-menu { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 7px; padding: 12px; border-right: 1px solid var(--line); background: #101217; }
+.settings-menu-item { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; text-align: left; border-color: transparent; background: transparent; padding: 10px; }
+.settings-menu-item.active { background: var(--panel-2); border-color: #4d5564; }
+.settings-menu-item.attention::after { content: ''; position: absolute; width: 7px; height: 7px; right: 9px; top: 9px; border-radius: 999px; background: var(--warn); }
+.settings-menu-item { position: relative; }
+.settings-menu-item strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.settings-menu-item small { display: block; margin-top: 2px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.settings-icon { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--muted); background: #0c0e12; }
+.settings-body { min-width: 0; min-height: 0; overflow: auto; padding: 14px; }
+.settings-pane { display: grid; gap: 14px; }
+.settings-pane-head h2 { margin: 0; font-size: 20px; letter-spacing: -.03em; }
+.settings-pane-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.settings-dl { border: 1px solid var(--line-soft); border-radius: 14px; background: #101217; padding: 12px; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-action.primary { background: var(--accent); border-color: var(--accent); color: #111318; font-weight: 800; }
+.settings-action.danger { color: var(--bad); }
+.field-row { display: grid; gap: 6px; }
+.field-row > span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.setting-hint { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.bridge-list, .devices-list, .account-list, .history-list { display: grid; gap: 8px; }
+.bridge-profile, .device-row, .account-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--line-soft); border-radius: 13px; background: #101217; padding: 10px; }
+.bridge-profile strong, .device-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.bridge-profile small, .device-row small { display: block; margin-top: 2px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.toggle-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid var(--line-soft); border-radius: 13px; background: #101217; padding: 10px 12px; }
+.toggle-row strong { font-size: 13px; }
+.toggle-row input { width: auto; accent-color: var(--accent); }
+.pairing-result { display: grid; gap: 10px; border: 1px solid var(--line-soft); border-radius: 14px; background: #101217; padding: 12px; }
+.pairing-result img { width: 190px; max-width: 100%; border-radius: 10px; background: white; padding: 8px; }
+.history-item { display: grid; gap: 5px; border: 1px solid var(--line-soft); border-radius: 13px; background: #101217; padding: 10px; }
+.history-item.error { border-color: color-mix(in srgb, var(--bad) 42%, var(--line)); }
+.history-item strong { font-size: 13px; }
+.history-item p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.history-item span { color: var(--muted-2); font-size: 11px; }
+@media (max-width: 760px) {
+  .settings-layout { grid-template-columns: 1fr; max-height: 82vh; }
+  .settings-menu { grid-template-columns: repeat(2, minmax(0, 1fr)); border-right: 0; border-bottom: 1px solid var(--line); }
+}

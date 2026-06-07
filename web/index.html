@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <title>Dexyd Web</title>
     <link rel="icon" href="/web/static/dexyd-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/web/static/style.css?v=20260607-ui2" />
+    <link rel="stylesheet" href="/web/static/style.css?v=20260607-settings1" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -105,22 +105,9 @@
         </div>
         <button id="closeSettings" class="ghost" type="button">Close</button>
       </header>
-      <div class="settings-content">
-        <section>
-          <h2>Connection</h2>
-          <dl id="settingsConnection"></dl>
-          <button id="resetWebAuth" class="ghost full" type="button">Reset web auth</button>
-        </section>
-        <section>
-          <h2>Account</h2>
-          <dl id="accountStatus"></dl>
-        </section>
-        <section class="settings-wide">
-          <h2>Hidden sessions</h2>
-          <p class="muted">Restore sessions hidden from Dexyd. This never deletes project files.</p>
-          <button id="loadHiddenSessions" class="ghost full" type="button">Load hidden sessions</button>
-          <div id="hiddenSessions" class="hidden-sessions"></div>
-        </section>
+      <div class="settings-layout">
+        <nav id="settingsMenu" class="settings-menu" aria-label="Settings sections"></nav>
+        <section id="settingsBody" class="settings-body"></section>
       </div>
     </dialog>
 
@@ -146,6 +133,6 @@
     </dialog>
 
     <div id="toast" class="toast" hidden></div>
-    <script src="/web/static/app.js?v=20260607-ui2" type="module"></script>
+    <script src="/web/static/app.js?v=20260607-settings1" type="module"></script>
   </body>
 </html>
