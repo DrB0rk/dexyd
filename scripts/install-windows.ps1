@@ -266,17 +266,19 @@ function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
   Fail 'No supported Windows package manager found. Install Git, Node.js 20+, npm, and Python 3.10+ manually, then rerun.'
 }
 
-function Get-PythonCommand {
-  $probe = 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
-  if ((Has python) -and (Test-CommandWorks python @('-c', $probe))) { return @('python') }
-  if ((Has python3) -and (Test-CommandWorks python3 @('-c', $probe))) { return @('python3') }
-  if ((Has py) -and (Test-CommandWorks py @('-3', '-c', $probe))) { return @('py', '-3') }
-  return $null
+function New-PythonCommand([string]$File, [string[]]$Args = @()) {
+  return [pscustomobject]@{
+    File = $File
+    Args = @($Args)
+  }
 }
 
-function Python-Args($Py) {
-  if ($Py.Length -le 1) { return @() }
-  return $Py[1..($Py.Length - 1)]
+function Get-PythonCommand {
+  $probe = 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+  if ((Has python) -and (Test-CommandWorks python @('-c', $probe))) { return (New-PythonCommand 'python') }
+  if ((Has python3) -and (Test-CommandWorks python3 @('-c', $probe))) { return (New-PythonCommand 'python3') }
+  if ((Has py) -and (Test-CommandWorks py @('-3', '-c', $probe))) { return (New-PythonCommand 'py' @('-3')) }
+  return $null
 }
 
 function Test-NodeMajor {
@@ -475,7 +477,7 @@ path.write_text(s, encoding='utf-8')
 '@
   $tmp = New-TemporaryFile
   Set-Content -Path $tmp -Value $code -Encoding UTF8
-  Invoke-Checked $py[0] ((Python-Args $py) + @($tmp, $config, $workspace, $key))
+  Invoke-Checked $py.File ($py.Args + @($tmp, $config, $workspace, $key))
   Remove-Item -LiteralPath $tmp -Force
   Write-Ok "Configured $config"
 }
@@ -501,7 +503,7 @@ function Install-Tui([string]$Root) {
   }
   if (-not (Test-Path -LiteralPath $venvPython)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $venv) | Out-Null
-    Invoke-Checked $py[0] ((Python-Args $py) + @('-m', 'venv', $venv))
+    Invoke-Checked $py.File ($py.Args + @('-m', 'venv', $venv))
   }
   Invoke-Checked $venvPython @('-m', 'pip', 'install', '--upgrade', 'pip')
   Invoke-Checked $venvPython @('-m', 'pip', 'install', '-r', (Join-Path $Root 'tui\requirements.txt'))
