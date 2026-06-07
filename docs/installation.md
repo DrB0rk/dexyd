@@ -118,6 +118,12 @@ Run PowerShell as your normal user, then install from GitHub:
 iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
+From a cloned checkout, Command Prompt users can run:
+
+```cmd
+scripts\install-windows.cmd
+```
+
 The Windows installer puts Dexyd in `%LOCALAPPDATA%\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; clones or updates the repository; creates `dexyd.config.yaml`; installs bridge dependencies; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
 
 Useful options from an existing checkout:
@@ -126,6 +132,7 @@ Useful options from an existing checkout:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -UseCurrent
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Dir "$env:USERPROFILE\Apps\Dexyd"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Clean
+scripts\install-windows.cmd -UseCurrent
 ```
 
 Start the TUI:

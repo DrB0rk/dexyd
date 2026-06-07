@@ -57,6 +57,12 @@ Windows PowerShell:
 iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
+Windows from a cloned checkout:
+
+```cmd
+scripts\install-windows.cmd
+```
+
 The installer:
 
 - installs into the app data location, normally `~/.local/share/dexyd` on Linux or `%LOCALAPPDATA%\Dexyd` on Windows;
