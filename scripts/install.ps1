@@ -62,6 +62,72 @@ function Test-CommandWorks([string]$File, [string[]]$Args) {
   return $result.ExitCode -eq 0
 }
 
+function Ask-YesNo([string]$Prompt) {
+  if ($Yes) { return $true }
+  try {
+    $answer = Read-Host "$Prompt [y/N]"
+    return $answer -match '^(?i:y|yes)$'
+  } catch {
+    return $false
+  }
+}
+
+function Get-WindowsPackageManager {
+  if (Has winget) { return 'winget' }
+  if (Has choco) { return 'choco' }
+  return $null
+}
+
+function Refresh-PathFromRegistry {
+  $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+  $env:Path = (($machine, $user, $env:Path) -join ';')
+}
+
+function Get-DependencyIssues {
+  $issues = @()
+  foreach ($cmd in @('git', 'node', 'npm')) {
+    if (-not (Has $cmd)) { $issues += $cmd }
+  }
+  if (-not (Get-PythonCommand)) { $issues += 'python' }
+  $major = Test-NodeMajor
+  if ($major -gt 0 -and $major -lt 20) { $issues += "nodejs<20 ($(& node --version 2>$null))" }
+  return $issues
+}
+
+function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
+  $needsGit = $Issues -contains 'git'
+  $needsNode = ($Issues -contains 'node') -or ($Issues -contains 'npm') -or (($Issues | Where-Object { $_ -like 'nodejs<20*' }).Count -gt 0)
+  $needsPython = $Issues -contains 'python'
+
+  if ($Manager -eq 'winget') {
+    $wingetBase = @('install', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements')
+    if ($needsGit) { Invoke-Checked winget ($wingetBase + @('--id', 'Git.Git')) }
+    if ($needsNode) { Invoke-Checked winget ($wingetBase + @('--id', 'OpenJS.NodeJS.LTS')) }
+    if ($needsPython) {
+      $result = Invoke-Capture winget ($wingetBase + @('--id', 'Python.Python.3.13'))
+      if ($result.ExitCode -ne 0) {
+        Write-Warn $result.Output
+        Invoke-Checked winget ($wingetBase + @('--id', 'Python.Python.3.12'))
+      }
+    }
+    Refresh-PathFromRegistry
+    return
+  }
+
+  if ($Manager -eq 'choco') {
+    $packages = @()
+    if ($needsGit) { $packages += 'git' }
+    if ($needsNode) { $packages += 'nodejs-lts' }
+    if ($needsPython) { $packages += 'python' }
+    if ($packages.Count -gt 0) { Invoke-Checked choco (@('install', '-y') + $packages) }
+    Refresh-PathFromRegistry
+    return
+  }
+
+  Fail 'No supported Windows package manager found. Install Git, Node.js 20+, npm, and Python 3 manually, then rerun.'
+}
+
 function Get-PythonCommand {
   if ((Has py) -and (Test-CommandWorks py @('-3', '--version'))) { return @('py', '-3') }
   if ((Has python) -and (Test-CommandWorks python @('--version'))) { return @('python') }
@@ -82,13 +148,23 @@ function Test-NodeMajor {
 }
 
 function Check-Dependencies {
-  $missing = @()
-  foreach ($cmd in @('git', 'node', 'npm')) {
-    if (-not (Has $cmd)) { $missing += $cmd }
+  $issues = @(Get-DependencyIssues)
+  if ($issues.Count -gt 0) {
+    Write-Warn "Missing or outdated dependencies: $($issues -join ', ')"
+    $manager = Get-WindowsPackageManager
+    if (-not $manager) {
+      Fail 'No supported package manager found. Install Git, Node.js 20+, npm, and Python 3 manually, or install winget/Chocolatey and rerun.'
+    }
+    if (Ask-YesNo "Install or refresh required dependencies with $manager now?") {
+      Install-DependencyPackages $manager $issues
+      $issues = @(Get-DependencyIssues)
+    } else {
+      Fail 'Dependency installation was not approved. Install Git, Node.js 20+, npm, and Python 3 manually, or rerun with -Yes.'
+    }
   }
-  if (-not (Get-PythonCommand)) { $missing += 'python' }
-  if ($missing.Count -gt 0) {
-    Fail "Missing required tools: $($missing -join ', '). Install Git, Node.js 20+, npm, and Python 3, then rerun."
+
+  if ($issues.Count -gt 0) {
+    Fail "Still missing or outdated after install attempt: $($issues -join ', '). Open a new terminal or install dependencies manually, then rerun."
   }
   if (-not (Test-CommandWorks git @('--version'))) { Fail 'Git is installed but failed to run. Check your Git for Windows installation and PATH.' }
   $major = Test-NodeMajor
