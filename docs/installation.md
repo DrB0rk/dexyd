@@ -109,7 +109,6 @@ npm run tui
 
 The npm TUI command is cross-platform and uses the Node launcher, so it works on Windows too after dependencies are installed.
 
-
 ## Windows guided install
 
 Run PowerShell as your normal user, then install from GitHub:
@@ -124,13 +123,14 @@ From a cloned checkout, Command Prompt users can run:
 scripts\install-windows.cmd
 ```
 
-The Windows installer puts Dexyd in `%LOCALAPPDATA%\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; clones or updates the repository; creates `dexyd.config.yaml`; installs bridge dependencies; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
+The Windows installer puts Dexyd in `%LOCALAPPDATA%\Programs\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; clones the selected branch or tag from a safe temporary working directory; preserves `dexyd.config.yaml` and `.dexyd` data during repair/update installs; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Programs\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
 
 Useful options from an existing checkout:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -UseCurrent
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Dir "$env:USERPROFILE\Apps\Dexyd"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Branch v0.0.26
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Clean
 scripts\install-windows.cmd -UseCurrent
 ```
@@ -159,7 +159,6 @@ docker compose up -d --build
 ```
 
 Open `http://localhost:8080` or `http://<computer-lan-ip>:8080`. The container proxies API and WebSocket traffic to the host bridge at `http://127.0.0.1:4242` using Docker host networking; it stores no bridge data and requires no Docker secrets. See [Self-hosted web control app](web-app.md).
-
 ## Manual bridge install
 
 Use this when you do not want the guided installer:

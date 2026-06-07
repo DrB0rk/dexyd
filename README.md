@@ -65,7 +65,7 @@ scripts\install-windows.cmd
 
 The installer:
 
-- installs into the app data location, normally `~/.local/share/dexyd` on Linux or `%LOCALAPPDATA%\Dexyd` on Windows;
+- installs into the app data location, normally `~/.local/share/dexyd` on Linux or `%LOCALAPPDATA%\Programs\Dexyd` on Windows;
 - creates `dexyd.config.yaml` with your home directory as the workspace root;
 - installs bridge and TUI dependencies;
 - builds the bridge;
@@ -107,7 +107,6 @@ Open `http://localhost:8080` or `http://<computer-lan-ip>:8080`. The stack publi
 The web UI supports project selection, session chat, queued messages, approvals/questions, command insertion, per-turn diffs, hidden-session restore, usage/account status, and local chat drafts/cache.
 
 See [Self-hosted web control app](docs/web-app.md).
-
 ## Install the Android app
 
 Download the latest APK from GitHub Releases:
