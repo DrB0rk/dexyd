@@ -37,7 +37,7 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 ## Requirements
 
 - Linux or Windows computer for the bridge/TUI.
-- Node.js 20+ and Python 3; installers check required dependencies where possible.
+- Node.js 20+ and Python 3; installers detect missing dependencies and ask before installing them where supported.
 - Codex CLI authenticated on the bridge computer.
 - Optional: OMX for OMX-backed sessions and harness behavior.
 - Android phone with the Dexyd APK installed.

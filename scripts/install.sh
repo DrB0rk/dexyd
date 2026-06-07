@@ -14,6 +14,7 @@ BRANCH="${DEXYD_BRANCH:-$DEXYD_BRANCH_DEFAULT}"
 INSTALL_DIR="${DEXYD_INSTALL_DIR:-$DEXYD_INSTALL_DIR_DEFAULT}"
 INSTALL_SERVICE=1
 OPEN_FIREWALL=0
+ASSUME_YES=0
 USE_CURRENT=0
 CLEAN_ONLY=0
 ORIGINAL_CWD="$(pwd -P 2>/dev/null || pwd)"
@@ -38,6 +39,22 @@ warn() { printf '! %s\n' "$*" >&2; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
+ask_yes_no() {
+  local prompt="$1" answer=""
+  if [[ "$ASSUME_YES" == "1" ]]; then
+    return 0
+  fi
+  if [[ ! -r /dev/tty ]]; then
+    return 1
+  fi
+  printf '%s [y/N] ' "$prompt" > /dev/tty
+  IFS= read -r answer < /dev/tty || return 1
+  case "$answer" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 usage() {
   cat <<USAGE
 Dexyd installer
@@ -54,7 +71,7 @@ Options:
   --no-service       Do not install/start the user systemd service.
   --firewall         Open bridge port 4242 in a supported Linux firewall.
   --clean            Remove installed Dexyd app/service/command and exit.
-  --yes, -y          Compatibility no-op; installer is non-interactive.
+  --yes, -y          Approve dependency installation prompts.
   --help, -h         Show this help.
 
 Environment overrides:
@@ -72,18 +89,28 @@ while [[ $# -gt 0 ]]; do
     --service) INSTALL_SERVICE=1; shift ;;
     --firewall) OPEN_FIREWALL=1; shift ;;
     --clean) CLEAN_ONLY=1; shift ;;
-    --yes|-y) shift ;;
+    --yes|-y) ASSUME_YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
 
 expand_path() {
-  python3 - "$1" <<'PY'
-from pathlib import Path
-import os, sys
-print(Path(os.path.expandvars(os.path.expanduser(sys.argv[1]))).resolve())
-PY
+  local path="$1" dir base
+  case "$path" in
+    "~") path="$HOME" ;;
+    "~/"*) path="$HOME/${path#~/}" ;;
+  esac
+  if [[ "$path" != /* ]]; then
+    path="$ORIGINAL_CWD/$path"
+  fi
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+  if [[ -d "$dir" ]]; then
+    (cd "$dir" && printf '%s/%s\n' "$(pwd -P)" "$base")
+  else
+    printf '%s/%s\n' "$dir" "$base"
+  fi
 }
 
 INSTALL_DIR="$(expand_path "$INSTALL_DIR")"
@@ -130,30 +157,42 @@ install_packages() {
   esac
 }
 
+dependency_summary() {
+  local missing=("$@") major
+  major="$(node_major)"
+  if (( ${#missing[@]} > 0 )); then
+    printf 'Missing: %s' "${missing[*]}"
+  fi
+  if (( major > 0 && major < 20 )); then
+    if (( ${#missing[@]} > 0 )); then printf '; '; fi
+    printf 'Node.js %s is too old; Node.js 20+ is required' "$(node --version 2>/dev/null || echo unknown)"
+  fi
+}
+
 node_major() {
   if ! has node; then echo 0; return; fi
   node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0
 }
 
 check_core_dependencies() {
-  local missing=() major pm
+  local missing=() major pm summary
   for cmd in git curl node npm python3; do
     has "$cmd" || missing+=("$cmd")
   done
 
   major="$(node_major)"
   if (( ${#missing[@]} > 0 || major < 20 )); then
-    if (( major > 0 && major < 20 )); then
-      warn "Node.js $(node --version) detected; Dexyd requires Node.js 20+."
-    else
-      warn "Missing dependencies: ${missing[*]:-none}"
-    fi
+    summary="$(dependency_summary "${missing[@]}")"
+    warn "$summary"
     pm="$(detect_pm)"
-    if [[ "$pm" != "unknown" ]]; then
+    if [[ "$pm" == "unknown" ]]; then
+      fail "No supported package manager found. Install git, curl, Node.js 20+, npm, python3, and python3-venv manually."
+    fi
+    if ask_yes_no "Install or refresh required system packages with $pm now?"; then
       dim "Installing/refreshing system packages with $pm"
-      install_packages "$pm" || true
+      install_packages "$pm" || warn "Package installation command failed; checking dependencies again."
     else
-      warn "No supported package manager found. Install git, curl, Node.js 20+, npm, python3, and python3-venv manually."
+      fail "Dependency installation was not approved. Install git, curl, Node.js 20+, npm, python3, and python3-venv manually, or rerun with --yes."
     fi
   fi
 

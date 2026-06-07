@@ -76,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.s
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
 ```
 
-`--yes` is accepted for compatibility with older commands; current installs are already non-interactive except for any password prompt from `sudo` while installing missing system packages.
+`--yes` approves installing or refreshing missing system dependencies with the detected package manager. You may still see a password prompt from `sudo`.
 
 `--clean` removes the installed Dexyd app directory, user service, and `~/.local/bin/dexyd` command link, then exits.
 
@@ -123,7 +123,7 @@ From a cloned checkout, Command Prompt users can run:
 scripts\install-windows.cmd
 ```
 
-The Windows installer puts Dexyd in `%LOCALAPPDATA%\Programs\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; clones the selected branch or tag from a safe temporary working directory; preserves `dexyd.config.yaml` and `.dexyd` data during repair/update installs; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Programs\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
+The Windows installer puts Dexyd in `%LOCALAPPDATA%\Programs\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; asks before installing missing dependencies with winget or Chocolatey when available; clones the selected branch or tag from a safe temporary working directory; preserves `dexyd.config.yaml` and `.dexyd` data during repair/update installs; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Programs\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
 
 Useful options from an existing checkout:
 
@@ -131,6 +131,7 @@ Useful options from an existing checkout:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -UseCurrent
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Dir "$env:USERPROFILE\Apps\Dexyd"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Branch v0.0.26
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Yes
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Clean
 scripts\install-windows.cmd -UseCurrent
 ```
