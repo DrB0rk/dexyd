@@ -77,38 +77,24 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
-  $argumentListProperty = [System.Diagnostics.ProcessStartInfo].GetProperty('ArgumentList')
-  if ($argumentListProperty) {
-    foreach ($arg in $Args) { [void]$psi.ArgumentList.Add($arg) }
-  } else {
-    $psi.Arguments = (($Args | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
-  }
+  $psi.Arguments = (($Args | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
 
-  $stdout = New-Object System.Text.StringBuilder
-  $stderr = New-Object System.Text.StringBuilder
-  $outHandler = [System.Diagnostics.DataReceivedEventHandler]{ param($sender, $eventArgs) if ($null -ne $eventArgs.Data) { [void]$stdout.AppendLine($eventArgs.Data) } }
-  $errHandler = [System.Diagnostics.DataReceivedEventHandler]{ param($sender, $eventArgs) if ($null -ne $eventArgs.Data) { [void]$stderr.AppendLine($eventArgs.Data) } }
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $psi
   try {
-    [void]$process.add_OutputDataReceived($outHandler)
-    [void]$process.add_ErrorDataReceived($errHandler)
     [void]$process.Start()
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
       try { $process.Kill() } catch {}
       return [pscustomobject]@{ ExitCode = 124; Output = "$File $($Args -join ' ') timed out after ${TimeoutSeconds}s" }
     }
-    $process.WaitForExit()
-    $output = (($stdout.ToString(), $stderr.ToString()) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $output = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = $output.Trim() }
+  } catch {
+    return [pscustomobject]@{ ExitCode = 127; Output = "$File $($Args -join ' ') failed to start: $($_.Exception.Message)" }
   } finally {
-    if ($process) {
-      try { [void]$process.remove_OutputDataReceived($outHandler) } catch {}
-      try { [void]$process.remove_ErrorDataReceived($errHandler) } catch {}
-      $process.Dispose()
-    }
+    if ($process) { $process.Dispose() }
   }
 }
 
@@ -141,12 +127,24 @@ function Refresh-PathFromRegistry {
 
 function Get-DependencyIssues {
   $issues = @()
-  foreach ($cmd in @('git', 'node', 'npm')) {
-    if (-not (Has $cmd)) { $issues += $cmd }
+  Write-Note 'Checking Git'
+  if (-not (Has 'git')) { $issues += 'git' }
+  elseif (-not (Test-CommandWorks git @('--version'))) { $issues += 'git' }
+
+  Write-Note 'Checking Node.js'
+  if (-not (Has 'node')) { $issues += 'node' }
+  else {
+    $major = Test-NodeMajor
+    if ($major -eq 0) { $issues += 'node' }
+    elseif ($major -lt 20) { $issues += "nodejs<20" }
   }
+
+  Write-Note 'Checking npm'
+  if (-not (Has 'npm')) { $issues += 'npm' }
+  elseif (-not (Test-CommandWorks npm @('--version'))) { $issues += 'npm' }
+
+  Write-Note 'Checking Python'
   if (-not (Get-PythonCommand)) { $issues += 'python' }
-  $major = Test-NodeMajor
-  if ($major -gt 0 -and $major -lt 20) { $issues += "nodejs<20 ($(& node --version 2>$null))" }
   return $issues
 }
 
@@ -448,6 +446,7 @@ function Install-Command([string]$Root) {
   Write-Ok "Installed command: $cmd"
 }
 
+function Invoke-DexydInstallerMain {
 $script:InitialLocation = (Get-Location).Path
 $InstallDir = Resolve-FullPath $Dir
 Write-Host 'Dexyd Windows installer'
@@ -475,3 +474,14 @@ Write-Host 'Dexyd installed for Windows'
 Write-Host "  $(Join-Path $root 'bin\dexyd.cmd') --tui"
 Write-Host "  $(Join-Path $root 'bin\dexyd.cmd')"
 Write-Host 'Open a new terminal if PATH was updated.'
+}
+
+try {
+  Invoke-DexydInstallerMain
+} catch {
+  Write-Host ''
+  Write-Host 'Dexyd installer failed:' -ForegroundColor Red
+  Write-Host $_.Exception.Message -ForegroundColor Red
+  if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+  exit 1
+}
