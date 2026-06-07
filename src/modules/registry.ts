@@ -36,11 +36,21 @@ export function createCoreModules(): DexydModule[] {
     }
   });
 
+  const scheduledMessagesModule = createScaffoldModule('scheduledMessages', 'persisted one-time and repeated chat prompts', {
+    onStart: (ctx) => {
+      ctx.codexChatService?.startScheduledMessages();
+    },
+    onStop: (ctx) => {
+      ctx.codexChatService?.stopScheduledMessages();
+    }
+  });
+
   return [
     createScaffoldModule('auth', 'tokens, device identity, revocation and replay protection'),
     createScaffoldModule('pairing', 'qr payload generation and device trust establishment'),
     createScaffoldModule('session', 'session lifecycle and restoration'),
     streamModule,
+    scheduledMessagesModule,
     createScaffoldModule('codexAdapter', 'capability probing and execution normalization'),
     createScaffoldModule('harness', 'omx/subprocess harness management and cancellation'),
     createScaffoldModule('terminal', 'pty lifecycle, resizing, input forwarding and bounded history'),

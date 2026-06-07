@@ -104,5 +104,28 @@ export const migrations: Migration[] = [
         hidden_at TEXT NOT NULL
       );
     `
+  },
+  {
+    id: '0005_scheduled_messages',
+    sql: `
+      CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        actor_device_id TEXT NOT NULL,
+        next_run_at TEXT NOT NULL,
+        repeat_interval_ms INTEGER,
+        repeat_max_runs INTEGER,
+        run_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        last_run_at TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_scheduled_messages_session ON scheduled_messages(session_id);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, next_run_at);
+    `
   }
 ];

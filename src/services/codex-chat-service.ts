@@ -6,7 +6,7 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import { EventEnvelope } from '../runtime/runtime-state.js';
 import { EventService } from './event-service.js';
 import { SqliteService } from '../db/sqlite.js';
-import { ChatMessage } from '../domain/chat.js';
+import { ChatMessage, ScheduledChatMessage } from '../domain/chat.js';
 import { DiffSummary } from '../domain/diff.js';
 import { SessionRecord } from '../domain/session.js';
 import { CodexSessionService } from './codex-session-service.js';
@@ -46,6 +46,7 @@ export type QueuedChatMessage = {
 
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const QUEUE_DRAIN_DELAY_MS = 50;
+const SCHEDULED_DISPATCH_INTERVAL_MS = 15_000;
 
 export class CodexChatService {
   private readonly launch: RuntimeLaunch;
@@ -55,6 +56,8 @@ export class CodexChatService {
   private readonly drainingSessions = new Set<string>();
   private readonly queueDrainTimers = new Map<string, NodeJS.Timeout>();
   private readonly cancelTimers = new WeakMap<ChildProcess, NodeJS.Timeout>();
+  private scheduledDispatchTimer: NodeJS.Timeout | null = null;
+  private scheduledDispatchActive = false;
 
   constructor(
     private readonly db: SqliteService,
@@ -91,6 +94,159 @@ export class CodexChatService {
 
   getQueue(sessionId: string): QueuedChatMessage[] {
     return [...(this.queues.get(sessionId) ?? [])];
+  }
+
+  getScheduledMessages(sessionId: string): ScheduledChatMessage[] {
+    return this.db.listScheduledMessages(sessionId).filter((message) => message.status === 'scheduled');
+  }
+
+  createScheduledMessage(input: {
+    session: SessionRecord;
+    message: string;
+    actorDeviceId: string;
+    runAt: Date;
+    repeatIntervalMs?: number | null;
+    repeatMaxRuns?: number | null;
+  }): ScheduledChatMessage {
+    const content = input.message.trim();
+    if (!content) {
+      throw new Error('empty_message');
+    }
+    const scheduled = this.db.createScheduledMessage({
+      sessionId: input.session.id,
+      content,
+      actorDeviceId: input.actorDeviceId,
+      nextRunAt: input.runAt.toISOString(),
+      repeatIntervalMs: input.repeatIntervalMs ?? null,
+      repeatMaxRuns: input.repeatMaxRuns ?? null
+    });
+    this.eventService.emit({
+      eventType: 'chat.message.scheduled.created',
+      source: 'session',
+      sessionId: input.session.id,
+      payload: scheduled
+    });
+    if (input.runAt.getTime() <= Date.now() + 1000) {
+      setImmediate(() => {
+        this.runDueScheduledMessages().catch((error) => {
+          this.logger.warn(
+            { error: error instanceof Error ? error.message : 'unknown error' },
+            'scheduled message immediate dispatch failed'
+          );
+        });
+      });
+    }
+    return scheduled;
+  }
+
+  cancelScheduledMessage(input: { sessionId: string; scheduleId: string }): ScheduledChatMessage | null {
+    const scheduled = this.db.cancelScheduledMessage({
+      sessionId: input.sessionId,
+      id: input.scheduleId
+    });
+    if (!scheduled) return null;
+    this.eventService.emit({
+      eventType: 'chat.message.scheduled.cancelled',
+      source: 'session',
+      sessionId: input.sessionId,
+      payload: scheduled
+    });
+    return scheduled;
+  }
+
+  startScheduledMessages(): void {
+    if (this.scheduledDispatchTimer) return;
+    this.scheduledDispatchTimer = setInterval(() => {
+      this.runDueScheduledMessages().catch((error) => {
+        this.logger.warn(
+          { error: error instanceof Error ? error.message : 'unknown error' },
+          'scheduled message dispatch loop failed'
+        );
+      });
+    }, SCHEDULED_DISPATCH_INTERVAL_MS);
+    this.scheduledDispatchTimer.unref();
+    this.runDueScheduledMessages().catch((error) => {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : 'unknown error' },
+        'initial scheduled message dispatch failed'
+      );
+    });
+  }
+
+  stopScheduledMessages(): void {
+    if (!this.scheduledDispatchTimer) return;
+    clearInterval(this.scheduledDispatchTimer);
+    this.scheduledDispatchTimer = null;
+  }
+
+  async runDueScheduledMessages(now = new Date()): Promise<number> {
+    if (this.scheduledDispatchActive) return 0;
+    this.scheduledDispatchActive = true;
+    try {
+      let dispatched = 0;
+      const due = this.db.listDueScheduledMessages(now.toISOString(), 20);
+      for (const scheduled of due) {
+        const session = this.getSessionForScheduledMessage(scheduled.sessionId);
+        if (!session) {
+          const failed = this.db.markScheduledMessageDispatched({
+            id: scheduled.id,
+            lastRunAt: now.toISOString(),
+            runCount: scheduled.runCount,
+            status: 'failed',
+            error: 'session_not_found'
+          });
+          this.emitScheduledUpdate('chat.message.scheduled.failed', failed ?? scheduled);
+          continue;
+        }
+
+        try {
+          const usage = this.codexSessionService.getUsageStatus(session.id);
+          if (usage.limits.status === 'error') {
+            throw new Error(usage.limits.detail || 'usage_limit_reached');
+          }
+
+          const result = this.sendMessage({
+            session,
+            message: scheduled.content,
+            actorDeviceId: scheduled.actorDeviceId
+          });
+          const runCount = scheduled.runCount + 1;
+          const nextRunAt = nextScheduledRunAt(scheduled, now);
+          const nextStatus = nextRunAt ? 'scheduled' : 'completed';
+          const updated = this.db.markScheduledMessageDispatched({
+            id: scheduled.id,
+            lastRunAt: now.toISOString(),
+            runCount,
+            nextRunAt,
+            status: nextStatus
+          });
+          this.eventService.emit({
+            eventType: 'chat.message.scheduled.dispatched',
+            source: 'session',
+            sessionId: scheduled.sessionId,
+            payload: {
+              scheduled: updated ?? scheduled,
+              turnId: result.turnId,
+              queued: result.queued,
+              queueId: result.queueId ?? null
+            }
+          });
+          dispatched += 1;
+        } catch (error) {
+          const failed = this.db.markScheduledMessageDispatched({
+            id: scheduled.id,
+            lastRunAt: now.toISOString(),
+            runCount: scheduled.runCount,
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'scheduled_dispatch_failed'
+          });
+          this.emitScheduledUpdate('chat.message.scheduled.failed', failed ?? scheduled);
+        }
+      }
+      return dispatched;
+    } finally {
+      this.scheduledDispatchActive = false;
+    }
   }
 
   getTurnDiff(sessionId: string, turnId: string): DiffSummary | null {
@@ -329,6 +485,22 @@ export class CodexChatService {
         this.drainingSessions.has(sessionId) ||
         this.runtimeStatuses.get(sessionId)?.status === 'running'
     );
+  }
+
+  private getSessionForScheduledMessage(sessionId: string): SessionRecord | null {
+    const local = this.db.getSession(sessionId);
+    if (local) return this.applyRuntimeStatus(local);
+    const codexSession = this.codexSessionService.getSession(sessionId);
+    return codexSession ? this.applyRuntimeStatus(codexSession) : null;
+  }
+
+  private emitScheduledUpdate(eventType: string, scheduled: ScheduledChatMessage): void {
+    this.eventService.emit({
+      eventType,
+      source: 'session',
+      sessionId: scheduled.sessionId,
+      payload: scheduled
+    });
   }
 
   private scheduleCodexTurn(input: { session: SessionRecord; turnId: string; message: string }): void {
@@ -671,6 +843,25 @@ function sanitizeRuntimeOutput(output: string): string {
   const lines = output.replace(/\u001b\[[0-9;]*m/g, '').split(/\r?\n/);
   const kept = lines.filter((line) => !isRuntimeNoiseLine(line));
   return kept.join('\n').trim();
+}
+
+function nextScheduledRunAt(scheduled: ScheduledChatMessage, now: Date): string | null {
+  const intervalMs = scheduled.repeatIntervalMs;
+  if (!intervalMs) return null;
+  const nextRunNumber = scheduled.runCount + 1;
+  if (scheduled.repeatMaxRuns !== null && nextRunNumber >= scheduled.repeatMaxRuns) {
+    return null;
+  }
+
+  const nowMs = now.getTime();
+  let nextMs = new Date(scheduled.nextRunAt).getTime() + intervalMs;
+  if (!Number.isFinite(nextMs)) {
+    nextMs = nowMs + intervalMs;
+  }
+  while (nextMs <= nowMs) {
+    nextMs += intervalMs;
+  }
+  return new Date(nextMs).toISOString();
 }
 
 function isRuntimeNoiseLine(line: string): boolean {

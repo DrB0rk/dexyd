@@ -91,6 +91,102 @@ describe('chat bridge', () => {
     }
   });
 
+  it('schedules one-time and repeated chat prompts', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-schedule-'));
+    cleanupPaths.push(tempDir);
+
+    const workspace = join(tempDir, 'workspace');
+    mkdirSync(workspace);
+
+    const fakeCodex = join(tempDir, 'fake-codex.sh');
+    writeFileSync(fakeCodex, '#!/usr/bin/env bash\necho "scheduled assistant response"\n');
+    chmodSync(fakeCodex, 0o755);
+
+    process.env.DEXYD_CONFIG = writeConfig(tempDir, fakeCodex);
+    const service = await createDexydApplication();
+
+    try {
+      const paired = await pairTestDevice(service.app);
+      const authHeader = { authorization: `Bearer ${paired.accessToken}` };
+
+      const created = await service.app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: authHeader,
+        payload: { workspacePath: workspace, profile: 'default' }
+      });
+      const sessionId = (created.json() as { session: { id: string } }).session.id;
+
+      const oneTimeRunAt = new Date(Date.now() + 60_000).toISOString();
+      const scheduledOneTime = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/scheduled`,
+        headers: authHeader,
+        payload: { message: 'run later once', runAt: oneTimeRunAt }
+      });
+      expect(scheduledOneTime.statusCode).toBe(201);
+      const oneTime = (scheduledOneTime.json() as { scheduled: { id: string; status: string; nextRunAt: string } }).scheduled;
+      expect(oneTime.status).toBe('scheduled');
+      expect(oneTime.nextRunAt).toBe(oneTimeRunAt);
+
+      const listed = await service.app.inject({
+        method: 'GET',
+        url: `/sessions/${sessionId}/scheduled`,
+        headers: authHeader
+      });
+      expect((listed.json() as { scheduled: unknown[] }).scheduled).toHaveLength(1);
+
+      const cancelled = await service.app.inject({
+        method: 'DELETE',
+        url: `/sessions/${sessionId}/scheduled/${oneTime.id}`,
+        headers: authHeader
+      });
+      expect(cancelled.statusCode).toBe(200);
+      expect((cancelled.json() as { scheduled: { status: string } }).scheduled.status).toBe('cancelled');
+
+      const repeatedRunAt = new Date(Date.now() + 60_000).toISOString();
+      const scheduledRepeated = await service.app.inject({
+        method: 'POST',
+        url: `/sessions/${sessionId}/scheduled`,
+        headers: authHeader,
+        payload: {
+          message: 'run repeated',
+          runAt: repeatedRunAt,
+          repeat: { intervalMs: 60_000, maxRuns: 2 }
+        }
+      });
+      expect(scheduledRepeated.statusCode).toBe(201);
+
+      const firstDispatched = await service.context.codexChatService.runDueScheduledMessages(
+        new Date(Date.now() + 61_000)
+      );
+      expect(firstDispatched).toBe(1);
+
+      let messages: Array<{ role: string; content: string }> = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const response = await service.app.inject({ method: 'GET', url: `/sessions/${sessionId}/chat`, headers: authHeader });
+        messages = (response.json() as { messages: Array<{ role: string; content: string }> }).messages;
+        if (messages.some((message) => message.role === 'assistant')) break;
+        await sleep(25);
+      }
+
+      expect(messages.some((message) => message.role === 'user' && message.content === 'run repeated')).toBe(true);
+      expect(messages.some((message) => message.role === 'assistant' && message.content.includes('scheduled assistant response'))).toBe(true);
+
+      const activeAfterFirstRun = await service.app.inject({
+        method: 'GET',
+        url: `/sessions/${sessionId}/scheduled`,
+        headers: authHeader
+      });
+      const repeated = (activeAfterFirstRun.json() as { scheduled: Array<{ status: string; runCount: number }> }).scheduled;
+      expect(repeated).toHaveLength(1);
+      expect(repeated[0]?.status).toBe('scheduled');
+      expect(repeated[0]?.runCount).toBe(1);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it('does not carry stale mobile chat history into later Dexyd-created prompts', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-chat-no-history-'));
     cleanupPaths.push(tempDir);

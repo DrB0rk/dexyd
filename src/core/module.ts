@@ -5,6 +5,7 @@ export const MODULE_NAMES = [
   'pairing',
   'session',
   'stream',
+  'scheduledMessages',
   'codexAdapter',
   'harness',
   'terminal',

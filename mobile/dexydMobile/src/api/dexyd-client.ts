@@ -20,6 +20,7 @@ import {
   EventEnvelope,
   HiddenDexydSession,
   QueuedChatMessage,
+  ScheduledChatMessage,
 } from '../types/dexyd';
 
 export type AuthTokens = {
@@ -549,6 +550,57 @@ export async function removeQueuedMessage(
     { method: 'DELETE' },
     tokens,
   );
+}
+
+export async function getScheduledMessages(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens,
+): Promise<ScheduledChatMessage[]> {
+  const result = await fetchJson<{ scheduled: ScheduledChatMessage[] }>(
+    baseUrl,
+    sessionPath(sessionId, '/scheduled'),
+    undefined,
+    tokens,
+  );
+  return result.scheduled;
+}
+
+export async function scheduleChatMessage(
+  baseUrl: string,
+  sessionId: string,
+  input: {
+    message: string;
+    runAt: string;
+    repeat?: { intervalMs: number; maxRuns?: number };
+  },
+  tokens: AuthTokens,
+): Promise<ScheduledChatMessage> {
+  const result = await fetchJson<{ scheduled: ScheduledChatMessage }>(
+    baseUrl,
+    sessionPath(sessionId, '/scheduled'),
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    tokens,
+  );
+  return result.scheduled;
+}
+
+export async function cancelScheduledMessage(
+  baseUrl: string,
+  sessionId: string,
+  scheduleId: string,
+  tokens: AuthTokens,
+): Promise<ScheduledChatMessage> {
+  const result = await fetchJson<{ scheduled: ScheduledChatMessage }>(
+    baseUrl,
+    sessionPath(sessionId, `/scheduled/${encodeURIComponent(scheduleId)}`),
+    { method: 'DELETE' },
+    tokens,
+  );
+  return result.scheduled;
 }
 
 export async function cancelSession(

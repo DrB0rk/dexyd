@@ -8,6 +8,7 @@ This folder contains the detailed Dexyd documentation. The root `README.md` is i
 - [Bridge and TUI](bridge-tui.md) — how the local bridge and terminal UI are used.
 - [Mobile app](mobile-app.md) — app navigation, pairing, sessions, chat, inbox, and settings.
 - [Troubleshooting](troubleshooting.md) — common connection, pairing, session, and build problems.
+- [Repository structure](repository-structure.md) — where bridge, TUI, mobile, installers, docs, and generated files live.
 
 ## Reference
 

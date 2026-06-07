@@ -11,7 +11,8 @@
     "start:reset": "react-native start --reset-cache",
     "ios:sim": "react-native run-ios",
     "ios:device": "react-native run-ios --device",
-    "ios:pods": "bundle exec pod install --project-directory=ios"
+    "ios:pods": "bundle exec pod install --project-directory=ios",
+    "ios:setup": "bash scripts/setup-ios-dev.sh"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^3.1.1",

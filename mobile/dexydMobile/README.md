@@ -27,11 +27,17 @@ npm run mobile:android
 
 ## iOS bring-up
 
-iOS requires macOS with Xcode:
+iOS requires macOS with Xcode. From the repository root run:
 
 ```bash
-bundle install
-npm run ios:pods
+npm run mobile:ios:setup
+```
+
+Then run the simulator:
+
+```bash
+cd mobile/dexydMobile
+npm start
 npm run ios:sim
 ```
 

@@ -28,7 +28,8 @@
     "android:all:debug": "bash dev/scripts/run-all.sh --debug-metro",
     "android:all:debug:tui": "bash dev/scripts/run-all.sh --debug-metro --with-tui",
     "firewall:open": "bash dev/scripts/firewall-port.sh",
-    "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1"
+    "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1",
+    "mobile:ios:setup": "cd mobile/dexydMobile && npm run ios:setup"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",

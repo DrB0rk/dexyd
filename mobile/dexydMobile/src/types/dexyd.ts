@@ -42,6 +42,22 @@ export type QueuedChatMessage = {
   updatedAt: string;
 };
 
+export type ScheduledChatMessage = {
+  id: string;
+  sessionId: string;
+  content: string;
+  actorDeviceId: string;
+  nextRunAt: string;
+  repeatIntervalMs: number | null;
+  repeatMaxRuns: number | null;
+  runCount: number;
+  status: 'scheduled' | 'completed' | 'cancelled' | 'failed';
+  lastRunAt: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type EventEnvelope<T = unknown> = {
   sequence: number;
   timestamp: string;

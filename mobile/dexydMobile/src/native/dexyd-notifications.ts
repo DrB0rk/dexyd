@@ -17,7 +17,7 @@ const nativeModule = NativeModules.DexydNotifications as
   | undefined;
 
 export const DexydNotifications = {
-  available: Platform.OS === 'android' && Boolean(nativeModule),
+  available: (Platform.OS === 'android' || Platform.OS === 'ios') && Boolean(nativeModule),
 
   async areEnabled(): Promise<boolean> {
     if (!nativeModule) return false;

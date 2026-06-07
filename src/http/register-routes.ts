@@ -3,7 +3,7 @@ import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { ModuleManager } from '../core/module-manager.js';
 import { completePairingRequestSchema, refreshRequestSchema, revokeRequestSchema } from '../domain/auth.js';
-import { chatQuerySchema, sendChatMessageRequestSchema } from '../domain/chat.js';
+import { chatQuerySchema, scheduleChatMessageRequestSchema, sendChatMessageRequestSchema } from '../domain/chat.js';
 import { emitEventRequestSchema } from '../domain/events.js';
 import { interactionIdParamsSchema, interactionResponseSchema } from '../domain/interaction.js';
 import { fileQuerySchema, readFileQuerySchema } from '../domain/file.js';
@@ -20,6 +20,7 @@ const sessionIdSchema = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const sessionIdParamsSchema = z.object({ sessionId: sessionIdSchema });
 const queueIdParamsSchema = z.object({ sessionId: sessionIdSchema, queueId: z.string().uuid() });
+const scheduledIdParamsSchema = z.object({ sessionId: sessionIdSchema, scheduleId: z.string().uuid() });
 
 const deviceIdParamsSchema = z.object({ deviceId: z.string().uuid() });
 const listSessionsQuerySchema = z.object({
@@ -724,6 +725,98 @@ export async function registerRoutes(
     }
 
     return { removed };
+  });
+
+  app.get('/sessions/:sessionId/scheduled', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    return { scheduled: context.codexChatService.getScheduledMessages(params.data.sessionId) };
+  });
+
+  app.post('/sessions/:sessionId/scheduled', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+
+    const body = scheduleChatMessageRequestSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    const runAt = new Date(body.data.runAt);
+    if (!Number.isFinite(runAt.getTime())) {
+      return reply.code(400).send({ error: 'invalid_run_at' });
+    }
+
+    const scheduled = context.codexChatService.createScheduledMessage({
+      session,
+      message: body.data.message,
+      actorDeviceId: auth.sub,
+      runAt,
+      repeatIntervalMs: body.data.repeat?.intervalMs ?? null,
+      repeatMaxRuns: body.data.repeat?.maxRuns ?? null
+    });
+
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'chat.message.scheduled',
+      target: params.data.sessionId,
+      metadata: { scheduleId: scheduled.id, nextRunAt: scheduled.nextRunAt }
+    });
+
+    return reply.code(201).send({ scheduled });
+  });
+
+  app.delete('/sessions/:sessionId/scheduled/:scheduleId', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const params = scheduledIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_schedule_id', issues: params.error.issues });
+    }
+
+    const session = getSession(context, params.data.sessionId);
+    if (!session) {
+      return reply.code(404).send({ error: 'session_not_found' });
+    }
+
+    const scheduled = context.codexChatService.cancelScheduledMessage({
+      sessionId: params.data.sessionId,
+      scheduleId: params.data.scheduleId
+    });
+    if (!scheduled) {
+      return reply.code(404).send({ error: 'scheduled_message_not_found' });
+    }
+
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'chat.message.scheduled.cancelled',
+      target: params.data.sessionId,
+      metadata: { scheduleId: params.data.scheduleId }
+    });
+
+    return { scheduled };
   });
 
   app.post('/sessions/:sessionId/chat', async (request, reply) => {

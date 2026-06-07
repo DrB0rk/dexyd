@@ -9,6 +9,7 @@ Pair your phone with your computer, manage sessions by project, chat with agents
 
 [![Release](https://img.shields.io/github/v/release/DrB0rk/dexyd?label=release)](https://github.com/DrB0rk/dexyd/releases/latest)
 [![Platform](https://img.shields.io/badge/mobile-Android-3DDC84?logo=android&logoColor=white)](docs/mobile-app.md)
+[![iOS](https://img.shields.io/badge/iOS-bring--up-lightgrey?logo=apple)](docs/ios-app.md)
 [![Bridge](https://img.shields.io/badge/bridge-Node.js%2020+-339933?logo=node.js&logoColor=white)](docs/installation.md)
 [![TUI](https://img.shields.io/badge/TUI-Textual-8B5CF6)](docs/bridge-tui.md)
 [![Security](https://img.shields.io/badge/security-paired%20devices-64d98b)](docs/security.md)
@@ -41,6 +42,7 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 - Codex CLI authenticated on the bridge computer.
 - Optional: OMX for OMX-backed sessions and harness behavior.
 - Android phone with the Dexyd APK installed.
+- Optional iOS bring-up: macOS with Xcode for simulator/iPhone builds.
 - Optional remote access: HTTPS domain/Caddy or Cloudflare named tunnel.
 
 ## Install the bridge
@@ -106,6 +108,20 @@ Download the latest APK from GitHub Releases:
 [Latest Dexyd release](https://github.com/DrB0rk/dexyd/releases/latest)
 
 Install the APK on your phone, then pair it with the bridge from the TUI.
+
+
+## iOS bring-up
+
+The iOS app shares the React Native UI with Android, but iOS builds require macOS and Xcode. From a Mac checkout:
+
+```bash
+npm run mobile:ios:setup
+cd mobile/dexydMobile
+npm start
+npm run ios:sim
+```
+
+See [iOS app](docs/ios-app.md) for device signing, permissions, and remaining release milestones.
 
 ## Pair your phone
 

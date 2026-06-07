@@ -200,15 +200,12 @@ If replay has expired, the app refreshes full snapshots.
 
 ## Notifications
 
-Dexyd currently has in-app notifications for:
+Dexyd has in-app notifications and native local notifications on Android and iOS for selected high-value events:
 
-- responses;
-- alerts;
-- approvals;
-- questions;
+- finished prompts;
 - account usage warnings at important remaining-usage thresholds.
 
-OS-level push/local notifications are planned but not complete.
+Earlier noisy response/alert notifications have been reduced so normal chat updates do not spam the device. Android uses a Kotlin native notification module. iOS uses a Swift native notification module and asks for permission from Settings → Notifications.
 
 ## Diagnostics and reset
 

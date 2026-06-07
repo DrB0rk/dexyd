@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { DexydConfig } from '../config/schema.js';
+import { ScheduledChatMessage, ScheduledChatMessageStatus } from '../domain/chat.js';
 import { SessionRecord, SessionStatus } from '../domain/session.js';
 import { migrations } from './migrations.js';
 import { EventEnvelope } from '../runtime/runtime-state.js';
@@ -64,6 +65,22 @@ type RefreshTokenRow = {
   expires_at: string;
   created_at: string;
   revoked_at: string | null;
+};
+
+type ScheduledMessageRow = {
+  id: string;
+  session_id: string;
+  content: string;
+  actor_device_id: string;
+  next_run_at: string;
+  repeat_interval_ms: number | null;
+  repeat_max_runs: number | null;
+  run_count: number;
+  status: ScheduledChatMessageStatus;
+  last_run_at: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type DeviceRecord = {
@@ -583,6 +600,207 @@ export class SqliteService {
       .run(new Date().toISOString(), deviceId);
   }
 
+  createScheduledMessage(input: {
+    sessionId: string;
+    content: string;
+    actorDeviceId: string;
+    nextRunAt: string;
+    repeatIntervalMs?: number | null;
+    repeatMaxRuns?: number | null;
+  }): ScheduledChatMessage {
+    const now = new Date().toISOString();
+    const id = randomUUID();
+
+    this.#db
+      .prepare(
+        `
+      INSERT INTO scheduled_messages (
+        id,
+        session_id,
+        content,
+        actor_device_id,
+        next_run_at,
+        repeat_interval_ms,
+        repeat_max_runs,
+        run_count,
+        status,
+        last_run_at,
+        error,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        @id,
+        @sessionId,
+        @content,
+        @actorDeviceId,
+        @nextRunAt,
+        @repeatIntervalMs,
+        @repeatMaxRuns,
+        0,
+        'scheduled',
+        NULL,
+        NULL,
+        @createdAt,
+        @updatedAt
+      )
+    `
+      )
+      .run({
+        id,
+        sessionId: input.sessionId,
+        content: input.content,
+        actorDeviceId: input.actorDeviceId,
+        nextRunAt: input.nextRunAt,
+        repeatIntervalMs: input.repeatIntervalMs ?? null,
+        repeatMaxRuns: input.repeatMaxRuns ?? null,
+        createdAt: now,
+        updatedAt: now
+      });
+
+    const created = this.getScheduledMessage(id);
+    if (!created) {
+      throw new Error('failed to create scheduled message');
+    }
+    return created;
+  }
+
+  getScheduledMessage(id: string): ScheduledChatMessage | null {
+    const row = this.#db
+      .prepare(
+        `
+      SELECT
+        id,
+        session_id,
+        content,
+        actor_device_id,
+        next_run_at,
+        repeat_interval_ms,
+        repeat_max_runs,
+        run_count,
+        status,
+        last_run_at,
+        error,
+        created_at,
+        updated_at
+      FROM scheduled_messages
+      WHERE id = ?
+    `
+      )
+      .get(id) as ScheduledMessageRow | undefined;
+    return row ? this.#mapScheduledMessageRow(row) : null;
+  }
+
+  listScheduledMessages(sessionId?: string): ScheduledChatMessage[] {
+    const where = sessionId ? 'WHERE session_id = @sessionId' : '';
+    const rows = this.#db
+      .prepare(
+        `
+      SELECT
+        id,
+        session_id,
+        content,
+        actor_device_id,
+        next_run_at,
+        repeat_interval_ms,
+        repeat_max_runs,
+        run_count,
+        status,
+        last_run_at,
+        error,
+        created_at,
+        updated_at
+      FROM scheduled_messages
+      ${where}
+      ORDER BY status = 'scheduled' DESC, next_run_at ASC, created_at DESC
+    `
+      )
+      .all({ sessionId: sessionId ?? null }) as ScheduledMessageRow[];
+    return rows.map((row) => this.#mapScheduledMessageRow(row));
+  }
+
+  listDueScheduledMessages(nowIso: string, limit = 20): ScheduledChatMessage[] {
+    const rows = this.#db
+      .prepare(
+        `
+      SELECT
+        id,
+        session_id,
+        content,
+        actor_device_id,
+        next_run_at,
+        repeat_interval_ms,
+        repeat_max_runs,
+        run_count,
+        status,
+        last_run_at,
+        error,
+        created_at,
+        updated_at
+      FROM scheduled_messages
+      WHERE status = 'scheduled'
+        AND next_run_at <= @nowIso
+      ORDER BY next_run_at ASC
+      LIMIT @limit
+    `
+      )
+      .all({ nowIso, limit }) as ScheduledMessageRow[];
+    return rows.map((row) => this.#mapScheduledMessageRow(row));
+  }
+
+  markScheduledMessageDispatched(input: {
+    id: string;
+    lastRunAt: string;
+    runCount: number;
+    nextRunAt?: string | null;
+    status: ScheduledChatMessageStatus;
+    error?: string | null;
+  }): ScheduledChatMessage | null {
+    this.#db
+      .prepare(
+        `
+      UPDATE scheduled_messages
+      SET last_run_at = @lastRunAt,
+          run_count = @runCount,
+          next_run_at = COALESCE(@nextRunAt, next_run_at),
+          status = @status,
+          error = @error,
+          updated_at = @updatedAt
+      WHERE id = @id
+    `
+      )
+      .run({
+        id: input.id,
+        lastRunAt: input.lastRunAt,
+        runCount: input.runCount,
+        nextRunAt: input.nextRunAt ?? null,
+        status: input.status,
+        error: input.error ?? null,
+        updatedAt: new Date().toISOString()
+      });
+    return this.getScheduledMessage(input.id);
+  }
+
+  cancelScheduledMessage(input: { id: string; sessionId: string }): ScheduledChatMessage | null {
+    this.#db
+      .prepare(
+        `
+      UPDATE scheduled_messages
+      SET status = 'cancelled',
+          updated_at = @updatedAt
+      WHERE id = @id
+        AND session_id = @sessionId
+        AND status = 'scheduled'
+    `
+      )
+      .run({
+        id: input.id,
+        sessionId: input.sessionId,
+        updatedAt: new Date().toISOString()
+      });
+    return this.getScheduledMessage(input.id);
+  }
+
   addAuditLog(input: {
     actor: string;
     action: string;
@@ -635,6 +853,24 @@ export class SqliteService {
       streamId: row.stream_id,
       source: row.source as EventEnvelope['source'],
       payload
+    };
+  }
+
+  #mapScheduledMessageRow(row: ScheduledMessageRow): ScheduledChatMessage {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      content: row.content,
+      actorDeviceId: row.actor_device_id,
+      nextRunAt: row.next_run_at,
+      repeatIntervalMs: row.repeat_interval_ms,
+      repeatMaxRuns: row.repeat_max_runs,
+      runCount: row.run_count,
+      status: row.status,
+      lastRunAt: row.last_run_at,
+      error: row.error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
     };
   }
 

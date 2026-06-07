@@ -2,14 +2,22 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import {
+  cancelScheduledMessage,
   getChatMessages,
   getQueuedMessages,
+  getScheduledMessages,
   removeQueuedMessage,
+  scheduleChatMessage,
   sendChatMessage,
   steerQueuedMessage,
   type AuthTokens,
 } from '../api/dexyd-client';
-import { ChatMessage, EventEnvelope, QueuedChatMessage } from '../types/dexyd';
+import {
+  ChatMessage,
+  EventEnvelope,
+  QueuedChatMessage,
+  ScheduledChatMessage,
+} from '../types/dexyd';
 import { errorMessage } from '../utils/error-message';
 
 const CHAT_POLL_INTERVAL_MS = 3500;
@@ -656,6 +664,114 @@ function nextQueuedMessages(
   return sameQueuedMessages(current, next) ? current : next;
 }
 
+function sameScheduledMessages(
+  left: ScheduledChatMessage[],
+  right: ScheduledChatMessage[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => sameScheduledMessage(item, right[index]));
+}
+
+function sameScheduledMessage(
+  left: ScheduledChatMessage,
+  right: ScheduledChatMessage | undefined,
+): boolean {
+  if (!right) return false;
+  return (
+    left.id === right.id &&
+    left.sessionId === right.sessionId &&
+    left.content === right.content &&
+    left.nextRunAt === right.nextRunAt &&
+    left.repeatIntervalMs === right.repeatIntervalMs &&
+    left.repeatMaxRuns === right.repeatMaxRuns &&
+    left.runCount === right.runCount &&
+    left.status === right.status &&
+    left.lastRunAt === right.lastRunAt &&
+    left.error === right.error &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function nextScheduledMessages(
+  current: ScheduledChatMessage[],
+  next: ScheduledChatMessage[],
+): ScheduledChatMessage[] {
+  return sameScheduledMessages(current, next) ? current : next;
+}
+
+function mergeScheduledMessages(
+  current: ScheduledChatMessage[],
+  next: ScheduledChatMessage,
+): ScheduledChatMessage[] {
+  const activeNext = next.status === 'scheduled';
+  const items = activeNext
+    ? current.some(item => item.id === next.id)
+      ? current.map(item =>
+          item.id === next.id && !sameScheduledMessage(item, next)
+            ? next
+            : item,
+        )
+      : [...current, next]
+    : current.filter(item => item.id !== next.id);
+  const sorted = items.sort(
+    (left, right) =>
+      new Date(left.nextRunAt).getTime() - new Date(right.nextRunAt).getTime(),
+  );
+  return nextScheduledMessages(current, sorted);
+}
+
+function eventToScheduledMessage(
+  event: EventEnvelope,
+): ScheduledChatMessage | null {
+  if (!event.eventType.startsWith('chat.message.scheduled.')) return null;
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const candidate =
+    event.eventType === 'chat.message.scheduled.dispatched' &&
+    payload.scheduled &&
+    typeof payload.scheduled === 'object'
+      ? (payload.scheduled as Record<string, unknown>)
+      : payload;
+  if (
+    typeof candidate.id !== 'string' ||
+    typeof candidate.sessionId !== 'string' ||
+    typeof candidate.content !== 'string' ||
+    typeof candidate.nextRunAt !== 'string' ||
+    typeof candidate.createdAt !== 'string' ||
+    typeof candidate.updatedAt !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    id: candidate.id,
+    sessionId: candidate.sessionId,
+    content: candidate.content,
+    actorDeviceId:
+      typeof candidate.actorDeviceId === 'string'
+        ? candidate.actorDeviceId
+        : '',
+    nextRunAt: candidate.nextRunAt,
+    repeatIntervalMs:
+      typeof candidate.repeatIntervalMs === 'number'
+        ? candidate.repeatIntervalMs
+        : null,
+    repeatMaxRuns:
+      typeof candidate.repeatMaxRuns === 'number' ? candidate.repeatMaxRuns : null,
+    runCount: typeof candidate.runCount === 'number' ? candidate.runCount : 0,
+    status:
+      candidate.status === 'completed' ||
+      candidate.status === 'cancelled' ||
+      candidate.status === 'failed'
+        ? candidate.status
+        : 'scheduled',
+    lastRunAt:
+      typeof candidate.lastRunAt === 'string' ? candidate.lastRunAt : null,
+    error: typeof candidate.error === 'string' ? candidate.error : null,
+    createdAt: candidate.createdAt,
+    updatedAt: candidate.updatedAt,
+  };
+}
+
 function mergeQueuedMessages(
   current: QueuedChatMessage[],
   next: QueuedChatMessage,
@@ -755,6 +871,9 @@ export function useChat(
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
+  const [scheduledMessages, setScheduledMessages] = useState<
+    ScheduledChatMessage[]
+  >([]);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -777,6 +896,20 @@ export function useChat(
     }
     const queue = await getQueuedMessages(bridgeUrl, sessionId, tokens);
     setQueuedMessages(current => nextQueuedMessages(current, queue));
+  }, [bridgeUrl, sessionId, tokens]);
+
+  const refreshScheduled = useCallback(async () => {
+    if (!tokens || !sessionId) {
+      setScheduledMessages(current => nextScheduledMessages(current, []));
+      return;
+    }
+    const scheduled = await getScheduledMessages(bridgeUrl, sessionId, tokens);
+    setScheduledMessages(current =>
+      nextScheduledMessages(
+        current,
+        scheduled.filter(item => item.status === 'scheduled'),
+      ),
+    );
   }, [bridgeUrl, sessionId, tokens]);
 
   const refresh = useCallback(
@@ -810,10 +943,19 @@ export function useChat(
 
         let activeQueueIds: Set<string> | undefined;
         try {
-          const queue = await getQueuedMessages(bridgeUrl, sessionId, tokens);
+          const [queue, scheduled] = await Promise.all([
+            getQueuedMessages(bridgeUrl, sessionId, tokens),
+            getScheduledMessages(bridgeUrl, sessionId, tokens),
+          ]);
           if (requestId !== refreshRequestRef.current) return;
           activeQueueIds = new Set(queue.map(item => item.queueId));
           setQueuedMessages(current => nextQueuedMessages(current, queue));
+          setScheduledMessages(current =>
+            nextScheduledMessages(
+              current,
+              scheduled.filter(item => item.status === 'scheduled'),
+            ),
+          );
         } catch (queueErr) {
           activeQueueIds = undefined;
           if (!silent) {
@@ -1008,6 +1150,64 @@ export function useChat(
     [bridgeUrl, sessionId, tokens],
   );
 
+  const schedule = useCallback(
+    async (input: {
+      message: string;
+      runAt: string;
+      repeat?: { intervalMs: number; maxRuns?: number };
+    }) => {
+      const content = normalizeDisplayUserContent(input.message);
+      if (!tokens || !sessionId || !content) return false;
+      setSending(true);
+      setError(null);
+      try {
+        const scheduled = await scheduleChatMessage(
+          bridgeUrl,
+          sessionId,
+          {
+            message: content,
+            runAt: input.runAt,
+            ...(input.repeat ? { repeat: input.repeat } : {}),
+          },
+          tokens,
+        );
+        setScheduledMessages(current =>
+          mergeScheduledMessages(current, scheduled),
+        );
+        return true;
+      } catch (err) {
+        setError(errorMessage(err, 'failed to schedule message'));
+        return false;
+      } finally {
+        setSending(false);
+      }
+    },
+    [bridgeUrl, sessionId, tokens],
+  );
+
+  const cancelScheduled = useCallback(
+    async (scheduleId: string) => {
+      if (!tokens || !sessionId) return false;
+      setError(null);
+      try {
+        const scheduled = await cancelScheduledMessage(
+          bridgeUrl,
+          sessionId,
+          scheduleId,
+          tokens,
+        );
+        setScheduledMessages(current =>
+          mergeScheduledMessages(current, scheduled),
+        );
+        return true;
+      } catch (err) {
+        setError(errorMessage(err, 'failed to cancel scheduled message'));
+        return false;
+      }
+    },
+    [bridgeUrl, sessionId, tokens],
+  );
+
   useEffect(() => {
     refreshRequestRef.current += 1;
     refreshInFlightRef.current = false;
@@ -1021,6 +1221,7 @@ export function useChat(
       pendingUserMessagesRef.current = [];
       setMessages(current => nextChatMessages(current, []));
       setQueuedMessages(current => nextQueuedMessages(current, []));
+      setScheduledMessages(current => nextScheduledMessages(current, []));
     }
     setError(null);
 
@@ -1111,12 +1312,21 @@ export function useChat(
     if (lastEvent.eventType === 'replay.expired') {
       refresh(true).catch(() => undefined);
       refreshQueue().catch(() => undefined);
+      refreshScheduled().catch(() => undefined);
       return;
     }
     if (lastEvent.sessionId !== sessionId) return;
     if (lastEvent.eventType === 'chat.turn.completed') {
       refresh(true).catch(() => undefined);
       refreshQueue().catch(() => undefined);
+      refreshScheduled().catch(() => undefined);
+      return;
+    }
+    const scheduled = eventToScheduledMessage(lastEvent);
+    if (scheduled) {
+      setScheduledMessages(current =>
+        mergeScheduledMessages(current, scheduled),
+      );
       return;
     }
     if (lastEvent.eventType === 'chat.output.delta') {
@@ -1175,12 +1385,13 @@ export function useChat(
     setMessages(current =>
       nextChatMessages(current, mergeMessage(current, message)),
     );
-  }, [lastEvent, refresh, refreshQueue, sessionId]);
+  }, [lastEvent, refresh, refreshQueue, refreshScheduled, sessionId]);
 
   return useMemo(
     () => ({
       messages,
       queuedMessages,
+      scheduledMessages,
       loading,
       sending,
       error,
@@ -1188,15 +1399,20 @@ export function useChat(
       send,
       steerQueued,
       removeQueued,
+      schedule,
+      cancelScheduled,
       setError,
     }),
     [
+      cancelScheduled,
       error,
       loading,
       messages,
       queuedMessages,
+      scheduledMessages,
       refresh,
       removeQueued,
+      schedule,
       send,
       sending,
       steerQueued,

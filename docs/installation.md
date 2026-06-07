@@ -5,7 +5,7 @@ Dexyd has two pieces:
 1. **Bridge** — runs on your computer and talks to Codex/OMX.
 2. **Mobile app** — runs on your phone and talks to the bridge after pairing.
 
-Linux and Windows are supported bridge/TUI hosts. Android is the primary mobile target. iOS has an initial React Native target for bring-up on macOS.
+Linux and Windows are supported bridge/TUI hosts. Android is the primary mobile target. iOS has a React Native target for bring-up on macOS/Xcode.
 
 ## Supported host setups
 
@@ -16,7 +16,7 @@ Linux and Windows are supported bridge/TUI hosts. Android is the primary mobile 
 | macOS bridge host | Manual | Bridge can run with Node, but installers do not manage macOS services. |
 | WSL-like shell | Possible | Works best for local bridge tests; phone access needs LAN routing to the WSL host. |
 | Android app | Primary | Build/install scripts are included. |
-| iOS app | Early | Native project, permissions, icons, and scripts exist; full release flow is not complete. |
+| iOS app | Early | Native project, permissions, icons, local notifications, and setup scripts exist; macOS/Xcode is required for build/sign/run. |
 
 ## Prerequisites
 
@@ -230,9 +230,15 @@ mobile/dexydMobile/android/app/build/outputs/apk/debug/
 
 ## iOS app install
 
-The iOS target is an early app foundation. iOS builds require macOS and Xcode.
+The iOS target is an early app foundation. iOS builds require macOS and Xcode. Linux can prepare dependencies but cannot run `xcodebuild`, the iOS Simulator, or code signing.
 
-Install CocoaPods dependencies on macOS:
+Preferred setup on macOS:
+
+```bash
+npm run mobile:ios:setup
+```
+
+Manual CocoaPods setup on macOS:
 
 ```bash
 cd mobile/dexydMobile

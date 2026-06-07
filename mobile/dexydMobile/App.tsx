@@ -69,6 +69,7 @@ import {
   DexydSession,
   EventEnvelope,
   QueuedChatMessage,
+  ScheduledChatMessage,
 } from './src/types/dexyd';
 import { errorMessage } from './src/utils/error-message';
 import { parseUnifiedDiff, type ParsedDiffLine } from './src/utils/diff-view';
@@ -2120,6 +2121,7 @@ function ChatScreen({
   );
   const [composerHeight, setComposerHeight] = useState(54);
   const [steeringQueueId, setSteeringQueueId] = useState<string | null>(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [visibleMessageCount, setVisibleMessageCount] = useState(
     CHAT_INITIAL_MESSAGE_RENDER_LIMIT,
   );
@@ -2132,6 +2134,7 @@ function ChatScreen({
   const keyboardLift =
     Platform.OS === 'android' && keyboardHeight > 0 ? keyboardHeight + 8 : 0;
   const queuePanelMaxHeight = Math.max(112, Math.min(220, windowHeight * 0.3));
+  const schedulePanelMaxHeight = 150;
   const {
     commands: availableSlashCommands,
     loading: slashCommandsLoading,
@@ -2239,6 +2242,7 @@ function ChatScreen({
     setDiffViewerOpen(false);
     setSelectedDiffTurnId(null);
     setSteeringQueueId(null);
+    setScheduleOpen(false);
     setVisibleMessageCount(CHAT_INITIAL_MESSAGE_RENDER_LIMIT);
   }, [activeSession?.id, setLatestButtonVisible]);
 
@@ -2361,15 +2365,21 @@ function ChatScreen({
   const queueStateReserve = chat.queuedMessages.length
     ? Math.min(queuePanelMaxHeight, 54 + chat.queuedMessages.length * 58) + 8
     : 0;
+  const scheduleStateReserve = chat.scheduledMessages.length
+    ? Math.min(schedulePanelMaxHeight, 54 + chat.scheduledMessages.length * 52) + 8
+    : 0;
   const composerSpacer =
     composerHeight +
     keyboardLift +
     12 +
     workingStateReserve +
     commandStateReserve +
-    queueStateReserve;
+    queueStateReserve +
+    scheduleStateReserve;
   const queueDockBottom = composerHeight + keyboardLift + 8;
-  const workingDockBottom = queueDockBottom + queueStateReserve;
+  const scheduledDockBottom = queueDockBottom + queueStateReserve;
+  const workingDockBottom =
+    queueDockBottom + queueStateReserve + scheduleStateReserve;
 
   const send = async () => {
     const message = text.trim();
@@ -2401,11 +2411,28 @@ function ChatScreen({
     scrollToLatest();
   };
 
+  const scheduleMessage = async (input: {
+    runAt: string;
+    repeat?: { intervalMs: number; maxRuns?: number };
+  }) => {
+    const message = text.trim();
+    if (!message || !authReady || !activeSession) return false;
+    const ok = await chat.schedule({ message, ...input });
+    if (!ok) return false;
+    setText('');
+    setScheduleOpen(false);
+    AsyncStorage.removeItem(chatDraftStorageKey(activeSession.id)).catch(
+      () => undefined,
+    );
+    return true;
+  };
+
   const sendDisabled =
     !text.trim() ||
     chat.sending ||
     !activeSession ||
     Boolean(usageBlockMessage);
+  const scheduleDisabled = sendDisabled || Boolean(steeringQueueId);
   const steeringTarget = steeringQueueId
     ? chat.queuedMessages.find(item => item.queueId === steeringQueueId) ?? null
     : null;
@@ -2520,6 +2547,25 @@ function ChatScreen({
           </ScrollView>
         </View>
       ) : null}
+      {chat.scheduledMessages.length ? (
+        <View
+          style={[
+            styles.queuePanelDock,
+            { bottom: scheduledDockBottom, maxHeight: schedulePanelMaxHeight },
+          ]}
+        >
+          <ScrollView
+            style={styles.queuePanelScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <ScheduledMessagesPanel
+              items={chat.scheduledMessages}
+              onCancel={scheduleId => chat.cancelScheduled(scheduleId)}
+            />
+          </ScrollView>
+        </View>
+      ) : null}
       {showLatestButton ? (
         <Pressable
           accessibilityRole="button"
@@ -2599,6 +2645,26 @@ function ChatScreen({
             onFocus={() => scrollToLatest(false)}
           />
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Schedule message"
+            onPress={() => setScheduleOpen(true)}
+            disabled={scheduleDisabled}
+            style={({ pressed }) => [
+              styles.scheduleButton,
+              scheduleDisabled && styles.sendButtonDisabled,
+              pressed && !scheduleDisabled && styles.pressed,
+            ]}
+          >
+            <Text
+              style={[
+                styles.scheduleButtonText,
+                scheduleDisabled && styles.sendTextDisabled,
+              ]}
+            >
+              ◷
+            </Text>
+          </Pressable>
+          <Pressable
             onPress={() => send().catch(() => undefined)}
             disabled={sendDisabled}
             style={({ pressed }) => [
@@ -2615,6 +2681,13 @@ function ChatScreen({
           </Pressable>
         </View>
       </View>
+      {scheduleOpen ? (
+        <SchedulePromptDialog
+          message={text}
+          onClose={() => setScheduleOpen(false)}
+          onSchedule={scheduleMessage}
+        />
+      ) : null}
       {diffViewerOpen ? (
         <DiffViewer
           diff={diff.diff ?? EMPTY_DIFF}
@@ -2887,6 +2960,217 @@ function QueuedMessagesPanel({
       })}
     </View>
   );
+}
+
+const SCHEDULE_TIME_PRESETS = [
+  { id: '15m', label: '15 min', offsetMs: 15 * 60 * 1000 },
+  { id: '1h', label: '1 hour', offsetMs: 60 * 60 * 1000 },
+  { id: 'tonight', label: 'Tonight', atHour: 20 },
+  { id: 'tomorrow', label: 'Tomorrow', atHour: 9 },
+] as const;
+
+const SCHEDULE_REPEAT_PRESETS = [
+  { id: 'none', label: 'Once', intervalMs: null },
+  { id: 'daily', label: 'Daily', intervalMs: 24 * 60 * 60 * 1000 },
+  { id: 'weekly', label: 'Weekly', intervalMs: 7 * 24 * 60 * 60 * 1000 },
+] as const;
+
+function SchedulePromptDialog({
+  message,
+  onClose,
+  onSchedule,
+}: {
+  message: string;
+  onClose: () => void;
+  onSchedule: (input: {
+    runAt: string;
+    repeat?: { intervalMs: number; maxRuns?: number };
+  }) => Promise<boolean>;
+}) {
+  const [timePreset, setTimePreset] =
+    useState<(typeof SCHEDULE_TIME_PRESETS)[number]['id']>('15m');
+  const [repeatPreset, setRepeatPreset] =
+    useState<(typeof SCHEDULE_REPEAT_PRESETS)[number]['id']>('none');
+  const [saving, setSaving] = useState(false);
+  const trimmedMessage = message.trim();
+  const runAt = scheduledRunAtForPreset(timePreset);
+  const repeat = SCHEDULE_REPEAT_PRESETS.find(item => item.id === repeatPreset);
+  const summary = `${formatScheduleDate(runAt)}${
+    repeat?.intervalMs ? ` · repeats ${repeat.label.toLowerCase()}` : ''
+  }`;
+
+  const submit = async () => {
+    if (!trimmedMessage || saving) return;
+    setSaving(true);
+    try {
+      const ok = await onSchedule({
+        runAt: runAt.toISOString(),
+        ...(repeat?.intervalMs ? { repeat: { intervalMs: repeat.intervalMs } } : {}),
+      });
+      if (!ok) setSaving(false);
+    } catch {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View style={styles.scheduleOverlay}>
+      <Pressable style={styles.scheduleBackdrop} onPress={onClose} />
+      <View style={styles.scheduleDialog}>
+        <View style={styles.scheduleDialogHeader}>
+          <Text style={styles.scheduleDialogTitle}>Schedule prompt</Text>
+          <Pressable onPress={onClose} hitSlop={10}>
+            <Text style={styles.scheduleClose}>×</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.schedulePreview} numberOfLines={3}>
+          {trimmedMessage || 'Type a message first.'}
+        </Text>
+        <Text style={styles.scheduleSectionLabel}>When</Text>
+        <View style={styles.scheduleChipRow}>
+          {SCHEDULE_TIME_PRESETS.map(item => (
+            <Pressable
+              key={item.id}
+              onPress={() => setTimePreset(item.id)}
+              style={({ pressed }) => [
+                styles.scheduleChip,
+                timePreset === item.id && styles.scheduleChipActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.scheduleChipText,
+                  timePreset === item.id && styles.scheduleChipTextActive,
+                ]}
+              >
+                {item.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.scheduleSectionLabel}>Repeat</Text>
+        <View style={styles.scheduleChipRow}>
+          {SCHEDULE_REPEAT_PRESETS.map(item => (
+            <Pressable
+              key={item.id}
+              onPress={() => setRepeatPreset(item.id)}
+              style={({ pressed }) => [
+                styles.scheduleChip,
+                repeatPreset === item.id && styles.scheduleChipActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.scheduleChipText,
+                  repeatPreset === item.id && styles.scheduleChipTextActive,
+                ]}
+              >
+                {item.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.scheduleSummary}>{summary}</Text>
+        <Pressable
+          onPress={() => submit().catch(() => undefined)}
+          disabled={!trimmedMessage || saving}
+          style={({ pressed }) => [
+            styles.scheduleSubmit,
+            (!trimmedMessage || saving) && styles.sendButtonDisabled,
+            pressed && trimmedMessage && !saving && styles.pressed,
+          ]}
+        >
+          <Text style={styles.scheduleSubmitText}>
+            {saving ? 'Scheduling…' : 'Schedule'}
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function ScheduledMessagesPanel({
+  items,
+  onCancel,
+}: {
+  items: ScheduledChatMessage[];
+  onCancel: (scheduleId: string) => Promise<boolean> | boolean;
+}) {
+  return (
+    <View style={styles.queuePanel}>
+      <View style={styles.queueHeader}>
+        <Text style={styles.queueTitle}>Scheduled</Text>
+        <Text style={styles.queueCount}>{items.length}</Text>
+      </View>
+      {items.map(item => (
+        <View key={item.id} style={styles.queueItem}>
+          <View style={styles.queueItemText}>
+            <Text style={styles.queueItemTitle}>
+              {formatScheduleDate(new Date(item.nextRunAt))}
+              {item.repeatIntervalMs
+                ? ` · repeats ${repeatLabel(item.repeatIntervalMs)}`
+                : ''}
+            </Text>
+            <Text style={styles.queueItemBody} numberOfLines={2}>
+              {item.content}
+            </Text>
+          </View>
+          <View style={styles.queueActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Cancel scheduled message"
+              onPress={() => {
+                onCancel(item.id);
+              }}
+              style={({ pressed }) => [
+                styles.queueActionButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.queueRemoveText}>cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function scheduledRunAtForPreset(
+  preset: (typeof SCHEDULE_TIME_PRESETS)[number]['id'],
+): Date {
+  const now = new Date();
+  const match = SCHEDULE_TIME_PRESETS.find(item => item.id === preset);
+  if (!match) return new Date(now.getTime() + 15 * 60 * 1000);
+  if ('offsetMs' in match) return new Date(now.getTime() + match.offsetMs);
+
+  const next = new Date(now);
+  next.setHours(match.atHour, 0, 0, 0);
+  if (next.getTime() <= now.getTime() || preset === 'tomorrow') {
+    next.setDate(next.getDate() + 1);
+  }
+  return next;
+}
+
+function formatScheduleDate(value: Date): string {
+  if (!Number.isFinite(value.getTime())) return 'Invalid date';
+  return value.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function repeatLabel(intervalMs: number): string {
+  if (intervalMs === 24 * 60 * 60 * 1000) return 'daily';
+  if (intervalMs === 7 * 24 * 60 * 60 * 1000) return 'weekly';
+  const minutes = Math.round(intervalMs / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h`;
 }
 
 function previewText(value: string): string {
@@ -7262,6 +7546,110 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
+  scheduleOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 30,
+    justifyContent: 'flex-end',
+  },
+  scheduleBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(0,0,0,0.36)',
+  },
+  scheduleDialog: {
+    margin: 12,
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: '#242426',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3a3a3d',
+  },
+  scheduleDialogHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  scheduleDialogTitle: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  scheduleClose: {
+    color: palette.muted,
+    fontSize: 24,
+    fontWeight: '500',
+    lineHeight: 26,
+  },
+  schedulePreview: {
+    color: palette.muted,
+    fontSize: 13,
+    lineHeight: 18,
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: '#1d1d1f',
+    marginBottom: 12,
+  },
+  scheduleSectionLabel: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  scheduleChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  scheduleChip: {
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#303033',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3d3d40',
+  },
+  scheduleChipActive: {
+    backgroundColor: '#f2f2f2',
+    borderColor: '#f2f2f2',
+  },
+  scheduleChipText: {
+    color: palette.muted,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  scheduleChipTextActive: {
+    color: '#161617',
+  },
+  scheduleSummary: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 12,
+  },
+  scheduleSubmit: {
+    minHeight: 42,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f2f2f2',
+  },
+  scheduleSubmitText: {
+    color: '#111113',
+    fontSize: 14,
+    fontWeight: '900',
+  },
   progressRow: {
     marginBottom: 8,
     alignItems: 'center',
@@ -7577,6 +7965,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 8,
     backgroundColor: '#343436',
+  },
+  scheduleButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+    backgroundColor: '#303033',
+  },
+  scheduleButtonText: {
+    color: palette.text,
+    fontSize: 19,
+    fontWeight: '800',
   },
   sendButtonDisabled: {
     opacity: 0.45,
