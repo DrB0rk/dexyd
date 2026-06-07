@@ -25,6 +25,9 @@ const els = {
   suggestions: id('suggestions'),
   newSession: id('newSession'),
   refreshSessions: id('refreshSessions'),
+  openSettings: id('openSettings'),
+  settingsDialog: id('settingsDialog'),
+  closeSettings: id('closeSettings'),
   sessions: id('sessions'),
   inboxBadge: id('inboxBadge'),
   inboxList: id('inboxList'),
@@ -79,9 +82,11 @@ async function init() {
 }
 
 function bindUi() {
-  document.querySelectorAll('.nav-item').forEach(button => {
+  document.querySelectorAll('.nav-item[data-page]').forEach(button => {
     button.addEventListener('click', () => setPage(button.dataset.page));
   });
+  els.openSettings.addEventListener('click', openSettingsDialog);
+  els.closeSettings.addEventListener('click', () => els.settingsDialog.close());
   els.loadProject.addEventListener('click', () => setProject(els.projectPath.value));
   els.upProject.addEventListener('click', () => goUpProject().catch(showError));
   els.projectPath.addEventListener('keydown', event => {
@@ -100,6 +105,7 @@ function bindUi() {
   els.resetWebAuth.addEventListener('click', resetWebAuth);
   els.loadHiddenSessions.addEventListener('click', loadHiddenSessions);
   els.closeDiff.addEventListener('click', () => els.diffDialog.close());
+  els.settingsDialog.addEventListener('click', event => closeDialogOnBackdrop(event, els.settingsDialog));
   els.diffDialog.addEventListener('click', event => closeDialogOnBackdrop(event, els.diffDialog));
   els.answerDialog.addEventListener('click', event => closeDialogOnBackdrop(event, els.answerDialog));
   els.submitAnswer.addEventListener('click', event => {
@@ -128,12 +134,14 @@ function bindUi() {
 
 function setPage(page) {
   state.activePage = page;
-  document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.page === page));
+  document.querySelectorAll('.nav-item[data-page]').forEach(button => button.classList.toggle('active', button.dataset.page === page));
   document.querySelectorAll('.side-page').forEach(section => section.classList.toggle('active', section.id === page));
-  if (page === 'settingsPage') {
-    refreshAccount().catch(() => {});
-    renderSettings();
-  }
+}
+
+function openSettingsDialog() {
+  refreshAccount().catch(() => {});
+  renderSettings();
+  els.settingsDialog.showModal();
 }
 
 async function ensureAuth() {

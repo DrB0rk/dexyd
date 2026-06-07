@@ -12,83 +12,75 @@
     <div id="app" class="shell">
       <aside class="sidebar">
         <header class="brand">
-          <img src="/web/static/dexyd-icon.svg" alt="" />
-          <div>
+          <div class="brand-mark"><img src="/web/static/dexyd-icon.svg" alt="" /></div>
+          <div class="brand-copy">
             <strong>dexyd</strong>
             <span id="bridgeStatus">starting</span>
           </div>
         </header>
 
         <nav class="nav" aria-label="Dexyd sections">
-          <button class="nav-item active" data-page="sessionsPage">Sessions</button>
-          <button class="nav-item" data-page="inboxPage">Inbox <span id="inboxBadge" class="badge" hidden>0</span></button>
-          <button class="nav-item" data-page="settingsPage">Settings</button>
+          <button class="nav-item active" data-page="sessionsPage" type="button">Sessions</button>
+          <button class="nav-item" data-page="inboxPage" type="button">Inbox <span id="inboxBadge" class="badge" hidden>0</span></button>
+          <button id="openSettings" class="nav-item" type="button">Settings</button>
         </nav>
 
-        <section class="project-box">
-          <label for="projectPath">Project</label>
+        <section class="project-box" aria-label="Project selector">
+          <div class="section-label">Project</div>
           <div class="path-row">
             <input id="projectPath" autocomplete="off" spellcheck="false" placeholder="Type a project path" />
-            <button id="upProject" title="Go up one folder">↑</button>
-            <button id="loadProject" title="Load project">↻</button>
+            <button id="upProject" class="icon-button" title="Go up one folder" type="button">↑</button>
+            <button id="loadProject" class="icon-button" title="Load project" type="button">↻</button>
           </div>
           <div id="suggestions" class="suggestions" hidden></div>
-          <button id="newSession" class="primary wide">+ New session</button>
+          <button id="newSession" class="primary wide" type="button">+ New session</button>
         </section>
 
         <section id="sessionsPage" class="side-page active">
-          <section class="sessions-head">
-            <h2>Sessions</h2>
-            <button id="refreshSessions" title="Refresh sessions">↻</button>
-          </section>
+          <header class="section-head">
+            <div>
+              <h2>Sessions</h2>
+              <span>Project conversations</span>
+            </div>
+            <button id="refreshSessions" class="icon-button" title="Refresh sessions" type="button">↻</button>
+          </header>
           <div id="sessions" class="sessions"></div>
         </section>
 
         <section id="inboxPage" class="side-page">
-          <section class="sessions-head">
-            <h2>Inbox</h2>
-            <button id="clearInbox" title="Clear resolved inbox items">Clear</button>
-          </section>
+          <header class="section-head">
+            <div>
+              <h2>Inbox</h2>
+              <span>Questions and updates</span>
+            </div>
+            <button id="clearInbox" class="ghost mini" title="Clear resolved inbox items" type="button">Clear</button>
+          </header>
           <div id="systemSummary" class="system-summary"></div>
           <div id="inboxList" class="inbox-list"></div>
-        </section>
-
-        <section id="settingsPage" class="side-page">
-          <section class="settings-block">
-            <h2>Connection</h2>
-            <dl id="settingsConnection"></dl>
-            <button id="resetWebAuth" class="ghost wide">Reset web auth</button>
-          </section>
-          <section class="settings-block">
-            <h2>Account</h2>
-            <dl id="accountStatus"></dl>
-          </section>
-          <section class="settings-block">
-            <h2>Hidden sessions</h2>
-            <button id="loadHiddenSessions" class="ghost wide">Load hidden sessions</button>
-            <div id="hiddenSessions" class="hidden-sessions"></div>
-          </section>
         </section>
       </aside>
 
       <main class="main">
         <section id="emptyState" class="empty">
-          <h1>Dexyd Web</h1>
-          <p>Select a session or create one for the current project.</p>
-          <p class="muted">Browser control surface for the host bridge. No QR needed on local/private hosts.</p>
+          <div class="empty-card">
+            <div class="empty-mark">⌁</div>
+            <h1>Ready</h1>
+            <p>Select a session or create one in the current project.</p>
+            <p class="muted">Self-hosted browser control for your local Dexyd bridge.</p>
+          </div>
         </section>
 
         <section id="chatView" class="chat" hidden>
           <header class="chat-head">
-            <div>
+            <div class="chat-title-block">
               <h1 id="chatTitle">Session</h1>
               <p id="chatMeta"></p>
             </div>
             <div class="chat-actions">
               <span id="usagePill" class="pill">usage unknown</span>
-              <button id="deleteSession" class="ghost danger">Hide</button>
-              <button id="cancelTurn" class="ghost">Cancel</button>
-              <button id="refreshChat" class="ghost">Refresh</button>
+              <button id="deleteSession" class="ghost danger" type="button">Hide</button>
+              <button id="cancelTurn" class="ghost" type="button">Cancel</button>
+              <button id="refreshChat" class="ghost" type="button">Refresh</button>
             </div>
           </header>
 
@@ -97,18 +89,45 @@
           <div id="messages" class="messages"></div>
 
           <form id="composer" class="composer">
-            <button id="commandButton" type="button" class="ghost" title="Commands">/</button>
+            <button id="commandButton" type="button" class="ghost command-toggle" title="Commands">/</button>
             <textarea id="messageInput" rows="1" placeholder="Message Codex…"></textarea>
-            <button id="sendButton" class="primary" type="submit">Send</button>
+            <button id="sendButton" class="primary send" type="submit">Send</button>
           </form>
         </section>
       </main>
     </div>
 
+    <dialog id="settingsDialog" class="settings-dialog">
+      <header class="dialog-head">
+        <div>
+          <strong>Settings</strong>
+          <span>Connection, account, and session controls</span>
+        </div>
+        <button id="closeSettings" class="ghost" type="button">Close</button>
+      </header>
+      <div class="settings-grid">
+        <section class="settings-card">
+          <h2>Connection</h2>
+          <dl id="settingsConnection"></dl>
+          <button id="resetWebAuth" class="ghost wide" type="button">Reset web auth</button>
+        </section>
+        <section class="settings-card">
+          <h2>Account</h2>
+          <dl id="accountStatus"></dl>
+        </section>
+        <section class="settings-card wide-card">
+          <h2>Hidden sessions</h2>
+          <p class="muted small">Restore sessions hidden from Dexyd. This does not modify project files.</p>
+          <button id="loadHiddenSessions" class="ghost wide" type="button">Load hidden sessions</button>
+          <div id="hiddenSessions" class="hidden-sessions"></div>
+        </section>
+      </div>
+    </dialog>
+
     <dialog id="diffDialog" class="diff-dialog">
-      <header>
+      <header class="dialog-head">
         <strong>Code diff</strong>
-        <button id="closeDiff" class="ghost">Close</button>
+        <button id="closeDiff" class="ghost" type="button">Close</button>
       </header>
       <pre id="diffText"></pre>
     </dialog>
