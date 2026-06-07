@@ -82,7 +82,7 @@ async function init() {
 }
 
 function bindUi() {
-  document.querySelectorAll('.nav-item[data-page]').forEach(button => {
+  document.querySelectorAll('.tab[data-page]').forEach(button => {
     button.addEventListener('click', () => setPage(button.dataset.page));
   });
   els.openSettings.addEventListener('click', openSettingsDialog);
@@ -134,8 +134,8 @@ function bindUi() {
 
 function setPage(page) {
   state.activePage = page;
-  document.querySelectorAll('.nav-item[data-page]').forEach(button => button.classList.toggle('active', button.dataset.page === page));
-  document.querySelectorAll('.side-page').forEach(section => section.classList.toggle('active', section.id === page));
+  document.querySelectorAll('.tab[data-page]').forEach(button => button.classList.toggle('active', button.dataset.page === page));
+  document.querySelectorAll('.panel-page').forEach(section => section.classList.toggle('active', section.id === page));
 }
 
 function openSettingsDialog() {
