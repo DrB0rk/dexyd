@@ -11,12 +11,24 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$ProgressPreference = 'SilentlyContinue'
+try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls } catch {}
+
 
 function Write-Ok([string]$Message) { Write-Host "✓ $Message" }
 function Write-Note([string]$Message) { Write-Host "- $Message" }
 function Write-Warn([string]$Message) { Write-Warning $Message }
 function Fail([string]$Message) { throw $Message }
-function Has([string]$Command) { $null -ne (Get-Command $Command -ErrorAction SilentlyContinue) }
+function Resolve-CommandFile([string]$Command) {
+  $resolved = Get-Command $Command -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($resolved) {
+    if ($resolved.Source) { return $resolved.Source }
+    if ($resolved.Path) { return $resolved.Path }
+  }
+  return $null
+}
+function Has([string]$Command) { $null -ne (Resolve-CommandFile $Command) }
 
 function Resolve-FullPath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { Fail 'Install directory cannot be empty.' }
@@ -34,10 +46,12 @@ function Test-IsPathInside([string]$Path, [string]$Parent) {
 
 function Invoke-Checked([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
+  $commandPath = Resolve-CommandFile $File
+  if (-not $commandPath) { Fail "$File was not found in PATH" }
   Push-Location -LiteralPath $WorkingDirectory
   try {
     Write-Note "+ $File $($Args -join ' ')"
-    & $File @Args
+    & $commandPath @Args
     $exit = if ($null -eq $global:LASTEXITCODE) { 0 } else { [int]$global:LASTEXITCODE }
     if ($exit -ne 0) { Fail "$File $($Args -join ' ') failed with exit code $exit" }
   } finally {
@@ -71,7 +85,9 @@ function ConvertTo-ProcessArgument([AllowNull()][string]$Value) {
 function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 30) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $File
+  $commandPath = Resolve-CommandFile $File
+  if (-not $commandPath) { return [pscustomobject]@{ ExitCode = 127; Output = "$File was not found in PATH" } }
+  $psi.FileName = $commandPath
   $psi.WorkingDirectory = $WorkingDirectory
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
@@ -83,12 +99,17 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
   $process.StartInfo = $psi
   try {
     [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
       try { $process.Kill() } catch {}
+      try { [void]$process.WaitForExit(5000) } catch {}
       return [pscustomobject]@{ ExitCode = 124; Output = "$File $($Args -join ' ') timed out after ${TimeoutSeconds}s" }
     }
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    try { [void]$stdoutTask.Wait(5000) } catch {}
+    try { [void]$stderrTask.Wait(5000) } catch {}
+    $stdout = if ($stdoutTask.IsCompleted) { $stdoutTask.Result } else { '' }
+    $stderr = if ($stderrTask.IsCompleted) { $stderrTask.Result } else { '' }
     $output = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = $output.Trim() }
   } catch {
@@ -205,9 +226,10 @@ function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
 }
 
 function Get-PythonCommand {
-  if ((Has python) -and (Test-CommandWorks python @('--version'))) { return @('python') }
-  if ((Has python3) -and (Test-CommandWorks python3 @('--version'))) { return @('python3') }
-  if ((Has py) -and (Test-CommandWorks py @('-3', '--version'))) { return @('py', '-3') }
+  $probe = 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+  if ((Has python) -and (Test-CommandWorks python @('-c', $probe))) { return @('python') }
+  if ((Has python3) -and (Test-CommandWorks python3 @('-c', $probe))) { return @('python3') }
+  if ((Has py) -and (Test-CommandWorks py @('-3', '-c', $probe))) { return @('py', '-3') }
   return $null
 }
 
@@ -227,6 +249,7 @@ function Test-NodeMajor {
 
 function Check-Dependencies {
   Write-Note 'Checking Git, Node.js, npm, and Python'
+  Refresh-PathFromRegistry
   $issues = @(Get-DependencyIssues)
   if ($issues.Count -gt 0) {
     Write-Warn "Missing or outdated dependencies: $($issues -join ', ')"
@@ -446,7 +469,18 @@ function Install-Command([string]$Root) {
   Write-Ok "Installed command: $cmd"
 }
 
+function Assert-WindowsHost {
+  $isWindowsVariable = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+  if ($isWindowsVariable -and $isWindowsVariable.Value -eq $false) {
+    Fail 'This installer is for Windows. Use scripts/install.sh on Linux/macOS.'
+  }
+  if ($env:OS -and $env:OS -ne 'Windows_NT') {
+    Fail 'This installer is for Windows. Use scripts/install.sh on Linux/macOS.'
+  }
+}
+
 function Invoke-DexydInstallerMain {
+Assert-WindowsHost
 $script:InitialLocation = (Get-Location).Path
 $InstallDir = Resolve-FullPath $Dir
 Write-Host 'Dexyd Windows installer'
@@ -483,5 +517,8 @@ try {
   Write-Host 'Dexyd installer failed:' -ForegroundColor Red
   Write-Host $_.Exception.Message -ForegroundColor Red
   if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+  Write-Host ''
+  Write-Host 'If this is a dependency issue, install or repair Git, Node.js 20+, npm, and Python 3.10+, then rerun.' -ForegroundColor Yellow
+  Write-Host 'To allow automatic dependency installation, download the script and run it with -Yes.' -ForegroundColor Yellow
   exit 1
 }
