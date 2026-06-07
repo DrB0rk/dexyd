@@ -95,20 +95,43 @@ function Get-DependencyIssues {
   return $issues
 }
 
+function Test-BenignWingetOutput([string]$Output) {
+  return $Output -match '(?i)(successfully installed|successfully updated|already installed|no applicable update|no newer package versions|package is already installed)'
+}
+
+function Invoke-WingetInstall([string]$PackageId) {
+  $args = @('install', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--id', $PackageId)
+  $result = Invoke-Capture winget $args
+  if ($result.ExitCode -eq 0 -or (Test-BenignWingetOutput $result.Output)) {
+    if ($result.Output) { Write-Note ($result.Output -replace '[\r\n]+', ' ') }
+    return $true
+  }
+  return $result
+}
+
 function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
   $needsGit = $Issues -contains 'git'
   $needsNode = ($Issues -contains 'node') -or ($Issues -contains 'npm') -or (($Issues | Where-Object { $_ -like 'nodejs<20*' }).Count -gt 0)
   $needsPython = $Issues -contains 'python'
 
   if ($Manager -eq 'winget') {
-    $wingetBase = @('install', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements')
-    if ($needsGit) { Invoke-Checked winget ($wingetBase + @('--id', 'Git.Git')) }
-    if ($needsNode) { Invoke-Checked winget ($wingetBase + @('--id', 'OpenJS.NodeJS.LTS')) }
+    if ($needsGit) {
+      $gitResult = Invoke-WingetInstall 'Git.Git'
+      if ($gitResult -ne $true) { Fail "winget failed to install Git.Git: $($gitResult.Output)" }
+    }
+    if ($needsNode) {
+      $nodeResult = Invoke-WingetInstall 'OpenJS.NodeJS.LTS'
+      if ($nodeResult -ne $true) { Fail "winget failed to install OpenJS.NodeJS.LTS: $($nodeResult.Output)" }
+    }
     if ($needsPython) {
-      $result = Invoke-Capture winget ($wingetBase + @('--id', 'Python.Python.3.13'))
-      if ($result.ExitCode -ne 0) {
-        Write-Warn $result.Output
-        Invoke-Checked winget ($wingetBase + @('--id', 'Python.Python.3.12'))
+      $pythonResult = Invoke-WingetInstall 'Python.Python.3.13'
+      if ($pythonResult -ne $true) {
+        Write-Note 'Python 3.13 winget install did not complete; trying Python 3.12.'
+        $pythonFallback = Invoke-WingetInstall 'Python.Python.3.12'
+        if ($pythonFallback -ne $true) {
+          Write-Warn "Python 3.13 output: $($pythonResult.Output)"
+          Fail "winget failed to install Python.Python.3.12: $($pythonFallback.Output)"
+        }
       }
     }
     Refresh-PathFromRegistry
