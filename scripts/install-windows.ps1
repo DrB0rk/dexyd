@@ -6,7 +6,8 @@ param(
   [switch]$UseCurrent,
   [switch]$NoPath,
   [switch]$Clean,
-  [switch]$Yes
+  [switch]$Yes,
+  [switch]$NoDependencyInstall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,16 +45,16 @@ function Test-IsPathInside([string]$Path, [string]$Parent) {
   return $fullPath.StartsWith($fullParent, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Invoke-Checked([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
+function Invoke-Checked([string]$File, [string[]]$ArgumentList, [string]$WorkingDirectory = $PWD.Path) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
   $commandPath = Resolve-CommandFile $File
   if (-not $commandPath) { Fail "$File was not found in PATH" }
   Push-Location -LiteralPath $WorkingDirectory
   try {
-    Write-Note "+ $File $($Args -join ' ')"
-    & $commandPath @Args
+    Write-Note "+ $File $($ArgumentList -join ' ')"
+    & $commandPath @ArgumentList
     $exit = if ($null -eq $global:LASTEXITCODE) { 0 } else { [int]$global:LASTEXITCODE }
-    if ($exit -ne 0) { Fail "$File $($Args -join ' ') failed with exit code $exit" }
+    if ($exit -ne 0) { Fail "$File $($ArgumentList -join ' ') failed with exit code $exit" }
   } finally {
     Pop-Location
   }
@@ -82,7 +83,7 @@ function ConvertTo-ProcessArgument([AllowNull()][string]$Value) {
   return $result
 }
 
-function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 30) {
+function Invoke-Capture([string]$File, [string[]]$ArgumentList, [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 30) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $commandPath = Resolve-CommandFile $File
@@ -93,7 +94,7 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
-  $psi.Arguments = (($Args | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+  $psi.Arguments = (($ArgumentList | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
 
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $psi
@@ -104,7 +105,7 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
       try { $process.Kill() } catch {}
       try { [void]$process.WaitForExit(5000) } catch {}
-      return [pscustomobject]@{ ExitCode = 124; Output = "$File $($Args -join ' ') timed out after ${TimeoutSeconds}s" }
+      return [pscustomobject]@{ ExitCode = 124; Output = "$File $($ArgumentList -join ' ') timed out after ${TimeoutSeconds}s" }
     }
     try { [void]$stdoutTask.Wait(5000) } catch {}
     try { [void]$stderrTask.Wait(5000) } catch {}
@@ -113,14 +114,14 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
     $output = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = $output.Trim() }
   } catch {
-    return [pscustomobject]@{ ExitCode = 127; Output = "$File $($Args -join ' ') failed to start: $($_.Exception.Message)" }
+    return [pscustomobject]@{ ExitCode = 127; Output = "$File $($ArgumentList -join ' ') failed to start: $($_.Exception.Message)" }
   } finally {
     if ($process) { $process.Dispose() }
   }
 }
 
-function Test-CommandWorks([string]$File, [string[]]$Args, [int]$TimeoutSeconds = 8) {
-  $result = Invoke-Capture $File $Args -TimeoutSeconds $TimeoutSeconds
+function Test-CommandWorks([string]$File, [string[]]$ArgumentList, [int]$TimeoutSeconds = 8) {
+  $result = Invoke-Capture $File $ArgumentList -TimeoutSeconds $TimeoutSeconds
   return $result.ExitCode -eq 0
 }
 
@@ -173,14 +174,27 @@ function Test-BenignWingetOutput([string]$Output) {
   return $Output -match '(?i)(successfully installed|successfully updated|already installed|no applicable update|no newer package versions|package is already installed)'
 }
 
+function Test-WingetHelpOutput([string]$Output) {
+  return $Output -match '(?i)(Windows Package Manager|The following command line arguments are available|usage: winget|usage: winget.exe)'
+}
+
 function Invoke-WingetInstall([string]$PackageId) {
-  $args = @('install', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--id', $PackageId)
-  $result = Invoke-Capture winget $args -TimeoutSeconds 900
-  if ($result.ExitCode -eq 0 -or (Test-BenignWingetOutput $result.Output)) {
-    if ($result.Output) { Write-Note ($result.Output -replace '[\r\n]+', ' ') }
-    return $true
+  $attempts = @(
+    @('install', '--id', $PackageId, '--exact', '--source', 'winget', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'),
+    @('install', '--id', $PackageId, '--exact', '--source', 'winget', '--silent', '--accept-package-agreements', '--accept-source-agreements'),
+    @('install', '--id', $PackageId, '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements'),
+    @('install', '-e', '--id', $PackageId)
+  )
+  $last = $null
+  foreach ($wingetArgs in $attempts) {
+    Write-Note "+ winget $($wingetArgs -join ' ')"
+    $result = Invoke-Capture winget $wingetArgs -TimeoutSeconds 900
+    $last = $result
+    $flat = if ($result.Output) { ($result.Output -replace '[\r\n]+', ' ') } else { '' }
+    if ($flat) { Write-Note $flat }
+    if ((Test-BenignWingetOutput $result.Output) -or ($result.ExitCode -eq 0 -and -not (Test-WingetHelpOutput $result.Output))) { return $true }
   }
-  return $result
+  return $last
 }
 
 function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
@@ -222,7 +236,7 @@ function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
     return
   }
 
-  Fail 'No supported Windows package manager found. Install Git, Node.js 20+, npm, and Python 3 manually, then rerun.'
+  Fail 'No supported Windows package manager found. Install Git, Node.js 20+, npm, and Python 3.10+ manually, then rerun.'
 }
 
 function Get-PythonCommand {
@@ -255,13 +269,16 @@ function Check-Dependencies {
     Write-Warn "Missing or outdated dependencies: $($issues -join ', ')"
     $manager = Get-WindowsPackageManager
     if (-not $manager) {
-      Fail 'No supported package manager found. Install Git, Node.js 20+, npm, and Python 3 manually, or install winget/Chocolatey and rerun.'
+      Fail 'No supported package manager found. Install Git, Node.js 20+, npm, and Python 3.10+ manually, or install winget/Chocolatey and rerun.'
     }
-    if (Ask-YesNo "Install or refresh required dependencies with $manager now?") {
+    if ($NoDependencyInstall) {
+      Fail 'Dependency installation is disabled by -NoDependencyInstall. Install Git, Node.js 20+, npm, and Python 3.10+ manually, then rerun.'
+    }
+    if ($Yes -or (Ask-YesNo "Install or refresh required dependencies with $manager now?")) {
       Install-DependencyPackages $manager $issues
       $issues = @(Get-DependencyIssues)
     } else {
-      Fail 'Dependency installation was not approved. Install Git, Node.js 20+, npm, and Python 3 manually, or rerun with -Yes.'
+      Fail 'Dependency installation was not approved. Install Git, Node.js 20+, npm, and Python 3.10+ manually, or rerun with -Yes.'
     }
   }
 
