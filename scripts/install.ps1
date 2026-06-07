@@ -517,7 +517,7 @@ function Install-Command([string]$Root) {
   $ps1 = Join-Path $bin 'dexyd.ps1'
   if (-not (Test-Path -LiteralPath (Join-Path $bin 'dexyd.mjs'))) { Fail 'Portable command launcher missing: bin\dexyd.mjs' }
   Set-Content -Path $cmd -Value "@echo off`r`nnode `"%~dp0dexyd.mjs`" %*`r`n" -Encoding ASCII
-  Set-Content -Path $ps1 -Value "`$ScriptDir = Split-Path -Parent `$MyInvocation.MyCommand.Path`n& node (Join-Path `$ScriptDir 'dexyd.mjs') @args`nexit `$LASTEXITCODE`n" -Encoding UTF8
+  if (Test-Path -LiteralPath $ps1) { Remove-Item -LiteralPath $ps1 -Force }
   if (-not $NoPath) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ })
