@@ -50,6 +50,6 @@
     "vitest": "^4.0.8"
   },
   "bin": {
-    "dexyd": "./bin/dexyd"
+    "dexyd": "./bin/dexyd.mjs"
   }
 }
