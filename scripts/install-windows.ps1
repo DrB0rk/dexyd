@@ -17,7 +17,7 @@ try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls } catch {}
 
 
-function Write-Ok([string]$Message) { Write-Host "✓ $Message" }
+function Write-Ok([string]$Message) { Write-Host "OK $Message" }
 function Write-Note([string]$Message) { Write-Host "- $Message" }
 function Write-Warn([string]$Message) { Write-Warning $Message }
 function Fail([string]$Message) { throw $Message }
