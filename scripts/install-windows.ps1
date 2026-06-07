@@ -68,7 +68,7 @@ function ConvertTo-ProcessArgument([AllowNull()][string]$Value) {
   return $result
 }
 
-function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
+function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 30) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $File
@@ -83,22 +83,37 @@ function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirector
   } else {
     $psi.Arguments = (($Args | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
   }
+
+  $stdout = New-Object System.Text.StringBuilder
+  $stderr = New-Object System.Text.StringBuilder
+  $outHandler = [System.Diagnostics.DataReceivedEventHandler]{ param($sender, $eventArgs) if ($null -ne $eventArgs.Data) { [void]$stdout.AppendLine($eventArgs.Data) } }
+  $errHandler = [System.Diagnostics.DataReceivedEventHandler]{ param($sender, $eventArgs) if ($null -ne $eventArgs.Data) { [void]$stderr.AppendLine($eventArgs.Data) } }
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $psi
   try {
+    [void]$process.add_OutputDataReceived($outHandler)
+    [void]$process.add_ErrorDataReceived($errHandler)
     [void]$process.Start()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+      try { $process.Kill() } catch {}
+      return [pscustomobject]@{ ExitCode = 124; Output = "$File $($Args -join ' ') timed out after ${TimeoutSeconds}s" }
+    }
     $process.WaitForExit()
-    $output = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
+    $output = (($stdout.ToString(), $stderr.ToString()) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = $output.Trim() }
   } finally {
-    if ($process) { $process.Dispose() }
+    if ($process) {
+      try { [void]$process.remove_OutputDataReceived($outHandler) } catch {}
+      try { [void]$process.remove_ErrorDataReceived($errHandler) } catch {}
+      $process.Dispose()
+    }
   }
 }
 
-function Test-CommandWorks([string]$File, [string[]]$Args) {
-  $result = Invoke-Capture $File $Args
+function Test-CommandWorks([string]$File, [string[]]$Args, [int]$TimeoutSeconds = 8) {
+  $result = Invoke-Capture $File $Args -TimeoutSeconds $TimeoutSeconds
   return $result.ExitCode -eq 0
 }
 
@@ -141,7 +156,7 @@ function Test-BenignWingetOutput([string]$Output) {
 
 function Invoke-WingetInstall([string]$PackageId) {
   $args = @('install', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--id', $PackageId)
-  $result = Invoke-Capture winget $args
+  $result = Invoke-Capture winget $args -TimeoutSeconds 900
   if ($result.ExitCode -eq 0 -or (Test-BenignWingetOutput $result.Output)) {
     if ($result.Output) { Write-Note ($result.Output -replace '[\r\n]+', ' ') }
     return $true
@@ -192,9 +207,9 @@ function Install-DependencyPackages([string]$Manager, [string[]]$Issues) {
 }
 
 function Get-PythonCommand {
-  if ((Has py) -and (Test-CommandWorks py @('-3', '--version'))) { return @('py', '-3') }
   if ((Has python) -and (Test-CommandWorks python @('--version'))) { return @('python') }
   if ((Has python3) -and (Test-CommandWorks python3 @('--version'))) { return @('python3') }
+  if ((Has py) -and (Test-CommandWorks py @('-3', '--version'))) { return @('py', '-3') }
   return $null
 }
 
@@ -205,12 +220,15 @@ function Python-Args($Py) {
 
 function Test-NodeMajor {
   if (-not (Has node)) { return 0 }
-  $result = Invoke-Capture node @('-p', 'Number(process.versions.node.split(".")[0])')
+  $result = Invoke-Capture node @('-p', 'Number(process.versions.node.split(".")[0])') -TimeoutSeconds 8
   if ($result.ExitCode -ne 0) { return 0 }
-  return [int]$result.Output
+  $text = ($result.Output | Out-String).Trim()
+  if ($text -notmatch '^\d+') { return 0 }
+  return [int]$Matches[0]
 }
 
 function Check-Dependencies {
+  Write-Note 'Checking Git, Node.js, npm, and Python'
   $issues = @(Get-DependencyIssues)
   if ($issues.Count -gt 0) {
     Write-Warn "Missing or outdated dependencies: $($issues -join ', ')"
@@ -289,7 +307,7 @@ function Clone-Dexyd([string]$InstallDir) {
   try {
     Write-Host "Cloning Dexyd into $InstallDir"
     $cloneArgs = @('clone', '--branch', $Branch, '--depth', '1', $Repo, $InstallDir)
-    $result = Invoke-Capture git $cloneArgs $safeCwd
+    $result = Invoke-Capture git $cloneArgs $safeCwd -TimeoutSeconds 300
     if ($result.ExitCode -ne 0) {
       Write-Warn $result.Output
       Write-Warn "Shallow clone failed; retrying full clone."
