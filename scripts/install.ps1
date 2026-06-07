@@ -45,15 +45,55 @@ function Invoke-Checked([string]$File, [string[]]$Args, [string]$WorkingDirector
   }
 }
 
+function ConvertTo-ProcessArgument([AllowNull()][string]$Value) {
+  if ($null -eq $Value -or $Value.Length -eq 0) { return '""' }
+  if ($Value -notmatch '[\s"]') { return $Value }
+  $result = '"'
+  $slashes = 0
+  foreach ($char in $Value.ToCharArray()) {
+    if ($char -eq '\') {
+      $slashes += 1
+    } elseif ($char -eq '"') {
+      if ($slashes -gt 0) { $result += ('\' * ($slashes * 2)) }
+      $result += '\"'
+      $slashes = 0
+    } else {
+      if ($slashes -gt 0) { $result += ('\' * $slashes) }
+      $result += $char
+      $slashes = 0
+    }
+  }
+  if ($slashes -gt 0) { $result += ('\' * ($slashes * 2)) }
+  $result += '"'
+  return $result
+}
+
 function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
   if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
-  Push-Location -LiteralPath $WorkingDirectory
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $File
+  $psi.WorkingDirectory = $WorkingDirectory
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $argumentListProperty = [System.Diagnostics.ProcessStartInfo].GetProperty('ArgumentList')
+  if ($argumentListProperty) {
+    foreach ($arg in $Args) { [void]$psi.ArgumentList.Add($arg) }
+  } else {
+    $psi.Arguments = (($Args | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+  }
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $psi
   try {
-    $output = & $File @Args 2>&1
-    $exit = if ($null -eq $global:LASTEXITCODE) { 0 } else { [int]$global:LASTEXITCODE }
-    return [pscustomobject]@{ ExitCode = $exit; Output = ($output | Out-String).Trim() }
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $output = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
+    return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = $output.Trim() }
   } finally {
-    Pop-Location
+    if ($process) { $process.Dispose() }
   }
 }
 
