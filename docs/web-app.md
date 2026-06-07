@@ -37,7 +37,7 @@ or check the service:
 systemctl --user status dexyd.service
 ```
 
-The bridge must be reachable on the host at `http://127.0.0.1:4242`. The Compose file uses Linux host networking so the web container can reach that normal local bridge address directly.
+The bridge must be reachable from Docker at `http://host.docker.internal:4242`. Dexyd installs the bridge listening on `0.0.0.0:4242` by default, so the web container can reach it through Docker's host-gateway alias.
 
 ## Docker Compose quick start
 
@@ -63,12 +63,15 @@ No Docker secrets are required. The browser asks the host bridge for a normal De
 
 ## How it connects to the bridge
 
-The Compose file uses host networking and points the web container at the normal local host bridge:
+The Compose file publishes the web UI and points the container at the host bridge:
 
 ```yaml
-network_mode: host
+ports:
+  - "${DEXYD_WEB_PORT:-8080}:8080"
+extra_hosts:
+  - "host.docker.internal:host-gateway"
 environment:
-  BRIDGE_URL: http://127.0.0.1:4242
+  BRIDGE_URL: http://host.docker.internal:4242
 ```
 
 The web app uses same-origin URLs like `/sessions`, `/ws`, and `/web/auth/bootstrap`; Nginx proxies those requests to the host bridge. WebSocket traffic is proxied too.
@@ -79,14 +82,20 @@ Common overrides:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `WEB_PORT` | `8080` | Port inside the web container. |
-| `BRIDGE_URL` | `http://127.0.0.1:4242` | URL of the host Dexyd bridge from inside Docker host-network mode. |
+| `DEXYD_WEB_PORT` | `8080` | Published host port for the web UI. |
+| `DEXYD_BRIDGE_URL` | `http://host.docker.internal:4242` | URL of the host Dexyd bridge from inside the container. |
+| `WEB_PORT` | `8080` | Internal Nginx listen port; normally leave unchanged. |
 
-If your host bridge runs on another port, edit `docker-compose.yml`:
+If your host bridge runs on another port, set an environment variable in Portainer or your shell before deploying:
 
-```yaml
-environment:
-  BRIDGE_URL: http://127.0.0.1:4243
+```bash
+DEXYD_BRIDGE_URL=http://host.docker.internal:4243 docker compose up -d
+```
+
+To publish a different web port:
+
+```bash
+DEXYD_WEB_PORT=8090 docker compose up -d
 ```
 
 ## Updating
