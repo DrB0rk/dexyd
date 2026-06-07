@@ -81,6 +81,12 @@ dexyd --tui
 
 On Windows, open a second terminal and run `dexyd` to keep the bridge in the foreground when not using a service manager.
 
+Optional: enable OpenSSH Server on Windows for remote terminal access. Run this in **Administrator PowerShell**:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Start-Service sshd; Set-Service -Name sshd -StartupType Automatic; New-NetFirewallRule -Name sshd -DisplayName "OpenSSH Server" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+```
+
 Clean an installed bridge before reinstalling:
 
 ```bash
