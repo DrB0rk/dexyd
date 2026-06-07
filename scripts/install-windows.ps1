@@ -22,10 +22,12 @@ function Write-Note([string]$Message) { Write-Host "- $Message" }
 function Write-Warn([string]$Message) { Write-Warning $Message }
 function Fail([string]$Message) { throw $Message }
 function Resolve-CommandFile([string]$Command) {
-  $resolved = Get-Command $Command -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($resolved) {
-    if ($resolved.Source) { return $resolved.Source }
-    if ($resolved.Path) { return $resolved.Path }
+  foreach ($kind in @('Application', 'ExternalScript')) {
+    $resolved = Get-Command $Command -CommandType $kind -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($resolved) {
+      if ($resolved.Source) { return $resolved.Source }
+      if ($resolved.Path) { return $resolved.Path }
+    }
   }
   return $null
 }
@@ -141,10 +143,35 @@ function Get-WindowsPackageManager {
   return $null
 }
 
+function Add-PathEntry([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $parts = @($env:Path -split ';' | Where-Object { $_ })
+  if ($parts -notcontains $Path) { $env:Path = (($Path, $env:Path) -join ';') }
+}
+
+function Add-KnownToolPaths {
+  Add-PathEntry (Join-Path $env:ProgramFiles 'Git\cmd')
+  Add-PathEntry (Join-Path $env:ProgramFiles 'Git\bin')
+  Add-PathEntry (Join-Path $env:ProgramFiles 'nodejs')
+  if (${env:ProgramFiles(x86)}) { Add-PathEntry (Join-Path ${env:ProgramFiles(x86)} 'nodejs') }
+  if ($env:APPDATA) { Add-PathEntry (Join-Path $env:APPDATA 'npm') }
+  foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles)) {
+    if (-not $base) { continue }
+    foreach ($name in @('Python313', 'Python312', 'Python311', 'Python310')) {
+      Add-PathEntry (Join-Path $base "Programs\Python\$name")
+      Add-PathEntry (Join-Path $base "Programs\Python\$name\Scripts")
+      Add-PathEntry (Join-Path $base $name)
+      Add-PathEntry (Join-Path $base "$name\Scripts")
+    }
+  }
+}
+
 function Refresh-PathFromRegistry {
   $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
   $user = [Environment]::GetEnvironmentVariable('Path', 'User')
   $env:Path = (($machine, $user, $env:Path) -join ';')
+  Add-KnownToolPaths
 }
 
 function Get-DependencyIssues {
@@ -274,20 +301,28 @@ function Check-Dependencies {
     if ($NoDependencyInstall) {
       Fail 'Dependency installation is disabled by -NoDependencyInstall. Install Git, Node.js 20+, npm, and Python 3.10+ manually, then rerun.'
     }
-    if ($Yes -or (Ask-YesNo "Install or refresh required dependencies with $manager now?")) {
-      Install-DependencyPackages $manager $issues
-      $issues = @(Get-DependencyIssues)
-    } else {
+    if (-not ($Yes -or (Ask-YesNo "Install or refresh required dependencies with $manager now?"))) {
       Fail 'Dependency installation was not approved. Install Git, Node.js 20+, npm, and Python 3.10+ manually, or rerun with -Yes.'
+    }
+
+    for ($pass = 1; $pass -le 3; $pass++) {
+      if ($issues.Count -eq 0) { break }
+      Write-Note "Dependency repair pass $pass`: $($issues -join ', ')"
+      Install-DependencyPackages $manager $issues
+      Refresh-PathFromRegistry
+      $issues = @(Get-DependencyIssues)
     }
   }
 
+  Refresh-PathFromRegistry
+  $issues = @(Get-DependencyIssues)
   if ($issues.Count -gt 0) {
     Fail "Still missing or outdated after install attempt: $($issues -join ', '). Open a new terminal or install dependencies manually, then rerun."
   }
   if (-not (Test-CommandWorks git @('--version'))) { Fail 'Git is installed but failed to run. Check your Git for Windows installation and PATH.' }
   $major = Test-NodeMajor
   if ($major -lt 20) { Fail "Node.js 20+ is required. Current: $(& node --version 2>$null)" }
+  if (-not (Test-CommandWorks npm @('--version'))) { Fail 'npm is installed but failed to run. Repair Node.js LTS, open a new terminal, then rerun.' }
   Write-Ok 'Core dependencies ready'
 }
 
