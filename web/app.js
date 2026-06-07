@@ -26,7 +26,7 @@ const state = {
   devices: [],
   usageDetails: null,
   notificationSettings: readJson('dexyd.web.notificationSettings') || defaultNotificationSettings(),
-  errorHistory: readJson('dexyd.web.errorHistory') || [],
+  errorHistory: loadErrorHistory(),
   updateInfo: null,
   pairingResult: null,
 };
@@ -148,7 +148,7 @@ function setPage(page) {
 }
 
 function openSettingsDialog() {
-  Promise.allSettled([refreshHealth(), refreshAccount(), refreshDevices(), refreshUsage(), loadHiddenSessions()]).finally(renderSettings);
+  Promise.allSettled([refreshHealth(), refreshAccount(), state.selectedSession ? refreshUsage() : Promise.resolve()]).finally(renderSettings);
   renderSettings();
   els.settingsDialog.showModal();
 }
@@ -190,7 +190,7 @@ async function api(path, options = {}, auth = true) {
   }
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`${response.status} ${detail || response.statusText}`);
+    throw apiError(response, detail);
   }
   if (response.status === 204) return null;
   return response.json();
@@ -472,8 +472,8 @@ async function refreshUsage() {
     els.usagePill.textContent = parts.join(' · ') || 'usage unknown';
   } catch (error) {
     state.usageDetails = null;
-    els.usagePill.textContent = 'usage unavailable';
-    recordError('warn', 'Usage unavailable', errorMessage(error));
+    els.usagePill.textContent = isBridgeUnavailableError(error) ? 'bridge offline' : 'usage unavailable';
+    if (!isBridgeUnavailableError(error)) recordError('warn', 'Usage unavailable', errorMessage(error));
   }
   renderSettings();
 }
@@ -484,7 +484,7 @@ async function refreshDevices() {
     state.devices = result.devices || [];
   } catch (error) {
     state.devices = [];
-    recordError('warn', 'Devices unavailable', errorMessage(error));
+    if (!isBridgeUnavailableError(error)) recordError('warn', 'Devices unavailable', errorMessage(error));
   }
   renderSettings();
 }
@@ -524,7 +524,6 @@ function connectStream() {
     state.socket.onopen = () => {
       state.socket.send(JSON.stringify({ type: 'replay.request', lastSeenSequence: state.lastSequence }));
       stopPolling();
-      showToast('Realtime connected');
     };
     state.socket.onmessage = event => handleStreamMessage(event.data);
     state.socket.onclose = () => startPolling();
@@ -738,6 +737,9 @@ function renderSettingsMenuButton(pane) {
     state.settingsPane = pane.key;
     localStorage.setItem('dexyd.web.settingsPane', pane.key);
     renderSettings();
+    refreshSettingsPaneData(pane.key).catch(error => {
+      if (!isBridgeUnavailableError(error)) showError(error);
+    });
   });
   return button;
 }
@@ -886,7 +888,7 @@ async function loadHiddenSessions() {
     state.hiddenSessions = result.sessions || [];
   } catch (error) {
     state.hiddenSessions = [];
-    recordError('warn', 'Hidden sessions unavailable', errorMessage(error));
+    if (!isBridgeUnavailableError(error)) recordError('warn', 'Hidden sessions unavailable', errorMessage(error));
   }
   renderSettings();
 }
@@ -1013,16 +1015,67 @@ function websocketUrl(path, accessToken) {
   url.searchParams.set('access_token', accessToken);
   return url.toString();
 }
+
+async function refreshSettingsPaneData(key) {
+  if (key === 'security') await refreshDevices();
+  else if (key === 'recovery') await loadHiddenSessions();
+  else if (key === 'account') await Promise.allSettled([refreshAccount(), refreshUsage()]);
+  else if (key === 'connection' || key === 'diagnostics') await refreshHealth();
+}
+
+function apiError(response, detail) {
+  const status = response.status;
+  const clean = cleanErrorText(detail || response.statusText || 'Request failed');
+  const message = [502, 503, 504].includes(status)
+    ? `Bridge unavailable (${status} ${response.statusText || 'proxy error'}). Start the host Dexyd bridge or check the web stack bridge URL.`
+    : `${status} ${clean}`;
+  const error = new Error(message);
+  error.status = status;
+  error.bridgeUnavailable = [502, 503, 504].includes(status);
+  return error;
+}
+
+function cleanErrorText(value) {
+  const text = String(value || '')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || 'Request failed';
+}
+
+function isBridgeUnavailableError(error) {
+  return Boolean(error?.bridgeUnavailable || [502, 503, 504].includes(error?.status) || /Bad Gateway|Bridge unavailable|Service Unavailable|Gateway Timeout/i.test(errorMessage(error)));
+}
+
+function loadErrorHistory() {
+  const items = readJson('dexyd.web.errorHistory');
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter(item => !(String(item?.title || '').match(/Devices unavailable|Hidden sessions unavailable/i) && /<html|Bad Gateway/i.test(String(item?.body || ''))))
+    .map(item => ({ ...item, body: cleanErrorText(item?.body || '') }))
+    .slice(0, 40);
+}
 function bridgeLabel() { return state.health ? `${state.health.status} · ${state.health.version}` : 'offline'; }
 function realtimeLabel() { return state.socket?.readyState === WebSocket.OPEN ? 'connected' : state.polling ? 'polling fallback' : 'connecting'; }
 function accountLabel() { const auth = state.account?.codexAuth || state.account || {}; return auth.activeAccount?.label || auth.activeAccount?.email || auth.account || auth.message || 'unknown'; }
 function defaultNotificationSettings() { return { inApp: true, system: false, promptFinished: true, approvals: true, questions: true, usage: true, alerts: false }; }
 function notificationsSupported() { return typeof Notification !== 'undefined'; }
 function percentText(value) { return typeof value === 'number' ? `${Math.round(value)}% left` : 'not reported'; }
-function errorMessage(error) { return error instanceof Error ? error.message : String(error); }
+function errorMessage(error) { return error instanceof Error ? cleanErrorText(error.message) : cleanErrorText(String(error)); }
 function recordError(level, title, body) {
-  const message = String(body || '').slice(0, 800);
-  state.errorHistory = [{ id: `${Date.now()}-${Math.random()}`, level, title, body: message, timestamp: new Date().toISOString() }, ...state.errorHistory].slice(0, 40);
+  const message = cleanErrorText(body).slice(0, 800);
+  if (!message) return;
+  const key = `${level}|${title}|${message}`;
+  const now = Date.now();
+  const recent = state.errorHistory.find(item => item.key === key);
+  if (recent && now - new Date(recent.timestamp).getTime() < 10 * 60 * 1000) return;
+  state.errorHistory = [{ id: `${now}-${Math.random()}`, key, level, title, body: message, timestamp: new Date(now).toISOString() }, ...state.errorHistory].slice(0, 40);
   localStorage.setItem('dexyd.web.errorHistory', JSON.stringify(state.errorHistory));
 }
 function clearErrorHistory() { state.errorHistory = []; localStorage.setItem('dexyd.web.errorHistory', '[]'); renderSettings(); }
@@ -1118,5 +1171,5 @@ function compareVersions(left, right) { const a = String(left).replace(/^v/i, ''
 function fullLocalReset() { if (!confirm('Reset this browser profile, tokens, inbox, and cached chat?')) return; Object.keys(localStorage).filter(key => key.startsWith('dexyd.web.')).forEach(key => localStorage.removeItem(key)); location.reload(); }
 function copyText(text) { navigator.clipboard?.writeText(text).then(() => showToast('Copied')).catch(() => showToast('Copy failed')); }
 function renderDl(element, rows) { element.replaceChildren(); for (const [key, value] of Object.entries(rows)) { const dt = document.createElement('dt'); dt.textContent = key; const dd = document.createElement('dd'); dd.textContent = value ?? 'unknown'; element.append(dt, dd); } }
-function showError(error) { const message = errorMessage(error); recordError('error', 'Web UI error', message); showToast(message); renderSettings(); }
+function showError(error) { const message = errorMessage(error); recordError(isBridgeUnavailableError(error) ? 'warn' : 'error', isBridgeUnavailableError(error) ? 'Bridge unavailable' : 'Web UI error', message); showToast(message); renderSettings(); }
 function showToast(message) { els.toast.textContent = message; els.toast.hidden = false; clearTimeout(showToast.timer); showToast.timer = setTimeout(() => { els.toast.hidden = true; }, 3600); }
