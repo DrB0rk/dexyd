@@ -114,7 +114,7 @@ The npm TUI command is cross-platform and uses the Node launcher, so it works on
 Run PowerShell as your normal user, then install from GitHub:
 
 ```powershell
-iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install-windows.ps1 -UseBasicParsing | iex
 ```
 
 From a cloned checkout, Command Prompt users can run:

@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.s
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install-windows.ps1 -UseBasicParsing | iex
 ```
 
 Windows from a cloned checkout:
@@ -88,8 +88,8 @@ curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.s
 ```
 
 ```powershell
-$installer = "$env:TEMP\dexyd-install.ps1"
-iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing -OutFile $installer
+$installer = "$env:TEMP\dexyd-install-windows.ps1"
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install-windows.ps1 -UseBasicParsing -OutFile $installer
 powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Clean
 ```
 
