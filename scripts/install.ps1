@@ -1,0 +1,320 @@
+[CmdletBinding()]
+param(
+  [string]$Repo = $(if ($env:DEXYD_REPO_URL) { $env:DEXYD_REPO_URL } else { 'https://github.com/DrB0rk/dexyd.git' }),
+  [string]$Branch = $(if ($env:DEXYD_BRANCH) { $env:DEXYD_BRANCH } else { 'main' }),
+  [string]$Dir = $(if ($env:DEXYD_INSTALL_DIR) { $env:DEXYD_INSTALL_DIR } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\Dexyd' } else { Join-Path $HOME 'AppData\Local\Programs\Dexyd' }),
+  [switch]$UseCurrent,
+  [switch]$NoPath,
+  [switch]$Clean,
+  [switch]$Yes
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Write-Ok([string]$Message) { Write-Host "✓ $Message" }
+function Write-Note([string]$Message) { Write-Host "- $Message" }
+function Write-Warn([string]$Message) { Write-Warning $Message }
+function Fail([string]$Message) { throw $Message }
+function Has([string]$Command) { $null -ne (Get-Command $Command -ErrorAction SilentlyContinue) }
+
+function Resolve-FullPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { Fail 'Install directory cannot be empty.' }
+  $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+  if ($expanded -eq '~') { $expanded = $HOME }
+  elseif ($expanded.StartsWith('~\') -or $expanded.StartsWith('~/')) { $expanded = Join-Path $HOME $expanded.Substring(2) }
+  return [System.IO.Path]::GetFullPath($expanded)
+}
+
+function Test-IsPathInside([string]$Path, [string]$Parent) {
+  $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+  $fullParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+  return $fullPath.StartsWith($fullParent, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Invoke-Checked([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
+  if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
+  Push-Location -LiteralPath $WorkingDirectory
+  try {
+    Write-Note "+ $File $($Args -join ' ')"
+    & $File @Args
+    $exit = if ($null -eq $global:LASTEXITCODE) { 0 } else { [int]$global:LASTEXITCODE }
+    if ($exit -ne 0) { Fail "$File $($Args -join ' ') failed with exit code $exit" }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Invoke-Capture([string]$File, [string[]]$Args, [string]$WorkingDirectory = $PWD.Path) {
+  if (-not (Test-Path -LiteralPath $WorkingDirectory)) { New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null }
+  Push-Location -LiteralPath $WorkingDirectory
+  try {
+    $output = & $File @Args 2>&1
+    $exit = if ($null -eq $global:LASTEXITCODE) { 0 } else { [int]$global:LASTEXITCODE }
+    return [pscustomobject]@{ ExitCode = $exit; Output = ($output | Out-String).Trim() }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Test-CommandWorks([string]$File, [string[]]$Args) {
+  $result = Invoke-Capture $File $Args
+  return $result.ExitCode -eq 0
+}
+
+function Get-PythonCommand {
+  if ((Has py) -and (Test-CommandWorks py @('-3', '--version'))) { return @('py', '-3') }
+  if ((Has python) -and (Test-CommandWorks python @('--version'))) { return @('python') }
+  if ((Has python3) -and (Test-CommandWorks python3 @('--version'))) { return @('python3') }
+  return $null
+}
+
+function Python-Args($Py) {
+  if ($Py.Length -le 1) { return @() }
+  return $Py[1..($Py.Length - 1)]
+}
+
+function Test-NodeMajor {
+  if (-not (Has node)) { return 0 }
+  $result = Invoke-Capture node @('-p', 'Number(process.versions.node.split(".")[0])')
+  if ($result.ExitCode -ne 0) { return 0 }
+  return [int]$result.Output
+}
+
+function Check-Dependencies {
+  $missing = @()
+  foreach ($cmd in @('git', 'node', 'npm')) {
+    if (-not (Has $cmd)) { $missing += $cmd }
+  }
+  if (-not (Get-PythonCommand)) { $missing += 'python' }
+  if ($missing.Count -gt 0) {
+    Fail "Missing required tools: $($missing -join ', '). Install Git, Node.js 20+, npm, and Python 3, then rerun."
+  }
+  if (-not (Test-CommandWorks git @('--version'))) { Fail 'Git is installed but failed to run. Check your Git for Windows installation and PATH.' }
+  $major = Test-NodeMajor
+  if ($major -lt 20) { Fail "Node.js 20+ is required. Current: $(& node --version 2>$null)" }
+  Write-Ok 'Core dependencies ready'
+}
+
+function Backup-DexydData([string]$InstallDir) {
+  if (-not (Test-Path -LiteralPath $InstallDir)) { return $null }
+  $backupRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("dexyd-install-backup-{0}" -f ([guid]::NewGuid().ToString('N')))
+  New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+  foreach ($name in @('dexyd.config.yaml', '.dexyd')) {
+    $src = Join-Path $InstallDir $name
+    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $backupRoot $name) -Recurse -Force }
+  }
+  return $backupRoot
+}
+
+function Restore-DexydData([string]$BackupRoot, [string]$InstallDir) {
+  if (-not $BackupRoot -or -not (Test-Path -LiteralPath $BackupRoot)) { return }
+  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  foreach ($name in @('dexyd.config.yaml', '.dexyd')) {
+    $src = Join-Path $BackupRoot $name
+    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $InstallDir $name) -Recurse -Force }
+  }
+  Remove-Item -LiteralPath $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-InstalledDexyd([string]$InstallDir, [switch]$PreserveData) {
+  $backup = if ($PreserveData) { Backup-DexydData $InstallDir } else { $null }
+  if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+  if ($PreserveData -and $backup) { Restore-DexydData $backup $InstallDir }
+  Write-Ok "Removed installed Dexyd app files: $InstallDir"
+}
+
+function Copy-CurrentCheckout([string]$Source, [string]$Target) {
+  if (-not (Test-Path (Join-Path $Source 'package.json')) -or -not (Test-Path (Join-Path $Source 'src'))) {
+    Fail '-UseCurrent must be run from the Dexyd repository root.'
+  }
+  New-Item -ItemType Directory -Force -Path $Target | Out-Null
+  $preserve = @('.dexyd', 'dexyd.config.yaml')
+  Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue | Where-Object { $preserve -notcontains $_.Name } | Remove-Item -Recurse -Force
+  $exclude = @('.git', '.github', '.omx', '.dexyd', 'dev', 'mobile', 'node_modules', 'test', 'dist', 'coverage', '.gradle', 'build', '.cache', 'tmp', 'temp', 'dexyd.config.yaml')
+  Get-ChildItem -LiteralPath $Source -Force | Where-Object { $exclude -notcontains $_.Name } | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Target $_.Name) -Recurse -Force
+  }
+}
+
+function Clone-Dexyd([string]$InstallDir) {
+  $parent = Split-Path -Parent $InstallDir
+  if ([string]::IsNullOrWhiteSpace($parent)) { Fail "Invalid install directory: $InstallDir" }
+  New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  $safeCwd = Join-Path ([System.IO.Path]::GetTempPath()) 'dexyd-installer-cwd'
+  New-Item -ItemType Directory -Force -Path $safeCwd | Out-Null
+
+  $backup = Backup-DexydData $InstallDir
+  if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+
+  try {
+    Write-Host "Cloning Dexyd into $InstallDir"
+    $cloneArgs = @('clone', '--branch', $Branch, '--depth', '1', $Repo, $InstallDir)
+    $result = Invoke-Capture git $cloneArgs $safeCwd
+    if ($result.ExitCode -ne 0) {
+      Write-Warn $result.Output
+      Write-Warn "Shallow clone failed; retrying full clone."
+      if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+      Invoke-Checked git @('clone', '--branch', $Branch, $Repo, $InstallDir) $safeCwd
+    }
+    Restore-DexydData $backup $InstallDir
+  } catch {
+    if ($backup -and (Test-Path -LiteralPath $backup)) {
+      New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+      Restore-DexydData $backup $InstallDir
+    }
+    throw
+  }
+}
+
+function Resolve-Source([string]$InstallDir) {
+  $parent = Split-Path -Parent $InstallDir
+  if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  if (Test-IsPathInside (Get-Location).Path $InstallDir) {
+    $safeCwd = Join-Path ([System.IO.Path]::GetTempPath()) 'dexyd-installer-cwd'
+    New-Item -ItemType Directory -Force -Path $safeCwd | Out-Null
+    Set-Location -LiteralPath $safeCwd
+  }
+  if ($UseCurrent) {
+    Write-Host "Deploying current checkout into $InstallDir"
+    Copy-CurrentCheckout -Source $script:InitialLocation -Target $InstallDir
+    return $InstallDir
+  }
+  Clone-Dexyd $InstallDir
+  return $InstallDir
+}
+
+function New-SigningKey {
+  $bytes = New-Object byte[] 48
+  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+}
+
+function Update-Config([string]$Root) {
+  $config = Join-Path $Root 'dexyd.config.yaml'
+  $example = Join-Path $Root 'dexyd.config.example.yaml'
+  if (-not (Test-Path -LiteralPath $example)) { Fail "Missing config example: $example" }
+  if (-not (Test-Path -LiteralPath $config)) {
+    Copy-Item -LiteralPath $example -Destination $config
+    Write-Ok "Created $config"
+  }
+  $workspace = $HOME.Replace('\', '/')
+  $key = New-SigningKey
+  $py = Get-PythonCommand
+  $code = @'
+from pathlib import Path
+import re, sys
+path = Path(sys.argv[1])
+workspace = sys.argv[2]
+key = sys.argv[3]
+s = path.read_text(encoding='utf-8')
+
+def replace_or_insert(section, key_name, value):
+    global s
+    pattern = rf'(?ms)^({re.escape(section)}:\n)(.*?)(?=^[A-Za-z_][A-Za-z0-9_]*:|\Z)'
+    m = re.search(pattern, s)
+    rendered = f'{key_name}: {value}'
+    if not m:
+        s += f'\n{section}:\n  {rendered}\n'
+        return
+    block = m.group(2)
+    key_pattern = rf'(?m)^(\s*){re.escape(key_name)}:\s*.*$'
+    if re.search(key_pattern, block):
+        block = re.sub(key_pattern, lambda km: f'{km.group(1)}{rendered}', block, count=1)
+    else:
+        block = block.rstrip() + f'\n  {rendered}\n'
+    s = s[:m.start(2)] + block + s[m.end(2):]
+
+def current_scalar(key_name):
+    m = re.search(rf'(?m)^\s*{re.escape(key_name)}:\s*([^\n#]+)', s)
+    return (m.group(1).strip().strip('"\'') if m else '')
+
+replace_or_insert('server', 'host', '0.0.0.0')
+replace_or_insert('server', 'publicBaseUrl', '""')
+replace_or_insert('codex', 'workspaceRoot', repr(workspace).replace("'", '"'))
+replace_or_insert('codex', 'permissionMode', 'bypass')
+if current_scalar('signingKey') in {'', 'change-this-in-production-min-16-chars', 'dexyd-dev-change-me', 'test-signing-key-value'}:
+    replace_or_insert('auth', 'signingKey', key)
+path.write_text(s, encoding='utf-8')
+'@
+  $tmp = New-TemporaryFile
+  Set-Content -Path $tmp -Value $code -Encoding UTF8
+  Invoke-Checked $py[0] ((Python-Args $py) + @($tmp, $config, $workspace, $key))
+  Remove-Item -LiteralPath $tmp -Force
+  Write-Ok "Configured $config"
+}
+
+function Install-Bridge([string]$Root) {
+  if (Test-Path (Join-Path $Root 'package-lock.json')) {
+    Invoke-Checked npm @('ci', '--no-audit', '--fund=false') $Root
+  } else {
+    Invoke-Checked npm @('install', '--no-audit', '--fund=false') $Root
+  }
+  Invoke-Checked npm @('run', 'build') $Root
+  Invoke-Checked npm @('prune', '--omit=dev', '--no-audit', '--fund=false') $Root
+  Write-Ok 'Bridge built and runtime dependencies pruned'
+}
+
+function Install-Tui([string]$Root) {
+  $py = Get-PythonCommand
+  $venv = Join-Path $Root '.dexyd\.venv-tui'
+  $venvPython = Join-Path $venv 'Scripts\python.exe'
+  if ((Test-Path -LiteralPath $venv) -and -not (Test-Path -LiteralPath $venvPython)) {
+    Write-Warn "Existing TUI virtualenv is incomplete; recreating $venv"
+    Remove-Item -LiteralPath $venv -Recurse -Force
+  }
+  if (-not (Test-Path -LiteralPath $venvPython)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $venv) | Out-Null
+    Invoke-Checked $py[0] ((Python-Args $py) + @('-m', 'venv', $venv))
+  }
+  Invoke-Checked $venvPython @('-m', 'pip', 'install', '--upgrade', 'pip')
+  Invoke-Checked $venvPython @('-m', 'pip', 'install', '-r', (Join-Path $Root 'tui\requirements.txt'))
+  Set-Content -Path (Join-Path $venv '.deps-installed') -Value 'ok'
+  Write-Ok 'TUI dependencies installed'
+}
+
+function Install-Command([string]$Root) {
+  $bin = Join-Path $Root 'bin'
+  $cmd = Join-Path $bin 'dexyd.cmd'
+  $ps1 = Join-Path $bin 'dexyd.ps1'
+  if (-not (Test-Path -LiteralPath (Join-Path $bin 'dexyd.mjs'))) { Fail 'Portable command launcher missing: bin\dexyd.mjs' }
+  Set-Content -Path $cmd -Value "@echo off`r`nnode `"%~dp0dexyd.mjs`" %*`r`n" -Encoding ASCII
+  Set-Content -Path $ps1 -Value "`$ScriptDir = Split-Path -Parent `$MyInvocation.MyCommand.Path`n& node (Join-Path `$ScriptDir 'dexyd.mjs') @args`nexit `$LASTEXITCODE`n" -Encoding UTF8
+  if (-not $NoPath) {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $parts = @($userPath -split ';' | Where-Object { $_ })
+    if ($parts -notcontains $bin) {
+      [Environment]::SetEnvironmentVariable('Path', (($parts + $bin) -join ';'), 'User')
+      Write-Warn "Added $bin to your user PATH. Open a new terminal for 'dexyd' to resolve."
+    }
+  }
+  Write-Ok "Installed command: $cmd"
+}
+
+$script:InitialLocation = (Get-Location).Path
+$InstallDir = Resolve-FullPath $Dir
+Write-Host 'Dexyd Windows installer'
+Write-Host "Repository: $Repo"
+Write-Host "Branch/tag:  $Branch"
+Write-Host "Install to: $InstallDir"
+
+if ($Clean) {
+  Remove-InstalledDexyd $InstallDir
+  exit 0
+}
+
+Check-Dependencies
+$root = Resolve-Source $InstallDir
+foreach ($required in @('package.json', 'src\index.ts', 'tui\requirements.txt', 'bin\dexyd.mjs', 'dexyd.config.example.yaml')) {
+  if (-not (Test-Path (Join-Path $root $required))) { Fail "Installed tree missing $required" }
+}
+Update-Config $root
+Install-Bridge $root
+Install-Tui $root
+Install-Command $root
+
+Write-Host ''
+Write-Host 'Dexyd installed for Windows'
+Write-Host "  $(Join-Path $root 'bin\dexyd.cmd') --tui"
+Write-Host "  $(Join-Path $root 'bin\dexyd.cmd')"
+Write-Host 'Open a new terminal if PATH was updated.'

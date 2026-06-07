@@ -17,8 +17,8 @@
     "mobile:start": "cd mobile/dexydMobile && npm start",
     "mobile:test": "cd mobile/dexydMobile && npm test",
     "mobile:android": "cd mobile/dexydMobile && npm run android",
-    "tui": "bash bin/dexyd --tui",
-    "dexyd": "bash bin/dexyd",
+    "tui": "node bin/dexyd.mjs --tui",
+    "dexyd": "node bin/dexyd.mjs",
     "install:linux": "bash scripts/install.sh",
     "mobile:ios": "cd mobile/dexydMobile && npm run ios",
     "mobile:ios:device": "cd mobile/dexydMobile && npm run ios:device",
@@ -27,7 +27,8 @@
     "android:all:tui": "bash dev/scripts/run-all.sh --with-tui",
     "android:all:debug": "bash dev/scripts/run-all.sh --debug-metro",
     "android:all:debug:tui": "bash dev/scripts/run-all.sh --debug-metro --with-tui",
-    "firewall:open": "bash dev/scripts/firewall-port.sh"
+    "firewall:open": "bash dev/scripts/firewall-port.sh",
+    "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",

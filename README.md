@@ -36,8 +36,8 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 
 ## Requirements
 
-- Linux computer for the bridge installer.
-- Node.js 20+ and Python 3; the installer checks and installs common dependencies where possible.
+- Linux or Windows computer for the bridge/TUI.
+- Node.js 20+ and Python 3; installers check required dependencies where possible.
 - Codex CLI authenticated on the bridge computer.
 - Optional: OMX for OMX-backed sessions and harness behavior.
 - Android phone with the Dexyd APK installed.
@@ -45,20 +45,32 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 
 ## Install the bridge
 
-Install Dexyd with:
+Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
+Windows from a cloned checkout:
+
+```cmd
+scripts\install-windows.cmd
+```
+
 The installer:
 
-- installs into the XDG app data location, normally `~/.local/share/dexyd`;
+- installs into the app data location, normally `~/.local/share/dexyd` on Linux or `%LOCALAPPDATA%\Programs\Dexyd` on Windows;
 - creates `dexyd.config.yaml` with your home directory as the workspace root;
 - installs bridge and TUI dependencies;
 - builds the bridge;
 - links the `dexyd` command;
-- installs/restarts the user service when available;
+- installs/restarts the Linux user service when available; on Windows run `dexyd` in a terminal for the bridge;
 - does **not** build or install the Android app.
 
 Open the setup console:
@@ -67,10 +79,18 @@ Open the setup console:
 dexyd --tui
 ```
 
+On Windows, open a second terminal and run `dexyd` to keep the bridge in the foreground when not using a service manager.
+
 Clean an installed bridge before reinstalling:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
+```
+
+```powershell
+$installer = "$env:TEMP\dexyd-install.ps1"
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Clean
 ```
 
 ## Install the Android app
