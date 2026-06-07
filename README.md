@@ -36,8 +36,8 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 
 ## Requirements
 
-- Linux computer for the bridge installer.
-- Node.js 20+ and Python 3; the installer checks and installs common dependencies where possible.
+- Linux or Windows computer for the bridge/TUI.
+- Node.js 20+ and Python 3; installers check required dependencies where possible.
 - Codex CLI authenticated on the bridge computer.
 - Optional: OMX for OMX-backed sessions and harness behavior.
 - Android phone with the Dexyd APK installed.
@@ -45,20 +45,26 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 
 ## Install the bridge
 
-Install Dexyd with:
+Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
 The installer:
 
-- installs into the XDG app data location, normally `~/.local/share/dexyd`;
+- installs into the app data location, normally `~/.local/share/dexyd` on Linux or `%LOCALAPPDATA%\Dexyd` on Windows;
 - creates `dexyd.config.yaml` with your home directory as the workspace root;
 - installs bridge and TUI dependencies;
 - builds the bridge;
 - links the `dexyd` command;
-- installs/restarts the user service when available;
+- installs/restarts the Linux user service when available; on Windows run `dexyd` in a terminal for the bridge;
 - does **not** build or install the Android app.
 
 Open the setup console:
@@ -67,11 +73,32 @@ Open the setup console:
 dexyd --tui
 ```
 
+On Windows, open a second terminal and run `dexyd` to keep the bridge in the foreground when not using a service manager.
+
 Clean an installed bridge before reinstalling:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh | bash -s -- --clean
 ```
+
+```powershell
+$installer = "$env:TEMP\dexyd-install.ps1"
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Clean
+```
+
+## Run the self-hosted web control app
+
+Dexyd can also run a browser control UI in Docker while the bridge and TUI stay installed on your system:
+
+```bash
+dexyd --tui              # or keep dexyd.service running
+docker compose up -d --build
+```
+
+Open `http://localhost:8080` or `http://<computer-lan-ip>:8080`. The container only serves the web page and proxies to the host bridge at `http://127.0.0.1:4242` using Docker host networking; it does not run Codex, the bridge, or the TUI.
+
+See [Self-hosted web control app](docs/web-app.md).
 
 ## Install the Android app
 

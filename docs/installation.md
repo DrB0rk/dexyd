@@ -5,14 +5,15 @@ Dexyd has two pieces:
 1. **Bridge** — runs on your computer and talks to Codex/OMX.
 2. **Mobile app** — runs on your phone and talks to the bridge after pairing.
 
-The Linux installer is the main supported install path today. Android is the primary mobile target. iOS has an initial React Native target for bring-up on macOS.
+Linux and Windows are supported bridge/TUI hosts. Android is the primary mobile target. iOS has an initial React Native target for bring-up on macOS.
 
 ## Supported host setups
 
 | Setup | Status | Notes |
 | --- | --- | --- |
-| Linux bridge host | Primary | Guided installer supports Debian/Ubuntu, Arch, and Fedora-style systems. |
-| macOS bridge host | Manual | Bridge can run with Node, but the Linux installer does not manage macOS services. |
+| Linux bridge host | Primary | Guided installer supports Debian/Ubuntu, Arch, and Fedora-style systems plus user systemd service setup. |
+| Windows bridge host | Supported | Native PowerShell installer; bridge/TUI run in terminals. Autostart service management is not built in yet. |
+| macOS bridge host | Manual | Bridge can run with Node, but installers do not manage macOS services. |
 | WSL-like shell | Possible | Works best for local bridge tests; phone access needs LAN routing to the WSL host. |
 | Android app | Primary | Build/install scripts are included. |
 | iOS app | Early | Native project, permissions, icons, and scripts exist; full release flow is not complete. |
@@ -105,6 +106,52 @@ If the command was not linked, run the TUI from the repository root:
 ```bash
 npm run tui
 ```
+
+The npm TUI command is cross-platform and uses the Node launcher, so it works on Windows too after dependencies are installed.
+
+
+## Windows guided install
+
+Run PowerShell as your normal user, then install from GitHub:
+
+```powershell
+iwr https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
+The Windows installer puts Dexyd in `%LOCALAPPDATA%\Dexyd`. It checks Git, Node.js 20+, npm, and Python 3; clones or updates the repository; creates `dexyd.config.yaml`; installs bridge dependencies; builds the bridge; creates the TUI virtualenv; and adds `%LOCALAPPDATA%\Dexyd\bin` to your user PATH when needed. Open a new terminal after PATH changes.
+
+Useful options from an existing checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -UseCurrent
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Dir "$env:USERPROFILE\Apps\Dexyd"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Clean
+```
+
+Start the TUI:
+
+```powershell
+dexyd --tui
+```
+
+Start the bridge in another terminal:
+
+```powershell
+dexyd
+```
+
+Windows service/autostart management is intentionally not automatic yet. Use a terminal, Windows Terminal profile, Task Scheduler, NSSM, or another service manager if you want the bridge to start at login.
+
+## Docker web control app
+
+The Docker setup runs only the browser control app. Keep the normal bridge/TUI running on the host, then start the web UI container:
+
+```bash
+dexyd --tui              # or use the dexyd.service host bridge
+docker compose up -d --build
+```
+
+Open `http://localhost:8080` or `http://<computer-lan-ip>:8080`. The container proxies API and WebSocket traffic to the host bridge at `http://127.0.0.1:4242` using Docker host networking; it stores no bridge data and requires no Docker secrets. See [Self-hosted web control app](web-app.md).
 
 ## Manual bridge install
 

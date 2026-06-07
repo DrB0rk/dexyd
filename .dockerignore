@@ -1,0 +1,16 @@
+.git
+.github
+.omx
+.dexyd
+node_modules
+coverage
+dist
+mobile
+scripts
+tui
+src
+test
+docs
+assets
+*.log
+npm-debug.log*

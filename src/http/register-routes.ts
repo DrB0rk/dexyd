@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import websocket from '@fastify/websocket';
 import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -70,6 +72,15 @@ export async function registerRoutes(
   moduleManager: ModuleManager
 ): Promise<void> {
   await app.register(websocket);
+
+  app.get('/', async (_request, reply) => serveWebAsset(reply, 'index.html'));
+  app.get('/web', async (_request, reply) => serveWebAsset(reply, 'index.html'));
+  app.get('/web/', async (_request, reply) => serveWebAsset(reply, 'index.html'));
+  app.get('/web/static/:asset', async (request, reply) => {
+    const params = z.object({ asset: z.string().min(1).max(160) }).safeParse(request.params);
+    if (!params.success) return reply.code(404).send({ error: 'not_found' });
+    return serveWebAsset(reply, params.data.asset);
+  });
 
   app.get('/health/live', async () => ({
     status: 'ok',
@@ -172,6 +183,36 @@ export async function registerRoutes(
       const reason = error instanceof Error ? error.message : 'pairing_failed';
       return reply.code(400).send({ error: reason });
     }
+  });
+
+  app.post('/web/auth/bootstrap', async (request, reply) => {
+    if (!isAllowedWebBootstrapClient(request.ip, request.headers.host)) {
+      context.logger.warn(
+        { remoteAddress: request.ip, host: request.headers.host },
+        'rejected web auth bootstrap request'
+      );
+      return reply.code(403).send({
+        error: 'web_bootstrap_requires_local_private_host',
+        detail:
+          'Automatic web login is only available from localhost/private LAN hosts. Pair a device or set DEXYD_WEB_AUTO_AUTH=1 only on trusted networks.'
+      });
+    }
+
+    const existing = context.db.listDevices().find((device) => device.label === 'dexyd web');
+    const device = existing ?? context.db.createDevice({ label: 'dexyd web' });
+    const tokens = context.authService.issueDeviceTokens(device.id);
+
+    context.db.addAuditLog({
+      actor: device.id,
+      action: 'web.auth.bootstrap',
+      target: device.id,
+      metadata: { host: request.headers.host }
+    });
+
+    return reply.code(201).send({
+      deviceId: device.id,
+      ...tokens
+    });
   });
 
   app.post('/auth/refresh', async (request, reply) => {
@@ -1014,6 +1055,48 @@ export async function registerRoutes(
 }
 
 
+function serveWebAsset(reply: FastifyReply, assetName: string) {
+  const root = webRoot();
+  const safeAsset = assetName.replace(/^\/+/, '');
+  if (!/^[A-Za-z0-9._-]+$/.test(safeAsset)) {
+    return reply.code(404).send({ error: 'not_found' });
+  }
+
+  const absolute = resolve(root, safeAsset);
+  const rootWithSep = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (absolute !== root && !absolute.startsWith(rootWithSep)) {
+    return reply.code(404).send({ error: 'not_found' });
+  }
+
+  if (!existsSync(absolute) || !statSync(absolute).isFile()) {
+    return reply.code(404).send({ error: 'not_found' });
+  }
+
+  reply.type(mimeForPath(absolute));
+  return reply.send(readFileSync(absolute));
+}
+
+function webRoot(): string {
+  return resolve(process.env.DEXYD_WEB_ROOT || join(process.cwd(), 'web'));
+}
+
+function mimeForPath(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.js':
+      return 'application/javascript; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
 function getSession(context: AppContext, sessionId: string) {
   const sessions = [context.db.getSession(sessionId), context.codexSessionService.getSession(sessionId)]
     .filter((session): session is SessionRecord => session !== null)
@@ -1101,4 +1184,27 @@ function isLocalOrPrivateClient(address: string | undefined): boolean {
   if (/^169\.254\./.test(normalized)) return true;
   if (/^(fc|fd)[0-9a-f]{2}:/i.test(normalized)) return true;
   return false;
+}
+
+function isAllowedWebBootstrapClient(address: string | undefined, hostHeader: string | undefined): boolean {
+  if (process.env.DEXYD_WEB_AUTO_AUTH === '1') return true;
+  const host = normalizeHost(hostHeader);
+  if (!host) return false;
+  return isLocalOrPrivateClient(address) && isLocalOrPrivateHost(host);
+}
+
+function normalizeHost(hostHeader: string | undefined): string {
+  const value = (hostHeader ?? '').trim();
+  if (!value) return '';
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    return end >= 0 ? value.slice(1, end) : value;
+  }
+  return value.split(':')[0] ?? '';
+}
+
+function isLocalOrPrivateHost(host: string): boolean {
+  const normalized = normalize(host).replace(/^::ffff:/, '');
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  return isLocalOrPrivateClient(normalized);
 }

@@ -1,0 +1,15 @@
+services:
+  dexyd-web:
+    build: .
+    image: dexyd-web:local
+    container_name: dexyd-web
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      WEB_PORT: 8080
+      BRIDGE_URL: http://127.0.0.1:4242
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

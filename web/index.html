@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Dexyd Web</title>
+    <link rel="icon" href="/web/static/dexyd-icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/web/static/style.css" />
+  </head>
+  <body>
+    <div id="app" class="shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <img src="/web/static/dexyd-icon.svg" alt="" />
+          <div>
+            <strong>dexyd</strong>
+            <span id="bridgeStatus">starting</span>
+          </div>
+        </header>
+
+        <section class="project-box">
+          <label for="projectPath">Project</label>
+          <div class="path-row">
+            <input id="projectPath" autocomplete="off" spellcheck="false" placeholder="/workspace" />
+            <button id="loadProject" title="Load project">↻</button>
+          </div>
+          <div id="suggestions" class="suggestions" hidden></div>
+          <button id="newSession" class="primary wide">+ New session</button>
+        </section>
+
+        <section class="sessions-head">
+          <h2>Sessions</h2>
+          <button id="refreshSessions" title="Refresh sessions">↻</button>
+        </section>
+        <div id="sessions" class="sessions"></div>
+      </aside>
+
+      <main class="main">
+        <section id="emptyState" class="empty">
+          <h1>Dexyd Web</h1>
+          <p>Select a session or create one for the current project.</p>
+          <p class="muted">Served by the bridge container. No pairing QR needed on local/private hosts.</p>
+        </section>
+
+        <section id="chatView" class="chat" hidden>
+          <header class="chat-head">
+            <div>
+              <h1 id="chatTitle">Session</h1>
+              <p id="chatMeta"></p>
+            </div>
+            <div class="chat-actions">
+              <span id="usagePill" class="pill">usage unknown</span>
+              <button id="cancelTurn" class="ghost">Cancel</button>
+              <button id="refreshChat" class="ghost">Refresh</button>
+            </div>
+          </header>
+
+          <div id="queueBox" class="queue" hidden></div>
+          <div id="messages" class="messages"></div>
+
+          <form id="composer" class="composer">
+            <textarea id="messageInput" rows="1" placeholder="Message Codex…"></textarea>
+            <button id="sendButton" class="primary" type="submit">Send</button>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="diffDialog" class="diff-dialog">
+      <header>
+        <strong>Code diff</strong>
+        <button id="closeDiff" class="ghost">Close</button>
+      </header>
+      <pre id="diffText"></pre>
+    </dialog>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/web/static/app.js" type="module"></script>
+  </body>
+</html>

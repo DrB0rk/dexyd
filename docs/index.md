@@ -7,6 +7,7 @@ This folder contains the detailed Dexyd documentation. The root `README.md` is i
 - [Installation](installation.md) — install, start, update, and platform setup.
 - [Bridge and TUI](bridge-tui.md) — how the local bridge and terminal UI are used.
 - [Mobile app](mobile-app.md) — app navigation, pairing, sessions, chat, inbox, and settings.
+- [Self-hosted web control app](web-app.md) — Docker Compose browser UI that proxies to the host bridge.
 - [Troubleshooting](troubleshooting.md) — common connection, pairing, session, and build problems.
 
 ## Reference

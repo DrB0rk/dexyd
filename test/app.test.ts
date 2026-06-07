@@ -46,4 +46,75 @@ describe('dexyd app foundation', () => {
       await service.stop();
     }
   });
+
+  it('serves the web app and bootstraps local web auth tokens', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-web-'));
+    cleanupPaths.push(tempDir);
+
+    const configPath = join(tempDir, 'dexyd.yaml');
+    writeFileSync(
+      configPath,
+      `server:\n  host: 127.0.0.1\n  port: 4555\nstorage:\n  sqlitePath: ${join(tempDir, 'dexyd.db')}\n`
+    );
+
+    process.env.DEXYD_CONFIG = configPath;
+
+    const service = await createDexydApplication();
+
+    try {
+      const web = await service.app.inject({ method: 'GET', url: '/' });
+      expect(web.statusCode).toBe(200);
+      expect(web.headers['content-type']).toContain('text/html');
+      expect(web.body).toContain('Dexyd Web');
+
+      const bootstrap = await service.app.inject({
+        method: 'POST',
+        url: '/web/auth/bootstrap',
+        headers: { host: '127.0.0.1:4555' },
+        remoteAddress: '127.0.0.1',
+        payload: {}
+      });
+      expect(bootstrap.statusCode).toBe(201);
+      const tokens = bootstrap.json() as { accessToken: string; refreshToken: string };
+      expect(tokens.accessToken).toMatch(/^ey/);
+      expect(tokens.refreshToken).toMatch(/^rt\./);
+
+      const sessions = await service.app.inject({
+        method: 'GET',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${tokens.accessToken}` }
+      });
+      expect(sessions.statusCode).toBe(200);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('rejects automatic web auth from public hosts', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-web-public-'));
+    cleanupPaths.push(tempDir);
+
+    const configPath = join(tempDir, 'dexyd.yaml');
+    writeFileSync(
+      configPath,
+      `server:\n  host: 127.0.0.1\n  port: 4555\nstorage:\n  sqlitePath: ${join(tempDir, 'dexyd.db')}\n`
+    );
+
+    process.env.DEXYD_CONFIG = configPath;
+
+    const service = await createDexydApplication();
+
+    try {
+      const bootstrap = await service.app.inject({
+        method: 'POST',
+        url: '/web/auth/bootstrap',
+        headers: { host: 'dexyd.example.com' },
+        remoteAddress: '172.18.0.2',
+        payload: {}
+      });
+      expect(bootstrap.statusCode).toBe(403);
+    } finally {
+      await service.stop();
+    }
+  });
 });

@@ -20,7 +20,7 @@ The bridge handles:
 
 ## Runtime layout
 
-Common installed paths:
+Common Linux installed paths:
 
 | Path | Purpose |
 | --- | --- |
@@ -29,7 +29,18 @@ Common installed paths:
 | `~/.local/share/dexyd/.dexyd/dexyd.db` | Installed SQLite bridge database. |
 | `~/.local/share/dexyd/.dexyd/cloudflared/` | TUI-managed Cloudflare named tunnel logs/config/pid files. |
 | `~/.local/bin/dexyd` | Command link created by the installer. |
-| `~/.config/systemd/user/dexyd.service` | Optional user service created by the installer/TUI. |
+| `~/.config/systemd/user/dexyd.service` | Optional Linux user service created by the installer/TUI. |
+
+
+Common Windows installed paths:
+
+| Path | Purpose |
+| --- | --- |
+| `%LOCALAPPDATA%\Dexyd\` | Default Windows application install directory. |
+| `%LOCALAPPDATA%\Dexyd\dexyd.config.yaml` | Installed bridge config. |
+| `%LOCALAPPDATA%\Dexyd\.dexyd\dexyd.db` | Installed SQLite bridge database. |
+| `%LOCALAPPDATA%\Dexyd\bin\dexyd.cmd` | Windows command shim. |
+| `%USERPROFILE%\.cloudflared\` | Cloudflare login certificate and named-tunnel credentials. |
 
 Common source-checkout paths:
 
@@ -92,12 +103,12 @@ Connection modes:
 - **Domain/Caddy** — set public URL to your HTTPS reverse proxy URL, save, then pair.
 - **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL.
 
-The single `dexyd.service` starts the bridge and, when `.dexyd/cloudflared/config.yml` exists, starts the Cloudflare named tunnel too. The old separate `dexyd-cloudflared.service` is disabled/removed when the new service is installed.
+On Linux, the single `dexyd.service` starts the bridge and, when `.dexyd/cloudflared/config.yml` exists, starts the Cloudflare named tunnel too. The old separate `dexyd-cloudflared.service` is disabled/removed when the new service is installed. On Windows, Dexyd does not install a service yet; run `dexyd` in a separate terminal or use your own service manager.
 
 The named-tunnel flow can:
 
 1. detect `cloudflared`;
-2. install it user-locally on supported Linux systems if missing;
+2. install it user-locally on supported Linux and Windows systems if missing;
 3. run Cloudflare login;
 4. create or reuse a named tunnel;
 5. route DNS to the selected hostname;
@@ -156,7 +167,7 @@ Updates checks GitHub Releases from inside the TUI. It shows:
 - release page URL;
 - attached Android APK name and URL when present.
 
-**Install / repair bridge** downloads the official installer to a temporary directory and reruns it against the current installed Dexyd app directory using the latest release tag. It uses a sanitized environment, streams progress, preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, restarts the user service when enabled, and verifies the installed command/version. Restart the TUI after updating so the running interface uses the new code.
+**Install / repair bridge** downloads the official Linux shell installer or Windows PowerShell installer to a temporary directory and reruns it against the current installed Dexyd app directory using the latest release tag. It uses a sanitized environment, streams progress, preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, restarts the user service when enabled, and verifies the installed command/version. Restart the TUI after updating so the running interface uses the new code.
 
 For safety, the TUI refuses to self-update a development checkout outside the installed app directory. Use git and the release workflow for development trees.
 
@@ -166,7 +177,7 @@ Help contains quick reminders for commands and common flows.
 
 ## User service
 
-The TUI can create a user-level systemd unit. After installation:
+On Linux, the TUI can create a user-level systemd unit. After installation:
 
 ```bash
 systemctl --user status dexyd.service
@@ -174,11 +185,13 @@ systemctl --user restart dexyd.service
 journalctl --user -u dexyd.service -f
 ```
 
-If user services do not start after login, enable lingering if appropriate for your system:
+If Linux user services do not start after login, enable lingering if appropriate for your system:
 
 ```bash
 loginctl enable-linger "$USER"
 ```
+
+On Windows, keep the bridge running with `dexyd` in a terminal. If you want autostart, use Task Scheduler, NSSM, or another Windows service manager pointed at `%LOCALAPPDATA%\Dexyd\bin\dexyd.cmd`.
 
 ## Firewall and LAN checks
 

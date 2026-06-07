@@ -66,6 +66,7 @@ HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:
 DEXYD_REPO_URL = "https://github.com/DrB0rk/dexyd.git"
 DEXYD_REPO_RELEASE_API = "https://api.github.com/repos/DrB0rk/dexyd/releases/latest"
 DEXYD_INSTALLER_URL = "https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.sh"
+DEXYD_INSTALLER_PS1_URL = "https://raw.githubusercontent.com/DrB0rk/dexyd/main/scripts/install.ps1"
 DEXYD_RELEASES_URL = "https://github.com/DrB0rk/dexyd/releases/latest"
 
 
@@ -111,13 +112,22 @@ def app_root() -> Path:
     return Path.cwd().resolve()
 
 
+def is_windows() -> bool:
+    return platform.system().lower() == "windows"
+
+
 def default_install_dir() -> Path:
+    if is_windows():
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return (Path(base) / "Dexyd").resolve()
     data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
     return (data_home / "dexyd").resolve()
 
 
 def installed_command_target() -> Path | None:
-    command = Path.home() / ".local" / "bin" / "dexyd"
+    command = default_install_dir() / "bin" / ("dexyd.cmd" if is_windows() else "dexyd")
+    if not is_windows():
+        command = Path.home() / ".local" / "bin" / "dexyd"
     try:
         return command.resolve(strict=True)
     except OSError:
@@ -220,7 +230,7 @@ def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "
 
 
 def safe_update_root(root: Path) -> tuple[bool, str]:
-    expected_command = root / "bin" / "dexyd"
+    expected_command = root / "bin" / ("dexyd.cmd" if is_windows() else "dexyd")
     command_target = installed_command_target()
     if root == default_install_dir():
         return True, "default install directory"
@@ -233,13 +243,18 @@ def safe_update_root(root: Path) -> tuple[bool, str]:
 
 def download_installer_script(target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
-    req = request.Request(DEXYD_INSTALLER_URL, headers={"User-Agent": "Dexyd TUI updater"})
+    url = DEXYD_INSTALLER_PS1_URL if is_windows() else DEXYD_INSTALLER_URL
+    req = request.Request(url, headers={"User-Agent": "Dexyd TUI updater"})
     with request.urlopen(req, timeout=30) as response:
         data = response.read()
-    if not data.startswith(b"#!/usr/bin/env bash"):
+    if is_windows():
+        if b"Dexyd Windows installer" not in data:
+            raise RuntimeError("Downloaded installer did not look like the official Dexyd Windows installer.")
+    elif not data.startswith(b"#!/usr/bin/env bash"):
         raise RuntimeError("Downloaded installer did not look like the official Dexyd installer.")
     target.write_bytes(data)
-    target.chmod(0o755)
+    if not is_windows():
+        target.chmod(0o755)
     return target
 
 
@@ -252,11 +267,12 @@ def update_branch_name(info: UpdateInfo | None) -> str:
 
 def sanitized_update_env(root: Path) -> dict[str, str]:
     env = dict(os.environ)
-    venv_bin = str(root / ".dexyd" / ".venv-tui" / "bin")
+    venv_bin = str(root / ".dexyd" / ".venv-tui" / ("Scripts" if is_windows() else "bin"))
     path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part and part != venv_bin]
-    for fallback in ("/usr/local/bin", "/usr/bin", "/bin"):
-        if fallback not in path_parts:
-            path_parts.append(fallback)
+    if not is_windows():
+        for fallback in ("/usr/local/bin", "/usr/bin", "/bin"):
+            if fallback not in path_parts:
+                path_parts.append(fallback)
     env.update(
         {
             "DEXYD_INSTALL_DIR": str(root),
@@ -313,10 +329,11 @@ def run_update_installer(
 def verify_update_result(root: Path, target_version: str) -> str:
     installed_version = read_package_version(root)
     command_target = installed_command_target()
-    expected_command = (root / "bin" / "dexyd").resolve(strict=False)
+    expected_command = (root / "bin" / ("dexyd.cmd" if is_windows() else "dexyd")).resolve(strict=False)
     if command_target != expected_command:
+        label = "%LOCALAPPDATA%\\Dexyd\\bin\\dexyd.cmd" if is_windows() else "~/.local/bin/dexyd"
         raise RuntimeError(
-            f"Update finished, but ~/.local/bin/dexyd points to {command_target or 'nothing'} instead of {expected_command}."
+            f"Update finished, but {label} points to {command_target or 'nothing'} instead of {expected_command}."
         )
     if version_is_newer(target_version, installed_version):
         raise RuntimeError(f"Update finished, but installed version is still {installed_version}; expected {target_version}.")
@@ -336,17 +353,36 @@ def install_latest_bridge_update(
     target_version = (info.latest_version if info else branch).removeprefix("v")
     temp_dir = Path(tempfile.mkdtemp(prefix="dexyd-update-"))
     try:
-        installer = download_installer_script(temp_dir / "install.sh")
-        command = [
-            "bash",
-            str(installer),
-            "--repo",
-            DEXYD_REPO_URL,
-            "--branch",
-            branch,
-            "--dir",
-            str(root),
-        ]
+        installer = download_installer_script(temp_dir / ("install.ps1" if is_windows() else "install.sh"))
+        if is_windows():
+            powershell = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+            if not powershell:
+                raise RuntimeError("PowerShell is required to update Dexyd on Windows.")
+            command = [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(installer),
+                "-Repo",
+                DEXYD_REPO_URL,
+                "-Branch",
+                branch,
+                "-Dir",
+                str(root),
+            ]
+        else:
+            command = [
+                "bash",
+                str(installer),
+                "--repo",
+                DEXYD_REPO_URL,
+                "--branch",
+                branch,
+                "--dir",
+                str(root),
+            ]
         if log:
             log(f"Running installer from {temp_dir} for {branch} into {root}")
         returncode, output = run_update_installer(command, sanitized_update_env(root), log=log, cwd=temp_dir)
@@ -466,7 +502,7 @@ def cloudflared_path() -> str | None:
     if found:
         return found
 
-    local = Path.home() / ".local" / "bin" / "cloudflared"
+    local = Path.home() / ".local" / "bin" / ("cloudflared.exe" if is_windows() else "cloudflared")
     return str(local) if executable_at(local) else None
 
 
@@ -481,8 +517,13 @@ def cloudflared_download_url() -> str:
             return "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
         if machine.startswith("arm"):
             return "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+    if system == "windows":
+        if machine in {"amd64", "x86_64"}:
+            return "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+        if machine in {"arm64", "aarch64"}:
+            return "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-arm64.exe"
 
-    raise RuntimeError(f"Automatic user-local cloudflared install is only implemented for Linux, not {system}/{machine}.")
+    raise RuntimeError(f"Automatic user-local cloudflared install is not implemented for {system}/{machine}.")
 
 
 def install_cloudflared_user_local() -> str:
@@ -492,13 +533,14 @@ def install_cloudflared_user_local() -> str:
 
     target_dir = Path.home() / ".local" / "bin"
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "cloudflared"
+    target = target_dir / ("cloudflared.exe" if is_windows() else "cloudflared")
     temp = target.with_suffix(".download")
 
     url = cloudflared_download_url()
     with request.urlopen(url, timeout=120) as response:
         temp.write_bytes(response.read())
-    temp.chmod(0o755)
+    if not is_windows():
+        temp.chmod(0o755)
     temp.replace(target)
     return str(target)
 
@@ -612,7 +654,7 @@ def start_cloudflared_process(command: list[str], env: dict[str, str] | None = N
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=env,
-            start_new_session=True,
+            **({"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} if is_windows() else {"start_new_session": True}),
         )
     finally:
         log.close()
@@ -973,6 +1015,8 @@ def ensure_dexyd_help_workspace(config: dict[str, Any]) -> Path:
 
 
 def user_service_dir() -> Path:
+    if is_windows():
+        return default_install_dir()
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
     return service_dir
@@ -986,6 +1030,8 @@ def systemctl_user(args: list[str], timeout: int = 30) -> subprocess.CompletedPr
 
 
 def user_service_state(name: str) -> tuple[str, str]:
+    if is_windows():
+        return "manual", "foreground"
     active = systemctl_user(["is-active", name], timeout=5)
     enabled = systemctl_user(["is-enabled", name], timeout=5)
     active_text = (active.stdout or active.stderr or "unknown").strip() or "unknown"
@@ -998,6 +1044,8 @@ def user_service_state(name: str) -> tuple[str, str]:
 
 
 def remove_legacy_tunnel_service() -> str:
+    if is_windows():
+        return ""
     messages: list[str] = []
     stop = systemctl_user(["disable", "--now", "dexyd-cloudflared.service"], timeout=30)
     if stop.returncode == 0:
@@ -1015,6 +1063,13 @@ def remove_legacy_tunnel_service() -> str:
 
 
 def install_user_service(config_path: Path) -> str:
+    if is_windows():
+        command = Path.cwd().resolve() / "bin" / "dexyd.cmd"
+        return (
+            "Windows autostart service installation is not managed by Dexyd yet.\n"
+            f"Start the bridge in a separate terminal with: {command}\n"
+            f"Then keep this TUI open with: {command} --tui"
+        )
     repo_root = Path.cwd().resolve()
     runner = repo_root / "scripts" / "run-connection-service.sh"
     if not runner.exists():
@@ -1056,6 +1111,8 @@ def install_user_service(config_path: Path) -> str:
 
 
 def restart_connection_user_service() -> str:
+    if is_windows():
+        return "On Windows, restart Dexyd by closing the bridge terminal and running bin\\dexyd.cmd again."
     result = systemctl_user(["restart", "dexyd.service"], timeout=30)
     if result.returncode != 0:
         return f"Could not restart Dexyd connection service.\n{result.stderr or result.stdout}"
@@ -1063,6 +1120,9 @@ def restart_connection_user_service() -> str:
 
 
 def stop_connection_user_service() -> str:
+    if is_windows():
+        stopped = stop_pid(read_pid(CLOUDFLARE_PID_FILE))
+        return "Stopped temporary tunnel process." if stopped else "On Windows, stop the bridge by closing its terminal window."
     result = systemctl_user(["stop", "dexyd.service"], timeout=30)
     stop_pid(read_pid(CLOUDFLARE_PID_FILE))
     if result.returncode != 0:
