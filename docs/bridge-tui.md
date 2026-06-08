@@ -90,7 +90,7 @@ Connection modes:
 
 - **LAN** — set host to `0.0.0.0`, leave public URL empty, then pair on the LAN URL.
 - **Domain/Caddy** — set public URL to your HTTPS reverse proxy URL, save, then pair.
-- **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL.
+- **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL. If the requested tunnel name or hostname is already taken, Dexyd automatically tries numbered alternatives such as `dexyd-2` and `dexyd-2.example.com`.
 
 The single `dexyd.service` starts the bridge and, when `.dexyd/cloudflared/config.yml` exists, starts the Cloudflare named tunnel too. The old separate `dexyd-cloudflared.service` is disabled/removed when the new service is installed.
 
@@ -99,9 +99,9 @@ The named-tunnel flow can:
 1. detect `cloudflared`;
 2. install it user-locally on supported Linux systems if missing;
 3. run Cloudflare login;
-4. create or reuse a named tunnel;
-5. route DNS to the selected hostname;
-6. write tunnel config;
+4. create or reuse a dexyd-managed named tunnel;
+5. route DNS to the selected hostname, incrementing the tunnel name/hostname when Cloudflare reports a conflict;
+6. write tunnel config and dexyd metadata under `.dexyd/cloudflared/`;
 7. install/restart the single Dexyd service;
 8. save `server.publicBaseUrl`;
 9. regenerate pairing with the correct URL.

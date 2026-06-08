@@ -82,6 +82,22 @@ cloudflared_bin() {
   return 1
 }
 
+cloudflare_credentials_file() {
+  python3 - "$CLOUDFLARE_CONFIG" <<'PY' 2>/dev/null || true
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+match = re.search(r"(?m)^\s*credentials-file:\s*(.+?)\s*$", text)
+if not match:
+    raise SystemExit(0)
+value = match.group(1).strip().strip("'\"")
+print(value)
+PY
+}
+
 if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
   log "Bridge build missing; run dexyd --install first."
   exit 1
@@ -101,10 +117,17 @@ if [[ -f "$CLOUDFLARE_CONFIG" ]]; then
 
   if CLOUDFLARED="$(cloudflared_bin)"; then
     mkdir -p "$CLOUDFLARE_DIR"
-    log "Starting Cloudflare tunnel"
-    "$CLOUDFLARED" --config "$CLOUDFLARE_CONFIG" tunnel run &
-    TUNNEL_PID="$!"
-    printf '%s\n' "$TUNNEL_PID" > "$CLOUDFLARE_PID"
+    CREDENTIALS_FILE="$(cloudflare_credentials_file)"
+    if [[ -z "$CREDENTIALS_FILE" ]]; then
+      log "Cloudflare tunnel config is missing credentials-file: $CLOUDFLARE_CONFIG"
+    elif [[ ! -f "$CREDENTIALS_FILE" ]]; then
+      log "Cloudflare tunnel credentials file is missing: $CREDENTIALS_FILE"
+    else
+      log "Starting Cloudflare tunnel"
+      "$CLOUDFLARED" --config "$CLOUDFLARE_CONFIG" tunnel run &
+      TUNNEL_PID="$!"
+      printf '%s\n' "$TUNNEL_PID" > "$CLOUDFLARE_PID"
+    fi
   else
     log "Cloudflare tunnel config exists but cloudflared is not installed."
   fi

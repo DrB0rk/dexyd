@@ -74,6 +74,8 @@ Do not reuse old QR screenshots after changing connection mode.
 
 `server.publicBaseUrl` must be set to the tunnel HTTPS URL before pairing. Use the TUI named-tunnel flow and generate a fresh QR after the tunnel is started.
 
+If Cloudflare reports that the requested tunnel name or hostname is already taken, the TUI automatically tries numbered alternatives and saves the selected URL in `server.publicBaseUrl`. Check `.dexyd/cloudflared/tunnel.json` and `.dexyd/cloudflared/config.yml` to confirm which tunnel and hostname were selected.
+
 ## App shows realtime closed / WebSocket 1006
 
 Possible causes:

@@ -61,6 +61,8 @@ CLOUDFLARE_LOG_DIR = Path.cwd() / ".dexyd" / "cloudflared"
 CLOUDFLARE_PID_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.pid"
 CLOUDFLARE_LOG_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.log"
 CLOUDFLARE_CONFIG_FILE = CLOUDFLARE_LOG_DIR / "config.yml"
+CLOUDFLARE_METADATA_FILE = CLOUDFLARE_LOG_DIR / "tunnel.json"
+CLOUDFLARE_MAX_NAME_ATTEMPTS = 50
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
 DEXYD_REPO_URL = "https://github.com/DrB0rk/dexyd.git"
@@ -94,6 +96,17 @@ class SessionRecord:
     workspace_path: str
     updated_at: str
     title: str | None = None
+
+
+@dataclass
+class CloudflareTunnelSetup:
+    tunnel_id: str
+    tunnel_name: str
+    hostname: str
+    public_url: str
+    config_path: Path
+    route_output: str = ""
+    reused_existing: bool = False
 
 
 @dataclass
@@ -631,6 +644,134 @@ def list_cloudflare_tunnels(path: str) -> list[dict[str, Any]]:
         return []
 
 
+def normalized_tunnel_name(value: Any) -> str:
+    name = str(value or "").strip()
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".-_")
+    return name or "dexyd"
+
+
+def numbered_name(base: str, attempt: int, max_length: int | None = None) -> str:
+    base = base.strip() or "dexyd"
+    if attempt <= 1:
+        return base[:max_length] if max_length else base
+
+    suffix = f"-{attempt}"
+    if max_length is not None:
+        trimmed = base[: max(1, max_length - len(suffix))].rstrip("-")
+        return f"{trimmed or 'dexyd'}{suffix}"
+    return f"{base}{suffix}"
+
+
+def numbered_hostname(hostname: str, attempt: int) -> str:
+    hostname = normalize_cloudflare_hostname(hostname)
+    if not hostname:
+        return ""
+    labels = hostname.split(".")
+    labels[0] = numbered_name(labels[0], attempt, max_length=63)
+    return ".".join(labels)
+
+
+def tunnel_index_by_name(tunnels: list[dict[str, Any]]) -> dict[str, str]:
+    indexed: dict[str, str] = {}
+    for tunnel in tunnels:
+        tunnel_name = str(tunnel.get("name") or "")
+        tunnel_id = str(tunnel.get("id") or tunnel.get("uuid") or "")
+        if tunnel_name and tunnel_id:
+            indexed[tunnel_name] = tunnel_id
+    return indexed
+
+
+def command_output(result: subprocess.CompletedProcess[str]) -> str:
+    return f"{result.stdout}\n{result.stderr}".strip()
+
+
+def output_mentions_existing_resource(output: str) -> bool:
+    lowered = output.lower()
+    return any(
+        text in lowered
+        for text in (
+            "already exists",
+            "record already exists",
+            "hostname already exists",
+            "cname record with that host already exists",
+            "a, aaaa, or cname record with that host already exists",
+        )
+    )
+
+
+def read_cloudflare_metadata() -> dict[str, Any]:
+    try:
+        parsed = json.loads(CLOUDFLARE_METADATA_FILE.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_cloudflare_metadata(setup: CloudflareTunnelSetup, requested_name: str, requested_hostname: str, origin_url: str) -> None:
+    CLOUDFLARE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "managedBy": "dexyd",
+        "tunnelId": setup.tunnel_id,
+        "tunnelName": setup.tunnel_name,
+        "hostname": setup.hostname,
+        "publicUrl": setup.public_url,
+        "originUrl": origin_url,
+        "requestedTunnelName": requested_name,
+        "requestedHostname": requested_hostname,
+        "configFile": str(setup.config_path),
+        "credentialsFile": str(cloudflare_credentials_file(setup.tunnel_id)),
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    CLOUDFLARE_METADATA_FILE.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def cloudflare_credentials_file(tunnel_id: str) -> Path:
+    return Path.home() / ".cloudflared" / f"{tunnel_id}.json"
+
+
+def managed_tunnel_matches(tunnel_name: str, hostname: str, tunnel_id: str | None = None) -> bool:
+    metadata = read_cloudflare_metadata()
+    if metadata.get("managedBy") != "dexyd":
+        return False
+    if str(metadata.get("tunnelName") or "") != tunnel_name:
+        return False
+    if str(metadata.get("hostname") or "") != hostname:
+        return False
+    if tunnel_id is not None and str(metadata.get("tunnelId") or "") != tunnel_id:
+        return False
+    return True
+
+
+def credentials_file_ready(tunnel_id: str) -> bool:
+    credentials_file = cloudflare_credentials_file(tunnel_id)
+    return credentials_file.exists() and credentials_file.is_file()
+
+
+def create_named_tunnel(path: str, name: str) -> str:
+    created = run_capture([path, "tunnel", "create", name], timeout=60)
+    output = command_output(created)
+    if created.returncode != 0:
+        raise RuntimeError(f"Could not create Cloudflare tunnel {name!r}: {output}")
+
+    match = UUID_RE.search(output)
+    if match:
+        return match.group(0)
+
+    for tunnel in list_cloudflare_tunnels(path):
+        tunnel_name = str(tunnel.get("name") or "")
+        tunnel_id = str(tunnel.get("id") or tunnel.get("uuid") or "")
+        if tunnel_name == name and tunnel_id:
+            return tunnel_id
+
+    raise RuntimeError(f"Cloudflare tunnel {name!r} was created, but its UUID could not be determined.")
+
+
+def delete_cloudflare_tunnel(path: str, tunnel_id_or_name: str) -> None:
+    if not tunnel_id_or_name:
+        return
+    run_capture([path, "tunnel", "delete", "-f", tunnel_id_or_name], timeout=60)
+
+
 def ensure_named_tunnel(path: str, name: str) -> str:
     for tunnel in list_cloudflare_tunnels(path):
         tunnel_name = str(tunnel.get("name") or "")
@@ -656,6 +797,104 @@ def ensure_named_tunnel(path: str, name: str) -> str:
     raise RuntimeError("Cloudflare tunnel was created/found, but its UUID could not be determined.")
 
 
+def ensure_available_cloudflare_tunnel(path: str, requested_name: str, requested_hostname: str, origin_url: str) -> CloudflareTunnelSetup:
+    base_name = normalized_tunnel_name(requested_name)
+    base_hostname = normalize_cloudflare_hostname(requested_hostname)
+    if not base_hostname:
+        raise RuntimeError("Enter a Cloudflare-managed public hostname, e.g. dexyd.example.com")
+
+    tunnels = tunnel_index_by_name(list_cloudflare_tunnels(path))
+    skipped_names: list[str] = []
+    skipped_hosts: list[str] = []
+
+    for attempt in range(1, CLOUDFLARE_MAX_NAME_ATTEMPTS + 1):
+        candidate_name = numbered_name(base_name, attempt)
+        candidate_hostname = numbered_hostname(base_hostname, attempt)
+        if not candidate_hostname:
+            continue
+
+        existing_tunnel_id = tunnels.get(candidate_name)
+        created_tunnel_id: str | None = None
+        tunnel_id: str
+        reused_existing = False
+
+        if existing_tunnel_id:
+            if not managed_tunnel_matches(candidate_name, candidate_hostname, existing_tunnel_id):
+                skipped_names.append(candidate_name)
+                continue
+            if not credentials_file_ready(existing_tunnel_id):
+                raise RuntimeError(
+                    f"Existing dexyd-managed Cloudflare tunnel {candidate_name!r} is missing credentials: "
+                    f"{cloudflare_credentials_file(existing_tunnel_id)}"
+                )
+            tunnel_id = existing_tunnel_id
+            reused_existing = True
+        else:
+            try:
+                tunnel_id = create_named_tunnel(path, candidate_name)
+                created_tunnel_id = tunnel_id
+            except RuntimeError as exc:
+                if output_mentions_existing_resource(str(exc)):
+                    skipped_names.append(candidate_name)
+                    tunnels = tunnel_index_by_name(list_cloudflare_tunnels(path))
+                    continue
+                raise
+
+        route = run_capture([path, "tunnel", "route", "dns", candidate_name, candidate_hostname], timeout=60)
+        route_output = command_output(route)
+        if route.returncode != 0:
+            if output_mentions_existing_resource(route_output):
+                if reused_existing and managed_tunnel_matches(candidate_name, candidate_hostname, tunnel_id):
+                    config_path = write_cloudflare_config(tunnel_id, candidate_name, candidate_hostname, origin_url)
+                    setup = CloudflareTunnelSetup(
+                        tunnel_id=tunnel_id,
+                        tunnel_name=candidate_name,
+                        hostname=candidate_hostname,
+                        public_url=f"https://{candidate_hostname}",
+                        config_path=config_path,
+                        route_output=route_output,
+                        reused_existing=True,
+                    )
+                    write_cloudflare_metadata(setup, base_name, base_hostname, origin_url)
+                    return setup
+                skipped_hosts.append(candidate_hostname)
+                if created_tunnel_id:
+                    delete_cloudflare_tunnel(path, created_tunnel_id)
+                continue
+            if created_tunnel_id:
+                delete_cloudflare_tunnel(path, created_tunnel_id)
+            raise RuntimeError(f"Could not create Cloudflare DNS route for {candidate_hostname}: {route_output}")
+
+        if not credentials_file_ready(tunnel_id):
+            if created_tunnel_id:
+                delete_cloudflare_tunnel(path, created_tunnel_id)
+            raise RuntimeError(
+                f"Cloudflare tunnel {candidate_name!r} was created, but its credentials file is missing: "
+                f"{cloudflare_credentials_file(tunnel_id)}"
+            )
+
+        config_path = write_cloudflare_config(tunnel_id, candidate_name, candidate_hostname, origin_url)
+        setup = CloudflareTunnelSetup(
+            tunnel_id=tunnel_id,
+            tunnel_name=candidate_name,
+            hostname=candidate_hostname,
+            public_url=f"https://{candidate_hostname}",
+            config_path=config_path,
+            route_output=route_output,
+            reused_existing=reused_existing,
+        )
+        write_cloudflare_metadata(setup, base_name, base_hostname, origin_url)
+        return setup
+
+    details: list[str] = []
+    if skipped_names:
+        details.append(f"taken tunnel names: {', '.join(skipped_names[:8])}{'...' if len(skipped_names) > 8 else ''}")
+    if skipped_hosts:
+        details.append(f"taken hostnames: {', '.join(skipped_hosts[:8])}{'...' if len(skipped_hosts) > 8 else ''}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    raise RuntimeError(f"Could not find an available Cloudflare tunnel name/hostname after {CLOUDFLARE_MAX_NAME_ATTEMPTS} attempts{suffix}.")
+
+
 def ensure_bridge_origin_ready(config: dict[str, Any]) -> None:
     origin = local_cloudflare_origin(config)
     health, detail = get_bridge_health(origin)
@@ -663,9 +902,13 @@ def ensure_bridge_origin_ready(config: dict[str, Any]) -> None:
         raise RuntimeError(f"Bridge is not ready at {origin}: {detail}")
 
 
-def write_cloudflare_config(tunnel_id: str, hostname: str, origin_url: str) -> Path:
+def write_cloudflare_config(tunnel_id: str, _tunnel_name: str, hostname: str, origin_url: str) -> Path:
     CLOUDFLARE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    credentials_file = Path.home() / ".cloudflared" / f"{tunnel_id}.json"
+    cloudflare_home = Path.home() / ".cloudflared"
+    cloudflare_home.mkdir(parents=True, exist_ok=True)
+    credentials_file = cloudflare_credentials_file(tunnel_id)
+    if not credentials_file.exists():
+        raise RuntimeError(f"Cloudflare tunnel credentials file is missing: {credentials_file}")
     config = {
         "tunnel": tunnel_id,
         "credentials-file": str(credentials_file),
@@ -1951,32 +2194,32 @@ class DexydTextualApp(App[None]):
         hostname = normalize_cloudflare_hostname(hostname)
         if not hostname:
             raise RuntimeError("Enter a Cloudflare-managed public hostname, e.g. dexyd.example.com")
+        tunnel_name = normalized_tunnel_name(tunnel_name)
 
         ensure_bridge_origin_ready(self.store.config)
         self.cloudflare_login(path)
-        tunnel_id = ensure_named_tunnel(path, tunnel_name)
         origin = local_cloudflare_origin(self.store.config)
-        route = run_capture([path, "tunnel", "route", "dns", tunnel_name, hostname], timeout=60)
-        route_output = f"{route.stdout}\n{route.stderr}".strip()
-        if route.returncode != 0 and not any(text in route_output.lower() for text in ("already exists", "record already exists")):
-            raise RuntimeError(f"Could not create Cloudflare DNS route: {route_output}")
-        if route_output:
-            self.append_cloudflare_output(route_output)
-
-        config_path = write_cloudflare_config(tunnel_id, hostname, origin)
+        setup = ensure_available_cloudflare_tunnel(path, tunnel_name, hostname, origin)
+        if setup.route_output:
+            self.append_cloudflare_output(setup.route_output)
+        if setup.tunnel_name != tunnel_name:
+            self.append_cloudflare_output(f"Tunnel name {tunnel_name!r} was unavailable; using {setup.tunnel_name!r}.")
+        if setup.hostname != hostname:
+            self.append_cloudflare_output(f"Hostname {hostname!r} was unavailable; using {setup.hostname!r}.")
         stop_pid(read_pid(CLOUDFLARE_PID_FILE))
-        public_url = f"https://{hostname}"
+        public_url = setup.public_url
         self.save_public_base_url(public_url)
         service_message = install_user_service(self.store.path)
         service_active, _service_enabled = user_service_state("dexyd.service")
         pid: int | None = None
         if service_active != "active":
-            pid = start_cloudflared_process([path, "--config", str(config_path), "tunnel", "run"])
+            pid = start_cloudflared_process([path, "--config", str(setup.config_path), "tunnel", "run"])
         self.append_cloudflare_output(
             f"Named tunnel running: {public_url}\n"
-            f"Tunnel: {tunnel_name} ({tunnel_id})\n"
+            f"Tunnel: {setup.tunnel_name} ({setup.tunnel_id})\n"
             f"Origin: {origin}\n"
-            f"Config: {config_path}\n"
+            f"Config: {setup.config_path}\n"
+            f"Metadata: {CLOUDFLARE_METADATA_FILE}\n"
             f"Service: {service_message}\n"
             f"Temporary PID: {pid if pid else 'not needed; managed by dexyd.service'}\n"
             "Waiting for public tunnel health before generating the pairing QR..."
