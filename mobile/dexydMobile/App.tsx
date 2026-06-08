@@ -195,6 +195,7 @@ const SELECTED_PROJECT_KEY = 'dexyd.projects.selected.v1';
 const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
 const USAGE_WARNING_STATE_KEY = 'dexyd.usage.warning.state.v1';
 const CHAT_DRAFT_KEY = 'dexyd.chat.draft.v1';
+const CHAT_VERBOSE_TOOL_CALLS_KEY = 'dexyd.chat.verboseToolCalls.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
   system: true,
@@ -815,10 +816,7 @@ export default function App() {
     const warnings = accountUsageWarningEntries(current);
     if (warnings.length === 0) {
       for (const limit of accountLimitEntries(current)) {
-        if (
-          limit.remainingPercent !== null &&
-          limit.remainingPercent > 50
-        ) {
+        if (limit.remainingPercent !== null && limit.remainingPercent > 50) {
           usageAlertThresholdsRef.current.delete(limit.key);
         }
       }
@@ -2115,6 +2113,8 @@ function ChatScreen({
 }) {
   const [text, setText] = useState('');
   const [showLatestButton, setShowLatestButton] = useState(false);
+  const [chatMenuOpen, setChatMenuOpen] = useState(false);
+  const [showVerboseToolCalls, setShowVerboseToolCalls] = useState(false);
   const [diffViewerOpen, setDiffViewerOpen] = useState(false);
   const [selectedDiffTurnId, setSelectedDiffTurnId] = useState<string | null>(
     null,
@@ -2155,8 +2155,8 @@ function ChatScreen({
     [availableSlashCommands, commandQuery],
   );
   const allVisibleMessages = useMemo(
-    () => visibleChatMessages(chat.messages),
-    [chat.messages],
+    () => visibleChatMessages(chat.messages, showVerboseToolCalls),
+    [chat.messages, showVerboseToolCalls],
   );
   const renderedMessages = useMemo(
     () => allVisibleMessages.slice(0, visibleMessageCount),
@@ -2243,8 +2243,31 @@ function ChatScreen({
     setSelectedDiffTurnId(null);
     setSteeringQueueId(null);
     setScheduleOpen(false);
+    setChatMenuOpen(false);
     setVisibleMessageCount(CHAT_INITIAL_MESSAGE_RENDER_LIMIT);
   }, [activeSession?.id, setLatestButtonVisible]);
+
+  useEffect(() => {
+    let cancelled = false;
+    AsyncStorage.getItem(CHAT_VERBOSE_TOOL_CALLS_KEY)
+      .then(value => {
+        if (!cancelled) setShowVerboseToolCalls(value === 'true');
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleVerboseToolCalls = useCallback(() => {
+    setShowVerboseToolCalls(current => {
+      const next = !current;
+      AsyncStorage.setItem(CHAT_VERBOSE_TOOL_CALLS_KEY, String(next)).catch(
+        () => undefined,
+      );
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const sessionId = activeSession?.id ?? null;
@@ -2352,11 +2375,9 @@ function ChatScreen({
     ],
   );
 
-  const workingInfo = workingStatusText(
-    chat.messages,
-    activeSession,
-    chat.sending,
-  );
+  const workingInfo = showVerboseToolCalls
+    ? null
+    : workingStatusText(chat.messages, activeSession, chat.sending);
   const workingStateReserve = workingInfo ? 48 : 0;
   const commandStateReserve =
     commandQuery !== null
@@ -2366,7 +2387,10 @@ function ChatScreen({
     ? Math.min(queuePanelMaxHeight, 54 + chat.queuedMessages.length * 58) + 8
     : 0;
   const scheduleStateReserve = chat.scheduledMessages.length
-    ? Math.min(schedulePanelMaxHeight, 54 + chat.scheduledMessages.length * 52) + 8
+    ? Math.min(
+        schedulePanelMaxHeight,
+        54 + chat.scheduledMessages.length * 52,
+      ) + 8
     : 0;
   const composerSpacer =
     composerHeight +
@@ -2434,7 +2458,8 @@ function ChatScreen({
     Boolean(usageBlockMessage);
   const scheduleDisabled = sendDisabled || Boolean(steeringQueueId);
   const steeringTarget = steeringQueueId
-    ? chat.queuedMessages.find(item => item.queueId === steeringQueueId) ?? null
+    ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
+      null)
     : null;
 
   const header = (
@@ -2465,6 +2490,19 @@ function ChatScreen({
             : 'Select a session'}
         </Text>
       </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Open chat options"
+        onPress={() => setChatMenuOpen(open => !open)}
+        hitSlop={10}
+        style={({ pressed }) => [
+          styles.chatMenuButton,
+          chatMenuOpen && styles.chatMenuButtonActive,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.chatMenuButtonText}>⋯</Text>
+      </Pressable>
     </View>
   );
 
@@ -2485,6 +2523,50 @@ function ChatScreen({
       enabled={Platform.OS === 'ios'}
     >
       {header}
+      {chatMenuOpen ? (
+        <>
+          <Pressable
+            accessibilityLabel="Close chat options"
+            onPress={() => setChatMenuOpen(false)}
+            style={styles.chatMenuBackdrop}
+          />
+          <View style={styles.chatOptionsMenu}>
+            <Text style={styles.chatOptionsTitle}>Chat options</Text>
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityState={{ checked: showVerboseToolCalls }}
+              accessibilityLabel="Show verbose tool calls"
+              onPress={toggleVerboseToolCalls}
+              style={({ pressed }) => [
+                styles.chatOptionRow,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.chatOptionText}>
+                <Text style={styles.chatOptionLabel}>Verbose tool calls</Text>
+                <Text style={styles.chatOptionDetail}>
+                  {showVerboseToolCalls
+                    ? 'Showing raw progress rows in chat'
+                    : 'Hidden; using compact status only'}
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.chatOptionToggle,
+                  showVerboseToolCalls && styles.chatOptionToggleOn,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.chatOptionToggleKnob,
+                    showVerboseToolCalls && styles.chatOptionToggleKnobOn,
+                  ]}
+                />
+              </View>
+            </Pressable>
+          </View>
+        </>
+      ) : null}
       <FlatList
         ref={scrollRef}
         style={styles.fill}
@@ -3005,7 +3087,9 @@ function SchedulePromptDialog({
     try {
       const ok = await onSchedule({
         runAt: runAt.toISOString(),
-        ...(repeat?.intervalMs ? { repeat: { intervalMs: repeat.intervalMs } } : {}),
+        ...(repeat?.intervalMs
+          ? { repeat: { intervalMs: repeat.intervalMs } }
+          : {}),
       });
       if (!ok) setSaving(false);
     } catch {
@@ -3365,8 +3449,8 @@ function InboxStatusSummary({
     usage?.context.percent !== null && usage?.context.percent !== undefined
       ? `${usage.context.percent}% context`
       : usage?.context.usedTokens
-      ? `${formatCompactNumber(usage.context.usedTokens)} ctx`
-      : 'context unknown';
+        ? `${formatCompactNumber(usage.context.usedTokens)} ctx`
+        : 'context unknown';
   return (
     <View style={styles.inboxStatusCard}>
       <Text style={styles.inboxStatusTitle}>System</Text>
@@ -3378,8 +3462,8 @@ function InboxStatusSummary({
             bridgeHealth === 'ready' || bridgeHealth === 'ok'
               ? 'ok'
               : bridgeHealth === 'down'
-              ? 'error'
-              : 'idle'
+                ? 'error'
+                : 'idle'
           }
         />
         <StatusChip
@@ -3389,8 +3473,8 @@ function InboxStatusSummary({
             socketState === 'open'
               ? 'ok'
               : socketState === 'polling'
-              ? 'warn'
-              : 'idle'
+                ? 'warn'
+                : 'idle'
           }
         />
         <StatusChip
@@ -3675,8 +3759,8 @@ function DiffViewer({
                       diff.truncated ? ' · truncated' : ''
                     }`
                   : diff.truncated
-                  ? 'Truncated · message changes'
-                  : 'Message changes'}
+                    ? 'Truncated · message changes'
+                    : 'Message changes'}
               </Text>
             </View>
             {loading ? (
@@ -3888,10 +3972,10 @@ function MessageBlockView({
     tone === 'user'
       ? styles.messageTextUser
       : tone === 'system'
-      ? styles.messageTextSystem
-      : tone === 'tool'
-      ? styles.messageTextSystem
-      : null;
+        ? styles.messageTextSystem
+        : tone === 'tool'
+          ? styles.messageTextSystem
+          : null;
 
   if (block.type === 'code') {
     return (
@@ -4179,7 +4263,9 @@ function SessionsScreen({
             ]}
           >
             <Text style={styles.hiddenSessionsTitle}>
-              {item.showHidden ? 'Hide helper sessions' : 'Show helper sessions'}
+              {item.showHidden
+                ? 'Hide helper sessions'
+                : 'Show helper sessions'}
             </Text>
             <Text style={styles.hiddenSessionsCount}>{item.count}</Text>
           </Pressable>
@@ -4242,7 +4328,9 @@ function SessionsScreen({
           {connectivity === 'offline' ? (
             <Text style={styles.offlineBanner}>Offline · saved sessions</Text>
           ) : connectivity === 'error' ? (
-            <Text style={styles.errorLine}>Refresh failed · showing saved data</Text>
+            <Text style={styles.errorLine}>
+              Refresh failed · showing saved data
+            </Text>
           ) : null}
           {error ? <Text style={styles.errorLine}>{error}</Text> : null}
           <View style={styles.sessionProjectSummary}>
@@ -4252,7 +4340,8 @@ function SessionsScreen({
                   {selectedProject.label}
                 </Text>
                 <Text style={styles.sessionProjectPath} numberOfLines={1}>
-                  {visibleCount} session{visibleCount === 1 ? '' : 's'} · {projectPathShortLabel(selectedProject.detail)}
+                  {visibleCount} session{visibleCount === 1 ? '' : 's'} ·{' '}
+                  {projectPathShortLabel(selectedProject.detail)}
                 </Text>
               </View>
               <View style={styles.sessionHeaderStatus}>
@@ -4267,7 +4356,9 @@ function SessionsScreen({
                 </Text>
               </View>
             </View>
-            {usage && usage.limits.status !== 'ok' && usage.limits.status !== 'unknown' ? (
+            {usage &&
+            usage.limits.status !== 'ok' &&
+            usage.limits.status !== 'unknown' ? (
               <Text style={styles.sessionUsageInline} numberOfLines={1}>
                 Account usage · {accountUsageLabel(usage)}
               </Text>
@@ -4307,9 +4398,7 @@ function AnimatedEmptyState({ children }: { children: React.ReactNode }) {
   }, [opacity, translateY]);
 
   return (
-    <Animated.View
-      style={{ opacity, transform: [{ translateY }] }}
-    >
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
       {children}
     </Animated.View>
   );
@@ -4446,7 +4535,9 @@ function sortSessionsForList(
       sessionListPriority(left, pendingBySession) -
       sessionListPriority(right, pendingBySession);
     if (byPriority !== 0) return byPriority;
-    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    return (
+      new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    );
   });
 }
 
@@ -4464,7 +4555,9 @@ function sessionListPriority(
   return 3;
 }
 
-function connectivityColor(connectivity: 'idle' | 'online' | 'offline' | 'error') {
+function connectivityColor(
+  connectivity: 'idle' | 'online' | 'offline' | 'error',
+) {
   if (connectivity === 'online') return palette.ok;
   if (connectivity === 'offline') return palette.dim;
   if (connectivity === 'error') return palette.error;
@@ -4737,17 +4830,17 @@ function SettingsScreen({
     bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
       : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
-      ? 'warn'
-      : 'error';
+        ? 'warn'
+        : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
   const realtimeTone =
     socketState === 'open'
       ? 'ok'
       : socketState === 'polling'
-      ? 'warn'
-      : auth.auth
-      ? 'error'
-      : 'idle';
+        ? 'warn'
+        : auth.auth
+          ? 'error'
+          : 'idle';
   const errors = [
     bridgeSettings.error,
     auth.error,
@@ -4787,10 +4880,10 @@ function SettingsScreen({
         usage.usage?.limits.status === 'error'
           ? 'error'
           : usage.usage?.limits.status === 'warn'
-          ? 'warn'
-          : codexAuth.status?.installed === false
-          ? 'warn'
-          : 'ok',
+            ? 'warn'
+            : codexAuth.status?.installed === false
+              ? 'warn'
+              : 'ok',
       attention:
         usage.usage?.limits.status === 'warn' ||
         usage.usage?.limits.status === 'error' ||
@@ -4819,8 +4912,8 @@ function SettingsScreen({
           ? 'system enabled'
           : 'permission needed'
         : notificationSettings.inApp
-        ? 'in-app only'
-        : 'disabled',
+          ? 'in-app only'
+          : 'disabled',
       tone:
         notificationSettings.system && !systemNotificationsEnabled
           ? 'warn'
@@ -4861,8 +4954,8 @@ function SettingsScreen({
       tone: errorHistory.some(item => item.level === 'error')
         ? 'error'
         : errorHistory.length
-        ? 'warn'
-        : 'idle',
+          ? 'warn'
+          : 'idle',
       attention: errorHistory.length > 0,
     },
     {
@@ -4876,8 +4969,8 @@ function SettingsScreen({
       tone: appUpdater.error
         ? 'error'
         : appUpdater.info?.updateAvailable
-        ? 'warn'
-        : 'idle',
+          ? 'warn'
+          : 'idle',
       attention: Boolean(appUpdater.error || appUpdater.info?.updateAvailable),
     },
     {
@@ -5180,8 +5273,8 @@ function SettingsScreen({
                 !DexydNotifications.available
                   ? 'idle'
                   : systemNotificationsEnabled
-                  ? 'ok'
-                  : 'warn'
+                    ? 'ok'
+                    : 'warn'
               }
             />
             <ToggleRow
@@ -5397,15 +5490,15 @@ function SettingsScreen({
                 appUpdater.checking
                   ? 'checking'
                   : appUpdater.installing
-                  ? 'downloading'
-                  : 'ready'
+                    ? 'downloading'
+                    : 'ready'
               }
               tone={
                 appUpdater.error
                   ? 'error'
                   : appUpdater.info?.updateAvailable
-                  ? 'warn'
-                  : 'idle'
+                    ? 'warn'
+                    : 'idle'
               }
             />
             <SettingLine
@@ -5820,9 +5913,9 @@ function UsagePanel({
                 usage.context.usedTokens ?? 0,
               )} / ${formatCompactNumber(usage.context.windowTokens ?? 0)})`
             : usage?.context.usedTokens !== null &&
-              usage?.context.usedTokens !== undefined
-            ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-            : 'unknown'
+                usage?.context.usedTokens !== undefined
+              ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+              : 'unknown'
         }
         tone={usage?.context.percent === null ? 'idle' : 'ok'}
       />
@@ -5844,7 +5937,9 @@ function UsagePanel({
         }
         tone={usageStatusTone(usage?.accountLimits?.monthly.status)}
       />
-      {usage?.limits.detail ? <Text style={styles.settingHint}>{usage.limits.detail}</Text> : null}
+      {usage?.limits.detail ? (
+        <Text style={styles.settingHint}>{usage.limits.detail}</Text>
+      ) : null}
       <View
         style={[
           styles.usageMeter,
@@ -5950,8 +6045,8 @@ function CodexAuthPanel({
                   {account.active
                     ? 'active'
                     : codexAuth.switching === account.index
-                    ? 'switching…'
-                    : 'switch'}
+                      ? 'switching…'
+                      : 'switch'}
                 </Text>
               </Pressable>
             ))
@@ -6190,7 +6285,6 @@ function attentionItemFromEvent(
   return null;
 }
 
-
 function promptFinishedNotificationFromEvent(
   event: EventEnvelope | null,
   item: AttentionItem | null,
@@ -6224,9 +6318,7 @@ function promptFinishedNotificationFromEvent(
     kind: 'response',
     title: `Prompt finished · ${sessionTitle}`,
     body:
-      item?.body ||
-      responseBody ||
-      'The agent finished the current prompt.',
+      item?.body || responseBody || 'The agent finished the current prompt.',
     timestamp: event.timestamp,
     sessionId: event.sessionId,
   };
@@ -6286,8 +6378,8 @@ function interactionResponseFromEvent(
     typeof payload.interactionId === 'string'
       ? payload.interactionId
       : typeof payload.requestId === 'string'
-      ? payload.requestId
-      : '';
+        ? payload.requestId
+        : '';
 
   if (!requestId) return null;
 
@@ -6295,8 +6387,8 @@ function interactionResponseFromEvent(
     typeof payload.decision === 'string'
       ? payload.decision
       : typeof payload.answer === 'string'
-      ? payload.answer
-      : 'sent';
+        ? payload.answer
+        : 'sent';
 
   return { requestId, label };
 }
@@ -6351,8 +6443,8 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
   const raw = Array.isArray(payload.choices)
     ? payload.choices
     : Array.isArray(payload.options)
-    ? payload.options
-    : [];
+      ? payload.options
+      : [];
 
   return raw
     .map((choice, index): AttentionChoice | null => {
@@ -6369,10 +6461,10 @@ function attentionChoices(payload: Record<string, unknown>): AttentionChoice[] {
         typeof item.label === 'string'
           ? item.label
           : typeof item.title === 'string'
-          ? item.title
-          : typeof item.text === 'string'
-          ? item.text
-          : '';
+            ? item.title
+            : typeof item.text === 'string'
+              ? item.text
+              : '';
 
       if (!label.trim()) return null;
 
@@ -6402,8 +6494,8 @@ function usageSummary(usage: UsageStatus): string {
     usage.context.percent !== null
       ? `${usage.context.percent}% context`
       : usage.context.usedTokens !== null
-      ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
-      : 'context unknown';
+        ? `${formatCompactNumber(usage.context.usedTokens)} tokens`
+        : 'context unknown';
   return `${accountUsageLabel(usage)} · ${context}`;
 }
 
@@ -7425,6 +7517,98 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 15,
     marginTop: 1,
+  },
+  chatMenuButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+    backgroundColor: '#242425',
+  },
+  chatMenuButtonActive: {
+    backgroundColor: '#303033',
+  },
+  chatMenuButtonText: {
+    color: palette.text,
+    fontSize: 22,
+    lineHeight: 23,
+    fontWeight: '900',
+  },
+  chatMenuBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 18,
+  },
+  chatOptionsMenu: {
+    position: 'absolute',
+    top: 48,
+    right: 10,
+    width: 248,
+    zIndex: 19,
+    elevation: 8,
+    padding: 10,
+    borderRadius: 16,
+    backgroundColor: '#232326',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3a3a3d',
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  chatOptionsTitle: {
+    color: palette.dim,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+  },
+  chatOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  chatOptionText: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+  chatOptionLabel: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  chatOptionDetail: {
+    color: palette.dim,
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  chatOptionToggle: {
+    width: 38,
+    height: 22,
+    borderRadius: 999,
+    padding: 2,
+    backgroundColor: '#39393c',
+  },
+  chatOptionToggleOn: {
+    backgroundColor: '#e9e9ea',
+  },
+  chatOptionToggleKnob: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#9b9ba0',
+  },
+  chatOptionToggleKnobOn: {
+    transform: [{ translateX: 16 }],
+    backgroundColor: '#111113',
   },
   messageRow: {
     marginBottom: 12,

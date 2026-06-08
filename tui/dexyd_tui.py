@@ -27,6 +27,7 @@ import qrcode
 import yaml
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Static, TabbedContent, TabPane
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -52,6 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "harness": {"mode": "direct", "command": "omx", "args": []},
     },
     "plugins": {"enabled": True, "pluginDir": ".dexyd/plugins"},
+    "cloudflare": {"hostname": "", "tunnelName": "dexyd"},
 }
 
 LOG_LEVELS = {"fatal", "error", "warn", "info", "debug", "trace"}
@@ -107,6 +109,14 @@ class CloudflareTunnelSetup:
     config_path: Path
     route_output: str = ""
     reused_existing: bool = False
+
+
+class CloudflareDuplicateError(RuntimeError):
+    def __init__(self, message: str, *, conflict: str, tunnel_name: str, hostname: str) -> None:
+        super().__init__(message)
+        self.conflict = conflict
+        self.tunnel_name = tunnel_name
+        self.hostname = hostname
 
 
 @dataclass
@@ -463,6 +473,13 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     harness["args"] = [str(arg) for arg in args if "\0" not in str(arg)] if isinstance(args, list) else []
     merged["codex"]["harness"] = harness
 
+    cloudflare = merged.get("cloudflare")
+    if not isinstance(cloudflare, dict):
+        cloudflare = copy.deepcopy(DEFAULT_CONFIG["cloudflare"])
+    cloudflare["hostname"] = normalize_cloudflare_hostname(cloudflare.get("hostname"))
+    cloudflare["tunnelName"] = normalized_tunnel_name(cloudflare.get("tunnelName") or DEFAULT_CONFIG["cloudflare"]["tunnelName"])
+    merged["cloudflare"] = cloudflare
+
     return merged
 
 
@@ -589,21 +606,26 @@ def cloudflare_status_text(config: dict[str, Any]) -> str:
     running = process_is_running(pid)
     local_url = f"http://127.0.0.1:{config['server']['port']}"
     public_url = config["server"].get("publicBaseUrl") or "(not configured)"
+    metadata = read_cloudflare_metadata()
+    configured = CLOUDFLARE_CONFIG_FILE.exists()
 
     lines = [
-        "CLOUDFLARE TUNNEL STATUS",
+        "CLOUDFLARE",
         "",
-        f"cloudflared: {'installed' if path else 'missing'}{f' ({path})' if path else ''}",
+        f"{'●' if path else '○'} cloudflared: {'installed' if path else 'missing'}{f' ({path})' if path else ''}",
     ]
     if path:
         lines.append(f"version: {cloudflared_version(path)}")
     lines.extend(
         [
-            f"Cloudflare login cert: {'present' if cloudflared_cert_path().exists() else 'missing'}",
-            f"Tunnel process: {'running' if running else 'stopped'}{f' (pid {pid})' if running else ''}",
-            f"Local origin: {local_url}",
-            f"Configured public URL: {public_url}",
-            f"Log: {CLOUDFLARE_LOG_FILE}",
+            f"{'●' if cloudflared_cert_path().exists() else '○'} login: {'present' if cloudflared_cert_path().exists() else 'missing'}",
+            f"{'●' if configured else '○'} config: {'present' if configured else 'missing'}",
+            f"{'●' if running else '○'} tunnel process: {'running' if running else 'stopped'}{f' (pid {pid})' if running else ''}",
+            f"origin: {local_url}",
+            f"public: {public_url}",
+            f"name: {metadata.get('tunnelName') or config.get('cloudflare', {}).get('tunnelName') or 'dexyd'}",
+            f"hostname: {metadata.get('hostname') or config.get('cloudflare', {}).get('hostname') or '(not configured)'}",
+            f"log: {CLOUDFLARE_LOG_FILE}",
         ]
     )
     return "\n".join(lines)
@@ -729,13 +751,15 @@ def cloudflare_credentials_file(tunnel_id: str) -> Path:
     return Path.home() / ".cloudflared" / f"{tunnel_id}.json"
 
 
-def managed_tunnel_matches(tunnel_name: str, hostname: str, tunnel_id: str | None = None) -> bool:
+def managed_tunnel_matches(tunnel_name: str, _hostname: str, tunnel_id: str | None = None) -> bool:
     metadata = read_cloudflare_metadata()
-    if metadata.get("managedBy") != "dexyd":
+    if not metadata:
         return False
-    if str(metadata.get("tunnelName") or "") != tunnel_name:
+    managed_by = str(metadata.get("managedBy") or "")
+    if managed_by and managed_by != "dexyd":
         return False
-    if str(metadata.get("hostname") or "") != hostname:
+    names = {str(metadata.get("tunnelName") or ""), str(metadata.get("requestedTunnelName") or "")}
+    if tunnel_name not in names:
         return False
     if tunnel_id is not None and str(metadata.get("tunnelId") or "") != tunnel_id:
         return False
@@ -797,102 +821,97 @@ def ensure_named_tunnel(path: str, name: str) -> str:
     raise RuntimeError("Cloudflare tunnel was created/found, but its UUID could not be determined.")
 
 
-def ensure_available_cloudflare_tunnel(path: str, requested_name: str, requested_hostname: str, origin_url: str) -> CloudflareTunnelSetup:
-    base_name = normalized_tunnel_name(requested_name)
-    base_hostname = normalize_cloudflare_hostname(requested_hostname)
-    if not base_hostname:
+def ensure_available_cloudflare_tunnel(
+    path: str,
+    requested_name: str,
+    requested_hostname: str,
+    origin_url: str,
+    *,
+    overwrite: bool = False,
+) -> CloudflareTunnelSetup:
+    tunnel_name = normalized_tunnel_name(requested_name)
+    hostname = normalize_cloudflare_hostname(requested_hostname)
+    if not hostname:
         raise RuntimeError("Enter a Cloudflare-managed public hostname, e.g. dexyd.example.com")
 
     tunnels = tunnel_index_by_name(list_cloudflare_tunnels(path))
-    skipped_names: list[str] = []
-    skipped_hosts: list[str] = []
+    existing_tunnel_id = tunnels.get(tunnel_name)
+    created_tunnel_id: str | None = None
+    reused_existing = False
 
-    for attempt in range(1, CLOUDFLARE_MAX_NAME_ATTEMPTS + 1):
-        candidate_name = numbered_name(base_name, attempt)
-        candidate_hostname = numbered_hostname(base_hostname, attempt)
-        if not candidate_hostname:
-            continue
-
-        existing_tunnel_id = tunnels.get(candidate_name)
-        created_tunnel_id: str | None = None
-        tunnel_id: str
-        reused_existing = False
-
-        if existing_tunnel_id:
-            if not managed_tunnel_matches(candidate_name, candidate_hostname, existing_tunnel_id):
-                skipped_names.append(candidate_name)
-                continue
-            if not credentials_file_ready(existing_tunnel_id):
-                raise RuntimeError(
-                    f"Existing dexyd-managed Cloudflare tunnel {candidate_name!r} is missing credentials: "
-                    f"{cloudflare_credentials_file(existing_tunnel_id)}"
-                )
+    if existing_tunnel_id:
+        if managed_tunnel_matches(tunnel_name, hostname, existing_tunnel_id) and credentials_file_ready(existing_tunnel_id):
             tunnel_id = existing_tunnel_id
             reused_existing = True
+        elif overwrite:
+            delete_cloudflare_tunnel(path, existing_tunnel_id)
+            tunnel_id = create_named_tunnel(path, tunnel_name)
+            created_tunnel_id = tunnel_id
         else:
-            try:
-                tunnel_id = create_named_tunnel(path, candidate_name)
+            raise CloudflareDuplicateError(
+                f"Cloudflare tunnel name {tunnel_name!r} already exists and is not the saved Dexyd tunnel. "
+                "Choose a different name or confirm overwrite.",
+                conflict="name",
+                tunnel_name=tunnel_name,
+                hostname=hostname,
+            )
+    else:
+        try:
+            tunnel_id = create_named_tunnel(path, tunnel_name)
+            created_tunnel_id = tunnel_id
+        except RuntimeError as exc:
+            if overwrite and output_mentions_existing_resource(str(exc)):
+                delete_cloudflare_tunnel(path, tunnel_name)
+                tunnel_id = create_named_tunnel(path, tunnel_name)
                 created_tunnel_id = tunnel_id
-            except RuntimeError as exc:
-                if output_mentions_existing_resource(str(exc)):
-                    skipped_names.append(candidate_name)
-                    tunnels = tunnel_index_by_name(list_cloudflare_tunnels(path))
-                    continue
+            elif output_mentions_existing_resource(str(exc)):
+                raise CloudflareDuplicateError(
+                    f"Cloudflare tunnel name {tunnel_name!r} already exists. Choose a different name or confirm overwrite.",
+                    conflict="name",
+                    tunnel_name=tunnel_name,
+                    hostname=hostname,
+                ) from exc
+            else:
                 raise
 
-        route = run_capture([path, "tunnel", "route", "dns", candidate_name, candidate_hostname], timeout=60)
-        route_output = command_output(route)
-        if route.returncode != 0:
-            if output_mentions_existing_resource(route_output):
-                if reused_existing and managed_tunnel_matches(candidate_name, candidate_hostname, tunnel_id):
-                    config_path = write_cloudflare_config(tunnel_id, candidate_name, candidate_hostname, origin_url)
-                    setup = CloudflareTunnelSetup(
-                        tunnel_id=tunnel_id,
-                        tunnel_name=candidate_name,
-                        hostname=candidate_hostname,
-                        public_url=f"https://{candidate_hostname}",
-                        config_path=config_path,
-                        route_output=route_output,
-                        reused_existing=True,
-                    )
-                    write_cloudflare_metadata(setup, base_name, base_hostname, origin_url)
-                    return setup
-                skipped_hosts.append(candidate_hostname)
-                if created_tunnel_id:
-                    delete_cloudflare_tunnel(path, created_tunnel_id)
-                continue
-            if created_tunnel_id:
-                delete_cloudflare_tunnel(path, created_tunnel_id)
-            raise RuntimeError(f"Could not create Cloudflare DNS route for {candidate_hostname}: {route_output}")
-
-        if not credentials_file_ready(tunnel_id):
-            if created_tunnel_id:
-                delete_cloudflare_tunnel(path, created_tunnel_id)
-            raise RuntimeError(
-                f"Cloudflare tunnel {candidate_name!r} was created, but its credentials file is missing: "
-                f"{cloudflare_credentials_file(tunnel_id)}"
+    route_command = [path, "tunnel", "route", "dns"]
+    if overwrite:
+        route_command.append("--overwrite-dns")
+    route_command.extend([tunnel_name, hostname])
+    route = run_capture(route_command, timeout=60)
+    route_output = command_output(route)
+    if route.returncode != 0:
+        if created_tunnel_id:
+            delete_cloudflare_tunnel(path, created_tunnel_id)
+        if output_mentions_existing_resource(route_output):
+            raise CloudflareDuplicateError(
+                f"Cloudflare hostname {hostname!r} already has a DNS record. "
+                "Choose a different hostname or confirm overwrite.",
+                conflict="hostname",
+                tunnel_name=tunnel_name,
+                hostname=hostname,
             )
+        raise RuntimeError(f"Could not create Cloudflare DNS route for {hostname}: {route_output}")
 
-        config_path = write_cloudflare_config(tunnel_id, candidate_name, candidate_hostname, origin_url)
-        setup = CloudflareTunnelSetup(
-            tunnel_id=tunnel_id,
-            tunnel_name=candidate_name,
-            hostname=candidate_hostname,
-            public_url=f"https://{candidate_hostname}",
-            config_path=config_path,
-            route_output=route_output,
-            reused_existing=reused_existing,
+    if not credentials_file_ready(tunnel_id):
+        if created_tunnel_id:
+            delete_cloudflare_tunnel(path, created_tunnel_id)
+        raise RuntimeError(
+            f"Cloudflare tunnel {tunnel_name!r} is missing credentials: {cloudflare_credentials_file(tunnel_id)}"
         )
-        write_cloudflare_metadata(setup, base_name, base_hostname, origin_url)
-        return setup
 
-    details: list[str] = []
-    if skipped_names:
-        details.append(f"taken tunnel names: {', '.join(skipped_names[:8])}{'...' if len(skipped_names) > 8 else ''}")
-    if skipped_hosts:
-        details.append(f"taken hostnames: {', '.join(skipped_hosts[:8])}{'...' if len(skipped_hosts) > 8 else ''}")
-    suffix = f" ({'; '.join(details)})" if details else ""
-    raise RuntimeError(f"Could not find an available Cloudflare tunnel name/hostname after {CLOUDFLARE_MAX_NAME_ATTEMPTS} attempts{suffix}.")
+    config_path = write_cloudflare_config(tunnel_id, tunnel_name, hostname, origin_url)
+    setup = CloudflareTunnelSetup(
+        tunnel_id=tunnel_id,
+        tunnel_name=tunnel_name,
+        hostname=hostname,
+        public_url=f"https://{hostname}",
+        config_path=config_path,
+        route_output=route_output,
+        reused_existing=reused_existing,
+    )
+    write_cloudflare_metadata(setup, tunnel_name, hostname, origin_url)
+    return setup
 
 
 def ensure_bridge_origin_ready(config: dict[str, Any]) -> None:
@@ -1482,6 +1501,31 @@ def git_diff_summary(workspace_path: str) -> str:
     return raw[:12000] + ("\n\n[truncated]" if len(raw) > 12000 else "")
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    CSS = """
+    ConfirmScreen {
+      align: center middle;
+    }
+    """
+
+    def __init__(self, title: str, message: str, confirm_label: str = "Overwrite") -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.message = message
+        self.confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="confirm_dialog"):
+            yield Static(self.dialog_title, classes="section_title")
+            yield Static(self.message, classes="field_help")
+            with Horizontal(classes="action_row"):
+                yield Button(self.confirm_label, id="confirm_yes", variant="error")
+                yield Button("Cancel", id="confirm_no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm_yes")
+
+
 class DexydTextualApp(App[None]):
     TITLE = "dexyd bridge console"
     SUB_TITLE = "local bridge"
@@ -1605,7 +1649,20 @@ class DexydTextualApp(App[None]):
       min-height: 8;
     }
     #cloudflare_output, #update_output {
+      height: 14;
       min-height: 8;
+      max-height: 16;
+    }
+    #bridge_config_status {
+      min-height: 9;
+    }
+    .confirm_dialog {
+      align: center middle;
+      width: 70;
+      height: auto;
+      border: round #f2b84b;
+      background: #202024;
+      padding: 1 2;
     }
     #status_line {
       dock: bottom;
@@ -1646,46 +1703,18 @@ class DexydTextualApp(App[None]):
             with TabPane("Connection", id="connection"):
                 with VerticalScroll(classes="page"):
                     yield Static(
-                        "CONNECTION\n\nOne place for the bridge, tunnel, autostart service, and pairing QR. The single dexyd.service owns both the local bridge and the Cloudflare tunnel when a tunnel is configured.",
+                        "CONNECTION\n\nOperate the bridge and the Cloudflare tunnel from one clean screen. Configure host, port, tunnel name, and tunnel URL in Advanced settings.",
                         classes="hero",
                     )
                     yield Static("", id="bridge_config_status", classes="panel")
-
+                    with Horizontal(classes="action_row"):
+                        yield Button("Start bridge", id="install_service", variant="success")
+                        yield Button("Stop bridge", id="stop_connection_service", variant="error")
+                        yield Button("Start tunnel", id="cf_start_named", variant="success")
+                        yield Button("Stop tunnel", id="cf_disable_tunnel", variant="error")
                     with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
-                            yield Static("1. LOCAL ACCESS", classes="section_title")
-                            yield Static("Server host", classes="field_label")
-                            yield Static("Use 0.0.0.0 for LAN phone access. Use 127.0.0.1 behind a local tunnel/proxy.", classes="field_help")
-                            yield Input(placeholder="0.0.0.0", id="cfg_server_host")
-                            yield Static("Server port", classes="field_label")
-                            yield Static("Bridge HTTP/WebSocket port.", classes="field_help")
-                            yield Input(placeholder="4242", id="cfg_server_port", type="integer")
-                            yield Static("Public bridge URL", classes="field_label")
-                            yield Static("Leave empty for LAN. Set an HTTPS domain/tunnel before generating a remote QR.", classes="field_help")
-                            yield Input(placeholder="https://dexyd.example.com", id="cfg_server_public_base_url")
-                            with Vertical(classes="actions"):
-                                yield Button("Save connection", id="save_connection", variant="success")
-                                yield Button("Install/start Dexyd service", id="install_service", variant="primary")
-                                yield Button("Restart service", id="restart_connection_service")
-                                yield Button("Stop service", id="stop_connection_service", variant="error")
-
-                        with Vertical(classes="panel col"):
-                            yield Static("2. CLOUDFLARE TUNNEL", classes="section_title")
-                            yield Static("Public hostname", classes="field_label")
-                            yield Static("Optional. Use a hostname routed in Cloudflare, e.g. dexyd.example.com.", classes="field_help")
-                            yield Input(placeholder="dexyd.example.com", id="cf_hostname")
-                            yield Static("Tunnel name", classes="field_label")
-                            yield Static("Reusable named tunnel label.", classes="field_help")
-                            yield Input(placeholder="dexyd", id="cf_tunnel_name", value="dexyd")
-                            with Vertical(classes="actions"):
-                                yield Button("Setup/start tunnel", id="cf_start_named", variant="success")
-                                yield Button("Login", id="cf_login")
-                                yield Button("Install cloudflared", id="cf_install")
-                                yield Button("Disable tunnel", id="cf_disable_tunnel", variant="error")
-
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="panel col"):
-                            yield Static("3. PAIR PHONE", classes="section_title")
+                            yield Static("PAIR PHONE", classes="section_title")
                             yield Static("Expiry seconds", classes="field_label")
                             yield Static("Short-lived pairing challenge. 300 seconds is usually enough.", classes="field_help")
                             yield Input(placeholder="300", id="pairing_expiry", type="integer", value="300")
@@ -1693,7 +1722,7 @@ class DexydTextualApp(App[None]):
                                 yield Button("Generate pairing QR", id="generate_pairing", variant="success")
                                 yield Button("Clear", id="clear_qr")
                         yield Static(
-                            "SIMPLE FLOW\n\n1. For LAN: host 0.0.0.0, public URL empty.\n2. For remote: enter Cloudflare hostname and run Setup/start tunnel.\n3. Generate QR after the status shows the URL you want.\n4. Scan from the mobile app.\n\nChanging the URL requires a new QR.",
+                            "FLOW\n\n1. Configure LAN or Cloudflare in Advanced.\n2. Start bridge.\n3. Start tunnel if using Cloudflare.\n4. Generate QR after the status shows the URL you want.\n\nChanging the URL requires a new QR.",
                             classes="soft_panel col",
                         )
                     yield Static("Generate a QR to pair the mobile app.", id="qr_output")
@@ -1743,6 +1772,33 @@ class DexydTextualApp(App[None]):
             with TabPane("Advanced", id="settings"):
                 with VerticalScroll(classes="page"):
                     yield Static("ADVANCED SETTINGS\n\nLess common runtime, security, stream, and harness settings. Save here after editing, then restart the bridge/service.", classes="hero")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("CONNECTION SETTINGS", classes="section_title")
+                            yield Static("Server host", classes="field_label")
+                            yield Static("Use 0.0.0.0 for LAN phone access. Use 127.0.0.1 behind a local tunnel/proxy.", classes="field_help")
+                            yield Input(placeholder="0.0.0.0", id="cfg_server_host")
+                            yield Static("Server port", classes="field_label")
+                            yield Static("Bridge HTTP/WebSocket port.", classes="field_help")
+                            yield Input(placeholder="4242", id="cfg_server_port", type="integer")
+                            yield Static("Public bridge URL", classes="field_label")
+                            yield Static("Leave empty for LAN. Set an HTTPS domain/tunnel before generating a remote QR.", classes="field_help")
+                            yield Input(placeholder="https://dexyd.example.com", id="cfg_server_public_base_url")
+                            with Vertical(classes="actions"):
+                                yield Button("Save connection settings", id="save_connection", variant="success")
+                                yield Button("Reload config", id="reload_config")
+                        with Vertical(classes="panel col"):
+                            yield Static("CLOUDFLARE SETTINGS", classes="section_title")
+                            yield Static("Public hostname", classes="field_label")
+                            yield Static("Hostname routed in Cloudflare, e.g. dexyd.example.com.", classes="field_help")
+                            yield Input(placeholder="dexyd.example.com", id="cf_hostname")
+                            yield Static("Tunnel name", classes="field_label")
+                            yield Static("Reusable named tunnel label. Duplicates require confirmation.", classes="field_help")
+                            yield Input(placeholder="dexyd", id="cf_tunnel_name", value="dexyd")
+                            with Vertical(classes="actions"):
+                                yield Button("Configure tunnel", id="cf_configure", variant="success")
+                                yield Button("Login", id="cf_login")
+                                yield Button("Install cloudflared", id="cf_install")
                     with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("SECURITY", classes="section_title")
@@ -1865,9 +1921,17 @@ class DexydTextualApp(App[None]):
         self.query_one("#cfg_server_log_level", Input).value = str(config["server"]["logLevel"])
         public_base_url = str(config["server"].get("publicBaseUrl") or "")
         self.query_one("#cfg_server_public_base_url", Input).value = public_base_url
+        metadata = read_cloudflare_metadata()
+        cloudflare_config = config.get("cloudflare") if isinstance(config.get("cloudflare"), dict) else {}
         public_hostname = normalize_cloudflare_hostname(public_base_url)
-        if public_hostname:
-            self.query_one("#cf_hostname", Input).value = public_hostname
+        saved_hostname = normalize_cloudflare_hostname(
+            cloudflare_config.get("hostname") or metadata.get("hostname") or public_hostname
+        )
+        saved_tunnel_name = normalized_tunnel_name(
+            cloudflare_config.get("tunnelName") or metadata.get("tunnelName") or metadata.get("requestedTunnelName") or "dexyd"
+        )
+        self.query_one("#cf_hostname", Input).value = saved_hostname
+        self.query_one("#cf_tunnel_name", Input).value = saved_tunnel_name
         self.query_one("#cfg_auth_access_ttl", Input).value = str(config["auth"]["accessTokenTtlSeconds"])
         self.query_one("#cfg_auth_refresh_ttl", Input).value = str(config["auth"]["refreshTokenTtlSeconds"])
         self.query_one("#cfg_auth_signing_key", Input).value = str(config["auth"]["signingKey"])
@@ -1881,6 +1945,19 @@ class DexydTextualApp(App[None]):
         self.query_one("#cfg_codex_harness_command", Input).value = str(harness["command"])
         self.query_one("#cfg_codex_harness_args", Input).value = shlex.join([str(arg) for arg in harness.get("args", [])])
 
+    def save_cloudflare_settings_from_inputs(self, persist: bool = True) -> tuple[str, str]:
+        hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
+        tunnel_name = normalized_tunnel_name(self.query_one("#cf_tunnel_name", Input).value)
+        self.store.config.setdefault("cloudflare", {})
+        self.store.config["cloudflare"]["hostname"] = hostname
+        self.store.config["cloudflare"]["tunnelName"] = tunnel_name
+        if hostname:
+            self.store.config["server"]["publicBaseUrl"] = f"https://{hostname}"
+            self.query_one("#cfg_server_public_base_url", Input).value = f"https://{hostname}"
+        if persist and self.store.editable:
+            save_config_store(self.store)
+        return hostname, tunnel_name
+
     def sync_cloudflare_hostname_for_pairing(self, persist: bool = False) -> str:
         public_url = cloudflare_public_url(self.query_one("#cf_hostname", Input).value)
         if not public_url:
@@ -1889,6 +1966,11 @@ class DexydTextualApp(App[None]):
         if self.store.config["server"].get("publicBaseUrl") != public_url:
             self.store.config["server"]["publicBaseUrl"] = public_url
             self.query_one("#cfg_server_public_base_url", Input).value = public_url
+            self.store.config.setdefault("cloudflare", {})
+            self.store.config["cloudflare"]["hostname"] = normalize_cloudflare_hostname(public_url)
+            self.store.config["cloudflare"]["tunnelName"] = normalized_tunnel_name(
+                self.query_one("#cf_tunnel_name", Input).value
+            )
             if persist and self.store.editable:
                 save_config_store(self.store)
             self.refresh_dashboard()
@@ -2045,18 +2127,16 @@ class DexydTextualApp(App[None]):
         if tunnel_active not in {"inactive", "failed", "unknown"} or tunnel_enabled not in {"disabled", "unknown"}:
             legacy_line = f"\nLegacy separate tunnel service: {tunnel_active} · {tunnel_enabled}"
         self.query_one("#bridge_config_status", Static).update(
-            "CONNECTION STATUS\n\n"
-            f"Local API: {base_url} · {health}\n"
-            f"Public URL: {public_url}\n"
-            f"Health: {detail}\n\n"
-            "ONE SERVICE\n\n"
-            f"Dexyd service: {bridge_active} · {bridge_enabled}\n"
-            "Runs: bridge + Cloudflare tunnel when tunnel config exists"
-            f"{legacy_line}\n\n"
-            "TUNNEL\n\n"
+            "STATUS\n\n"
+            f"{'●' if health in {'ready', 'ok'} else '○'} bridge API: {health} · {base_url}\n"
+            f"{'●' if bridge_active == 'active' else '○'} dexyd.service: {bridge_active} · {bridge_enabled}\n"
+            f"{'●' if config_state == 'present' else '○'} tunnel config: {config_state}\n"
+            f"{'●' if tunnel_process == 'running' else '○'} tunnel process: {tunnel_process}{f' · pid {pid}' if process_is_running(pid) else ''}\n"
+            f"{'●' if public_url else '○'} pairing URL: {public_url}\n"
             f"cloudflared: {'installed' if cloudflared else 'missing'}{f' · {cloudflared}' if cloudflared else ''}\n"
-            f"Process: {tunnel_process}{f' · pid {pid}' if process_is_running(pid) else ''}\n"
-            f"Config: {config_state} · {CLOUDFLARE_CONFIG_FILE}"
+            f"health detail: {detail}"
+            f"{legacy_line}\n"
+            "Service model: dexyd.service starts bridge and tunnel when tunnel config exists."
         )
 
     def refresh_projects(self) -> None:
@@ -2072,12 +2152,20 @@ class DexydTextualApp(App[None]):
             return
         timestamp = time.strftime("%H:%M:%S")
         self.cloudflare_log_text = f"{self.cloudflare_log_text}\n\n[{timestamp}] {line}".strip()
-        if len(self.cloudflare_log_text) > 12000:
-            self.cloudflare_log_text = self.cloudflare_log_text[-12000:]
+        blocks = [block for block in self.cloudflare_log_text.split("\n\n") if block.strip()]
+        if len(blocks) > 40:
+            self.cloudflare_log_text = "\n\n".join(blocks[-40:])
+        if len(self.cloudflare_log_text) > 8000:
+            self.cloudflare_log_text = self.cloudflare_log_text[-8000:]
         self.refresh_cloudflare()
         self.set_status(line.splitlines()[0])
 
-    def run_cloudflare_task(self, label: str, action: Callable[[], Any]) -> None:
+    def run_cloudflare_task(
+        self,
+        label: str,
+        action: Callable[[], Any],
+        on_duplicate_confirmed: Callable[[], Any] | None = None,
+    ) -> None:
         if self.cloudflare_busy:
             self.set_status("Cloudflare task already running")
             return
@@ -2091,12 +2179,39 @@ class DexydTextualApp(App[None]):
                 result = action()
                 if result:
                     self.append_cloudflare_output(str(result))
+            except CloudflareDuplicateError as exc:
+                if on_duplicate_confirmed is None:
+                    self.append_cloudflare_output(f"Duplicate: {exc}")
+                else:
+                    self.call_from_thread(self.prompt_cloudflare_overwrite, exc, label, on_duplicate_confirmed)
             except Exception as exc:  # pragma: no cover - interactive guard
                 self.append_cloudflare_output(f"Error: {exc}")
             finally:
                 self.call_from_thread(self.finish_cloudflare_task, label)
 
         threading.Thread(target=worker, name=f"dexyd-{label.lower().replace(' ', '-')}", daemon=True).start()
+
+    def prompt_cloudflare_overwrite(
+        self,
+        error: CloudflareDuplicateError,
+        label: str,
+        on_confirmed: Callable[[], Any],
+    ) -> None:
+        message = (
+            f"{error}\n\n"
+            f"Tunnel name: {error.tunnel_name}\n"
+            f"Hostname: {error.hostname}\n\n"
+            "Overwrite will replace the conflicting Cloudflare tunnel or DNS route for this hostname."
+        )
+
+        def callback(confirmed: bool) -> None:
+            if confirmed:
+                self.append_cloudflare_output(f"Overwrite confirmed for {error.conflict}: {error.tunnel_name} / {error.hostname}")
+                self.run_cloudflare_task(f"{label} overwrite", on_confirmed)
+            else:
+                self.append_cloudflare_output("Overwrite cancelled. Choose another Cloudflare tunnel name or hostname.")
+
+        self.push_screen(ConfirmScreen("Cloudflare duplicate detected", message), callback)
 
     def finish_cloudflare_task(self, label: str) -> None:
         self.cloudflare_busy = False
@@ -2108,6 +2223,10 @@ class DexydTextualApp(App[None]):
         if not normalized:
             raise RuntimeError(f"Invalid public URL from Cloudflare: {url}")
         self.store.config["server"]["publicBaseUrl"] = normalized
+        hostname = normalize_cloudflare_hostname(normalized)
+        if hostname:
+            self.store.config.setdefault("cloudflare", {})
+            self.store.config["cloudflare"]["hostname"] = hostname
         save_config_store(self.store)
         if threading.current_thread() is threading.main_thread():
             self.apply_saved_public_base_url(normalized)
@@ -2189,38 +2308,72 @@ class DexydTextualApp(App[None]):
             raise RuntimeError("Cloudflare login failed:\n" + "\n".join(output_lines[-12:]))
         self.append_cloudflare_output("Cloudflare login complete.")
 
-    def start_named_cloudflare_tunnel(self, hostname: str, tunnel_name: str, pairing_expiry: int) -> None:
+    def configure_named_cloudflare_tunnel(self, hostname: str, tunnel_name: str, overwrite: bool = False) -> CloudflareTunnelSetup:
         path = self.ensure_cloudflared()
         hostname = normalize_cloudflare_hostname(hostname)
         if not hostname:
             raise RuntimeError("Enter a Cloudflare-managed public hostname, e.g. dexyd.example.com")
         tunnel_name = normalized_tunnel_name(tunnel_name)
 
-        ensure_bridge_origin_ready(self.store.config)
         self.cloudflare_login(path)
         origin = local_cloudflare_origin(self.store.config)
-        setup = ensure_available_cloudflare_tunnel(path, tunnel_name, hostname, origin)
+        setup = ensure_available_cloudflare_tunnel(path, tunnel_name, hostname, origin, overwrite=overwrite)
         if setup.route_output:
             self.append_cloudflare_output(setup.route_output)
-        if setup.tunnel_name != tunnel_name:
-            self.append_cloudflare_output(f"Tunnel name {tunnel_name!r} was unavailable; using {setup.tunnel_name!r}.")
-        if setup.hostname != hostname:
-            self.append_cloudflare_output(f"Hostname {hostname!r} was unavailable; using {setup.hostname!r}.")
-        stop_pid(read_pid(CLOUDFLARE_PID_FILE))
         public_url = setup.public_url
         self.save_public_base_url(public_url)
-        service_message = install_user_service(self.store.path)
-        service_active, _service_enabled = user_service_state("dexyd.service")
-        pid: int | None = None
-        if service_active != "active":
-            pid = start_cloudflared_process([path, "--config", str(setup.config_path), "tunnel", "run"])
+        self.store.config.setdefault("cloudflare", {})
+        self.store.config["cloudflare"]["hostname"] = setup.hostname
+        self.store.config["cloudflare"]["tunnelName"] = setup.tunnel_name
+        save_config_store(self.store)
         self.append_cloudflare_output(
-            f"Named tunnel running: {public_url}\n"
+            f"Tunnel configured: {public_url}\n"
             f"Tunnel: {setup.tunnel_name} ({setup.tunnel_id})\n"
             f"Origin: {origin}\n"
             f"Config: {setup.config_path}\n"
+            f"Metadata: {CLOUDFLARE_METADATA_FILE}"
+        )
+        return setup
+
+    def start_named_cloudflare_tunnel(self, hostname: str, tunnel_name: str, pairing_expiry: int, overwrite: bool = False) -> None:
+        ensure_bridge_origin_ready(self.store.config)
+        hostname = normalize_cloudflare_hostname(hostname)
+        tunnel_name = normalized_tunnel_name(tunnel_name)
+        metadata = read_cloudflare_metadata()
+        config_matches_request = (
+            CLOUDFLARE_CONFIG_FILE.exists()
+            and str(metadata.get("tunnelName") or metadata.get("requestedTunnelName") or "") == tunnel_name
+            and normalize_cloudflare_hostname(metadata.get("hostname") or "") == hostname
+        )
+        if not config_matches_request:
+            setup = self.configure_named_cloudflare_tunnel(hostname, tunnel_name, overwrite=overwrite)
+            metadata = read_cloudflare_metadata()
+        else:
+            setup = None
+
+        stop_pid(read_pid(CLOUDFLARE_PID_FILE))
+        public_url = normalize_public_base_url(metadata.get("publicUrl") or self.store.config["server"].get("publicBaseUrl"))
+        if not public_url:
+            public_url = cloudflare_public_url(hostname)
+        if not public_url:
+            raise RuntimeError("Tunnel public URL is missing. Configure the Cloudflare tunnel in Advanced first.")
+        self.save_public_base_url(public_url)
+        service_message = install_user_service(self.store.path)
+        restart_message = restart_connection_user_service()
+        service_active, _service_enabled = user_service_state("dexyd.service")
+        pid: int | None = None
+        if service_active != "active":
+            path = self.ensure_cloudflared()
+            pid = start_cloudflared_process([path, "--config", str(CLOUDFLARE_CONFIG_FILE), "tunnel", "run"])
+        self.append_cloudflare_output(
+            f"Named tunnel running: {public_url}\n"
+            f"Tunnel: {metadata.get('tunnelName') or (setup.tunnel_name if setup else 'configured')}"
+            f"{f' ({metadata.get('tunnelId')})' if metadata.get('tunnelId') else ''}\n"
+            f"Origin: {local_cloudflare_origin(self.store.config)}\n"
+            f"Config: {CLOUDFLARE_CONFIG_FILE}\n"
             f"Metadata: {CLOUDFLARE_METADATA_FILE}\n"
             f"Service: {service_message}\n"
+            f"Restart: {restart_message}\n"
             f"Temporary PID: {pid if pid else 'not needed; managed by dexyd.service'}\n"
             "Waiting for public tunnel health before generating the pairing QR..."
         )
@@ -2336,6 +2489,8 @@ class DexydTextualApp(App[None]):
         log_level = self.query_one("#cfg_server_log_level", Input).value.strip().lower() or config["server"]["logLevel"]
         public_base_url_raw = self.query_one("#cfg_server_public_base_url", Input).value
         public_base_url = normalize_public_base_url(public_base_url_raw)
+        cloudflare_hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
+        cloudflare_tunnel_name = normalized_tunnel_name(self.query_one("#cf_tunnel_name", Input).value)
 
         if port > 65535:
             raise RuntimeError("Server port must be between 1 and 65535")
@@ -2376,6 +2531,12 @@ class DexydTextualApp(App[None]):
         config["server"]["port"] = port
         config["server"]["logLevel"] = log_level
         config["server"]["publicBaseUrl"] = public_base_url
+        if cloudflare_hostname:
+            config["server"]["publicBaseUrl"] = f"https://{cloudflare_hostname}"
+            self.query_one("#cfg_server_public_base_url", Input).value = config["server"]["publicBaseUrl"]
+        config.setdefault("cloudflare", {})
+        config["cloudflare"]["hostname"] = cloudflare_hostname
+        config["cloudflare"]["tunnelName"] = cloudflare_tunnel_name
         config["auth"]["accessTokenTtlSeconds"] = access_ttl
         config["auth"]["refreshTokenTtlSeconds"] = refresh_ttl
         config["auth"]["signingKey"] = signing_key
@@ -2454,7 +2615,7 @@ class DexydTextualApp(App[None]):
                 self._load_settings_inputs()
                 self.set_status("Settings form reset")
             elif button_id == "generate_pairing":
-                self.sync_cloudflare_hostname_for_pairing(persist=False)
+                self.sync_cloudflare_hostname_for_pairing(persist=True)
                 pairing_base_url = advertised_bridge_url(self.store.config)
                 expiry = parse_int(self.query_one("#pairing_expiry", Input).value, 300, 30)
                 uri, output = self.build_pairing_output(pairing_base_url, expiry)
@@ -2471,14 +2632,22 @@ class DexydTextualApp(App[None]):
                 self.run_cloudflare_task("Install cloudflared", self.ensure_cloudflared)
             elif button_id == "cf_login":
                 self.run_cloudflare_task("Cloudflare login", lambda: self.cloudflare_login(self.ensure_cloudflared()))
-            elif button_id == "cf_start_named":
-                hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
-                tunnel_name = self.query_one("#cf_tunnel_name", Input).value.strip() or "dexyd"
-                pairing_expiry = parse_int(self.query_one("#pairing_expiry", Input).value, 300, 30)
-                self.sync_cloudflare_hostname_for_pairing(persist=False)
+            elif button_id == "cf_configure":
+                self._save_settings()
+                hostname, tunnel_name = self.save_cloudflare_settings_from_inputs(persist=True)
                 self.run_cloudflare_task(
-                    "Named Cloudflare tunnel",
-                    lambda: self.start_named_cloudflare_tunnel(hostname, tunnel_name, pairing_expiry),
+                    "Configure Cloudflare tunnel",
+                    lambda: self.configure_named_cloudflare_tunnel(hostname, tunnel_name, overwrite=False),
+                    on_duplicate_confirmed=lambda: self.configure_named_cloudflare_tunnel(hostname, tunnel_name, overwrite=True),
+                )
+            elif button_id == "cf_start_named":
+                self._save_settings()
+                hostname, tunnel_name = self.save_cloudflare_settings_from_inputs(persist=True)
+                pairing_expiry = parse_int(self.query_one("#pairing_expiry", Input).value, 300, 30)
+                self.run_cloudflare_task(
+                    "Start Cloudflare tunnel",
+                    lambda: self.start_named_cloudflare_tunnel(hostname, tunnel_name, pairing_expiry, overwrite=False),
+                    on_duplicate_confirmed=lambda: self.start_named_cloudflare_tunnel(hostname, tunnel_name, pairing_expiry, overwrite=True),
                 )
             elif button_id == "cf_disable_tunnel":
                 self.set_status(disable_cloudflare_tunnel_config())

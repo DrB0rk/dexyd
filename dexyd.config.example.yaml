@@ -42,3 +42,8 @@ codex:
 plugins:
   enabled: true
   pluginDir: .dexyd/plugins
+
+cloudflare:
+  # Saved by the TUI for named Cloudflare tunnel setup.
+  hostname: ""
+  tunnelName: dexyd

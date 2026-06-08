@@ -76,21 +76,21 @@ Home stays read-only except for refresh/reload actions. Use **Connection** for s
 
 ### Connection
 
-Connection is the main setup screen. It keeps all reachability settings together:
+Connection is the main operating screen. It intentionally stays small:
 
-- local bridge host/port;
-- public bridge URL for domain/Caddy/tunnel use;
-- one Dexyd user service for both the bridge and optional tunnel;
-- Cloudflare named-tunnel hostname/name;
-- cloudflared install/login/setup actions;
-- pairing QR generation;
-- current bridge, tunnel, and service status.
+- bridge status and advertised pairing URL;
+- Cloudflare tunnel status;
+- **Start bridge** / **Stop bridge**;
+- **Start tunnel** / **Stop tunnel**;
+- pairing QR generation.
+
+Install, login, host/port, public URL, and Cloudflare tunnel name/hostname settings live in **Advanced** so the daily operating view is not cluttered. Configure first, then return to Connection to start services and pair.
 
 Connection modes:
 
 - **LAN** — set host to `0.0.0.0`, leave public URL empty, then pair on the LAN URL.
 - **Domain/Caddy** — set public URL to your HTTPS reverse proxy URL, save, then pair.
-- **Cloudflare named tunnel** — enter the hostname and tunnel name, run setup/start, then pair after the TUI saves the tunnel URL. If the requested tunnel name or hostname is already taken, Dexyd automatically tries numbered alternatives such as `dexyd-2` and `dexyd-2.example.com`.
+- **Cloudflare named tunnel** — set the hostname and tunnel name in Advanced, configure/start the tunnel, then pair after the TUI saves the tunnel URL. If the requested tunnel name or hostname already exists, Dexyd asks before overwriting instead of silently switching to a different name.
 
 The single `dexyd.service` starts the bridge and, when `.dexyd/cloudflared/config.yml` exists, starts the Cloudflare named tunnel too. The old separate `dexyd-cloudflared.service` is disabled/removed when the new service is installed.
 
@@ -100,10 +100,10 @@ The named-tunnel flow can:
 2. install it user-locally on supported Linux systems if missing;
 3. run Cloudflare login;
 4. create or reuse a dexyd-managed named tunnel;
-5. route DNS to the selected hostname, incrementing the tunnel name/hostname when Cloudflare reports a conflict;
+5. route DNS to the selected hostname, asking before overwrite when Cloudflare reports a conflict;
 6. write tunnel config and dexyd metadata under `.dexyd/cloudflared/`;
-7. install/restart the single Dexyd service;
-8. save `server.publicBaseUrl`;
+7. persist `cloudflare.tunnelName`, `cloudflare.hostname`, and `server.publicBaseUrl`;
+8. install/restart the single Dexyd service;
 9. regenerate pairing with the correct URL.
 
 ### Pairing
@@ -126,14 +126,16 @@ Work shows projects and sessions. It is not meant to replace the mobile chat, bu
 
 ### Advanced
 
-Advanced edits less common local bridge configuration:
+Advanced edits local configuration:
 
+- bridge bind host/port and public URL;
+- Cloudflare tunnel hostname/name plus install/login/configure actions;
 - workspace root;
 - Codex runtime;
 - Codex/OMX/custom harness mode;
 - token and stream settings.
 
-Use a narrower workspace root when you want the app to see fewer files.
+Use a narrower workspace root when you want the app to see fewer files. Cloudflare hostname/name are saved in `cloudflare.*` so updates and restarts do not require re-entering them.
 
 ### Devices
 

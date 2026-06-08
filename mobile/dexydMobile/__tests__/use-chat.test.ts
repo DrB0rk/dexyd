@@ -157,7 +157,6 @@ describe('mergeFetchedChatMessages', () => {
     ]);
   });
 
-
   it('keeps existing visible history when a refresh returns a partial snapshot', () => {
     const oldUser = message({
       id: 'user-old',
@@ -349,33 +348,45 @@ describe('chatMessageRenderKey', () => {
   });
 });
 
-
 describe('visibleChatMessages', () => {
-  it('keeps tool progress rows out of the visible message list', () => {
-    const visible = visibleChatMessages([
-      message({ id: 'user-1', role: 'user', content: 'go', sequence: 1 }),
-      message({
-        id: 'running-1',
-        role: 'tool',
-        status: 'running',
-        content: 'Codex is working…',
-        sequence: 2,
-      }),
-      message({
-        id: 'tool-done-1',
-        role: 'tool',
-        status: 'sent',
-        content: 'Command finished.',
-        sequence: 3,
-      }),
-      message({
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'done',
-        sequence: 4,
-      }),
-    ]);
+  const messagesWithToolCalls = [
+    message({ id: 'user-1', role: 'user', content: 'go', sequence: 1 }),
+    message({
+      id: 'running-1',
+      role: 'tool',
+      status: 'running',
+      content: 'Codex is working…',
+      sequence: 2,
+    }),
+    message({
+      id: 'tool-done-1',
+      role: 'tool',
+      status: 'sent',
+      content: 'Command finished.',
+      sequence: 3,
+    }),
+    message({
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'done',
+      sequence: 4,
+    }),
+  ];
+
+  it('keeps tool progress rows out of the visible message list by default', () => {
+    const visible = visibleChatMessages(messagesWithToolCalls);
 
     expect(visible.map(item => item.id)).toEqual(['assistant-1', 'user-1']);
+  });
+
+  it('can include verbose tool call rows when requested', () => {
+    const visible = visibleChatMessages(messagesWithToolCalls, true);
+
+    expect(visible.map(item => item.id)).toEqual([
+      'assistant-1',
+      'tool-done-1',
+      'running-1',
+      'user-1',
+    ]);
   });
 });

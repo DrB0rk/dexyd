@@ -61,6 +61,10 @@ codex:
 plugins:
   enabled: true
   pluginDir: .dexyd/plugins
+
+cloudflare:
+  hostname: ""
+  tunnelName: dexyd
 ```
 
 ## `server`
@@ -97,6 +101,17 @@ server:
 ```
 
 Generate a new pairing QR after changing `publicBaseUrl`; the mobile app stores the URL from the QR.
+
+## `cloudflare`
+
+The TUI uses this section to remember named Cloudflare tunnel settings across updates and restarts. The bridge itself uses `server.publicBaseUrl` for pairing; the TUI keeps these fields in sync when it configures or starts a tunnel.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `hostname` | empty | Public hostname routed to the Dexyd tunnel, for example `dexyd.example.com`. |
+| `tunnelName` | `dexyd` | Named Cloudflare tunnel to create, reuse, or overwrite after confirmation. |
+
+If either value conflicts with an existing Cloudflare tunnel or DNS route, the TUI asks before overwriting.
 
 ## `storage`
 

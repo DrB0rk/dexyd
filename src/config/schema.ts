@@ -45,6 +45,11 @@ const pluginDefaults = {
   pluginDir: '.dexyd/plugins'
 } as const;
 
+const cloudflareDefaults = {
+  hostname: '',
+  tunnelName: 'dexyd'
+} as const;
+
 const publicBaseUrlSchema = z.preprocess(
   (value) => (typeof value === 'string' ? value.trim().replace(/\/+$/, '') : value),
   z
@@ -106,13 +111,19 @@ const pluginSchema = z.object({
   pluginDir: z.string().min(1).default(pluginDefaults.pluginDir)
 });
 
+const cloudflareSchema = z.object({
+  hostname: z.string().trim().default(cloudflareDefaults.hostname),
+  tunnelName: z.string().trim().min(1).default(cloudflareDefaults.tunnelName)
+});
+
 export const dexydConfigSchema = z.object({
   server: serverSchema.default(serverDefaults),
   storage: storageSchema.default(storageDefaults),
   auth: authSchema.default(authDefaults),
   stream: streamSchema.default(streamDefaults),
   codex: codexSchema.default(codexDefaults),
-  plugins: pluginSchema.default(pluginDefaults)
+  plugins: pluginSchema.default(pluginDefaults),
+  cloudflare: cloudflareSchema.default(cloudflareDefaults)
 });
 
 export type DexydConfig = z.infer<typeof dexydConfigSchema>;

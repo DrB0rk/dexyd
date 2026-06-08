@@ -593,11 +593,18 @@ export function mergeFetchedChatMessages(
   );
 }
 
-export function visibleChatMessages(messages: ChatMessage[]): ChatMessage[] {
+export function visibleChatMessages(
+  messages: ChatMessage[],
+  showVerboseToolCalls = false,
+): ChatMessage[] {
   return messages
     .map(normalizeChatMessageForDisplay)
     .filter((message): message is ChatMessage => message !== null)
-    .filter(message => message.status !== 'queued' && message.role !== 'tool')
+    .filter(
+      message =>
+        message.status !== 'queued' &&
+        (showVerboseToolCalls || message.role !== 'tool'),
+    )
     .slice()
     .reverse();
 }
@@ -756,7 +763,9 @@ function eventToScheduledMessage(
         ? candidate.repeatIntervalMs
         : null,
     repeatMaxRuns:
-      typeof candidate.repeatMaxRuns === 'number' ? candidate.repeatMaxRuns : null,
+      typeof candidate.repeatMaxRuns === 'number'
+        ? candidate.repeatMaxRuns
+        : null,
     runCount: typeof candidate.runCount === 'number' ? candidate.runCount : 0,
     status:
       candidate.status === 'completed' ||

@@ -74,7 +74,7 @@ Do not reuse old QR screenshots after changing connection mode.
 
 `server.publicBaseUrl` must be set to the tunnel HTTPS URL before pairing. Use the TUI named-tunnel flow and generate a fresh QR after the tunnel is started.
 
-If Cloudflare reports that the requested tunnel name or hostname is already taken, the TUI automatically tries numbered alternatives and saves the selected URL in `server.publicBaseUrl`. Check `.dexyd/cloudflared/tunnel.json` and `.dexyd/cloudflared/config.yml` to confirm which tunnel and hostname were selected.
+If Cloudflare reports that the requested tunnel name or hostname is already taken, the TUI asks whether to overwrite it. Choose **Overwrite** only when that tunnel/hostname should belong to this Dexyd install, or cancel and enter a different value in Advanced. Dexyd saves the selected tunnel name in `cloudflare.tunnelName`, the hostname in `cloudflare.hostname`, and the pairing URL in `server.publicBaseUrl`. Check `.dexyd/cloudflared/tunnel.json` and `.dexyd/cloudflared/config.yml` to confirm the active tunnel and hostname.
 
 ## App shows realtime closed / WebSocket 1006
 
