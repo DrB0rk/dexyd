@@ -315,6 +315,31 @@ print(target)
 PY
 }
 
+git_clean_preserving_runtime() {
+  local root="$1"
+  git -C "$root" reset --hard HEAD >&2 || return 1
+  git -C "$root" clean -ffdx -e .dexyd/ -e dexyd.config.yaml >&2 || return 1
+}
+
+git_sync_branch_or_tag() {
+  local root="$1" branch="$2"
+  git -C "$root" remote set-url origin "$REPO_URL" >&2 || return 1
+  git -C "$root" fetch --prune --tags origin >&2 || return 1
+  git_clean_preserving_runtime "$root" || return 1
+
+  if git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$root" checkout --force -B "$branch" "origin/$branch" >&2 || return 1
+    git -C "$root" reset --hard "origin/$branch" >&2 || return 1
+  elif git -C "$root" show-ref --verify --quiet "refs/tags/$branch"; then
+    git -C "$root" checkout --force --detach "$branch" >&2 || return 1
+    git -C "$root" reset --hard "$branch" >&2 || return 1
+  else
+    git -C "$root" checkout --force "$branch" >&2 || return 1
+    git -C "$root" pull --ff-only origin "$branch" >&2 || return 1
+  fi
+  git_clean_preserving_runtime "$root" || return 1
+}
+
 resolve_source() {
   safe_prepare_install_dir
   if [[ "$USE_CURRENT" == "1" ]]; then
@@ -326,21 +351,29 @@ resolve_source() {
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     bold "Updating Dexyd in $INSTALL_DIR" >&2
-    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
-    git -C "$INSTALL_DIR" fetch --prune --tags origin >&2
-    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-      git -C "$INSTALL_DIR" checkout -B "$BRANCH" "origin/$BRANCH" >&2
-    elif git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/tags/$BRANCH"; then
-      git -C "$INSTALL_DIR" checkout --detach "$BRANCH" >&2
-    else
-      git -C "$INSTALL_DIR" checkout "$BRANCH" >&2
-      git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" >&2
-    fi
+    git_sync_branch_or_tag "$INSTALL_DIR" "$BRANCH" || fail "Could not update $INSTALL_DIR to $BRANCH from $REPO_URL"
   else
     bold "Cloning Dexyd into $INSTALL_DIR" >&2
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" >&2
+    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" >&2 || fail "Could not clone $BRANCH from $REPO_URL into $INSTALL_DIR"
   fi
   echo "$INSTALL_DIR"
+}
+
+
+verify_requested_version() {
+  local root="$1" requested="$BRANCH" expected installed
+  case "$requested" in
+    v[0-9]*.[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  expected="${requested#v}"
+  installed="$(python3 - "$root/package.json" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text()).get('version', ''))
+PY
+)"
+  [[ "$installed" == "$expected" ]] || fail "Installed tree version is $installed, expected $expected for $requested. Refusing to build the wrong version."
 }
 
 validate_install_tree() {
@@ -584,8 +617,9 @@ main() {
   cleanup_old_install 0
 
   local root
-  root="$(resolve_source)"
+  root="$(resolve_source)" || fail "Could not prepare Dexyd source tree"
   validate_install_tree "$root"
+  verify_requested_version "$root"
   write_config "$root"
 
   bold "Installing bridge dependencies"
