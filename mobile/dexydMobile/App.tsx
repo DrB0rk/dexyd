@@ -307,8 +307,11 @@ export default function App() {
   const previousTabRef = useRef<TabKey>('sessions');
 
   const bridgeSettings = useBridgeSettings();
+  const hasConfiguredBridge = Boolean(bridgeSettings.activeBridge);
   const activeComputerScope =
-    bridgeSettings.activeBridgeId || bridgeSettings.bridgeUrl || 'unconfigured';
+    bridgeSettings.activeBridgeId ||
+    bridgeSettings.activeBridge?.bridgeUrl ||
+    'unconfigured';
   const projectStorageKeys = useMemo(
     () => ({
       added: storageScopeKey(ADDED_PROJECTS_KEY, activeComputerScope),
@@ -323,13 +326,13 @@ export default function App() {
   );
   const tokens = useMemo(
     () =>
-      auth.auth && bridgeSettings.bridgeUrl
+      auth.auth && hasConfiguredBridge && bridgeSettings.bridgeUrl
         ? {
             accessToken: auth.auth.accessToken,
             refreshToken: auth.auth.refreshToken,
           }
         : null,
-    [auth.auth, bridgeSettings.bridgeUrl],
+    [auth.auth, bridgeSettings.bridgeUrl, hasConfiguredBridge],
   );
   const stream = useBridgeStream(
     bridgeSettings.wsUrl,
@@ -596,10 +599,11 @@ export default function App() {
   }, [projectOptions, selectProject, selectedProjectPath]);
 
   const refreshHealth = useCallback(
-    async (targetBridgeUrl = bridgeSettings.bridgeUrl) => {
+    async (targetBridgeUrl = bridgeSettings.activeBridge?.bridgeUrl ?? '') => {
       const url = targetBridgeUrl.trim();
       if (!url) {
         setBridgeHealth('unconfigured');
+        setHealthLoading(false);
         return;
       }
       setHealthLoading(true);
@@ -615,7 +619,7 @@ export default function App() {
         setHealthLoading(false);
       }
     },
-    [bridgeSettings.bridgeUrl],
+    [bridgeSettings.activeBridge?.bridgeUrl],
   );
 
   useEffect(() => {
@@ -1012,12 +1016,15 @@ export default function App() {
     settingsLoading: bridgeSettings.loading,
     healthLoading,
     bridgeHealth,
+    hasConfiguredBridge,
     paired: Boolean(auth.auth),
     socketState: stream.socketState,
     errors: [
       auth.error,
       bridgeSettings.error,
-      stream.socketState === 'polling' || stream.socketState === 'open'
+      !hasConfiguredBridge ||
+      stream.socketState === 'polling' ||
+      stream.socketState === 'open'
         ? null
         : stream.socketError,
     ],
@@ -1409,22 +1416,25 @@ export default function App() {
   );
 }
 
-function getStatus(input: {
+export function getStatus(input: {
   authLoading: boolean;
   settingsLoading: boolean;
   healthLoading: boolean;
   bridgeHealth: string;
+  hasConfiguredBridge: boolean;
   paired: boolean;
   socketState: string;
   errors: Array<string | null>;
 }): { label: string; kind: StatusKind } {
   if (input.authLoading || input.settingsLoading || input.healthLoading)
     return { label: 'loading', kind: 'idle' };
+  if (!input.hasConfiguredBridge || input.bridgeHealth === 'unconfigured') {
+    return { label: 'setup', kind: 'idle' };
+  }
   if (
     input.errors.some(Boolean) ||
     !input.paired ||
-    input.bridgeHealth === 'down' ||
-    input.bridgeHealth === 'unconfigured'
+    input.bridgeHealth === 'down'
   ) {
     return { label: 'error', kind: 'error' };
   }
@@ -4818,7 +4828,7 @@ function SettingsScreen({
     const ok = await bridgeSettings.saveBridgeUrl(
       computerLabel.trim() || undefined,
     );
-    if (ok) await refreshHealth();
+    if (ok) await refreshHealth(bridgeSettings.draftBridgeUrl);
   };
 
   const resetBridge = async () => {
@@ -4826,15 +4836,17 @@ function SettingsScreen({
     if (ok) await refreshHealth();
   };
 
-  const connectionTone =
-    bridgeHealth === 'ready' || bridgeHealth === 'ok'
+  const connectionTone = !bridgeSettings.activeBridge
+    ? 'idle'
+    : bridgeHealth === 'ready' || bridgeHealth === 'ok'
       ? 'ok'
       : bridgeHealth === 'degraded' || bridgeHealth === 'checking'
         ? 'warn'
         : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
-  const realtimeTone =
-    socketState === 'open'
+  const realtimeTone = !bridgeSettings.activeBridge
+    ? 'idle'
+    : socketState === 'open'
       ? 'ok'
       : socketState === 'polling'
         ? 'warn'
@@ -4844,8 +4856,8 @@ function SettingsScreen({
   const errors = [
     bridgeSettings.error,
     auth.error,
-    devices.error,
-    socketError,
+    bridgeSettings.activeBridge ? devices.error : null,
+    bridgeSettings.activeBridge ? socketError : null,
   ].filter(Boolean) as string[];
 
   const settingsPanes: SettingsPane[] = [
@@ -4856,7 +4868,7 @@ function SettingsScreen({
       subtitle: 'Switch between paired computers.',
       detail:
         bridgeSettings.activeBridge?.label ||
-        bridgeSettings.bridgeUrl ||
+        bridgeSettings.activeBridge?.bridgeUrl ||
         'not configured',
       tone: connectionTone,
       attention: connectionTone === 'error' || connectionTone === 'warn',

@@ -1,16 +1,16 @@
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
-import App, { refreshCodexSessionsInBackground } from '../App';
+import App, { getStatus, refreshCodexSessionsInBackground } from '../App';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue(null),
   setItem: jest.fn().mockResolvedValue(undefined),
   removeItem: jest.fn().mockResolvedValue(undefined),
-  clear: jest.fn().mockResolvedValue(undefined)
+  clear: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/api/dexyd-client', () => ({
-  getHealth: jest.fn().mockResolvedValue({ status: 'ready' })
+  getHealth: jest.fn().mockResolvedValue({ status: 'ready' }),
 }));
 
 jest.mock('../src/hooks/use-auth', () => ({
@@ -21,8 +21,8 @@ jest.mock('../src/hooks/use-auth', () => ({
     pairFromUri: jest.fn(),
     refresh: jest.fn(),
     signOut: jest.fn(),
-    setError: jest.fn()
-  })
+    setError: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-bridge-settings', () => ({
@@ -40,8 +40,8 @@ jest.mock('../src/hooks/use-bridge-settings', () => ({
     switchBridge: jest.fn(),
     removeBridge: jest.fn(),
     setBridgeUrlFromPairing: jest.fn(),
-    setError: jest.fn()
-  })
+    setError: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-app-updater', () => ({
@@ -52,8 +52,8 @@ jest.mock('../src/hooks/use-app-updater', () => ({
     message: null,
     error: null,
     check: jest.fn().mockResolvedValue(null),
-    install: jest.fn().mockResolvedValue(false)
-  })
+    install: jest.fn().mockResolvedValue(false),
+  }),
 }));
 
 jest.mock('../src/hooks/use-sessions', () => ({
@@ -68,16 +68,16 @@ jest.mock('../src/hooks/use-sessions', () => ({
     setStatus: jest.fn(),
     cancel: jest.fn(),
     remove: jest.fn(),
-    clearCache: jest.fn()
-  })
+    clearCache: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-bridge-stream', () => ({
   useBridgeStream: () => ({
     socketState: 'open',
     lastEvent: null,
-    socketError: null
-  })
+    socketError: null,
+  }),
 }));
 
 jest.mock('../src/hooks/use-chat', () => ({
@@ -88,8 +88,8 @@ jest.mock('../src/hooks/use-chat', () => ({
     error: null,
     refresh: jest.fn(),
     send: jest.fn().mockResolvedValue(true),
-    setError: jest.fn()
-  })
+    setError: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-codex-auth', () => ({
@@ -99,8 +99,8 @@ jest.mock('../src/hooks/use-codex-auth', () => ({
     switching: null,
     error: null,
     refresh: jest.fn(),
-    switchAccount: jest.fn()
-  })
+    switchAccount: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-devices', () => ({
@@ -109,8 +109,8 @@ jest.mock('../src/hooks/use-devices', () => ({
     loading: false,
     error: null,
     refresh: jest.fn(),
-    revoke: jest.fn()
-  })
+    revoke: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-diff', () => ({
@@ -118,8 +118,8 @@ jest.mock('../src/hooks/use-diff', () => ({
     diff: null,
     loading: false,
     error: null,
-    refresh: jest.fn()
-  })
+    refresh: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-projects', () => ({
@@ -130,8 +130,8 @@ jest.mock('../src/hooks/use-projects', () => ({
     error: null,
     refresh: jest.fn(),
     browse: jest.fn(),
-    suggest: jest.fn()
-  })
+    suggest: jest.fn(),
+  }),
 }));
 
 jest.mock('../src/hooks/use-usage-status', () => ({
@@ -139,19 +139,19 @@ jest.mock('../src/hooks/use-usage-status', () => ({
     usage: null,
     loading: false,
     error: null,
-    refresh: jest.fn()
-  })
+    refresh: jest.fn(),
+  }),
 }));
 
 jest.mock('react-native-vision-camera', () => ({
   useCameraPermission: () => ({
     hasPermission: true,
-    requestPermission: jest.fn().mockResolvedValue(true)
-  })
+    requestPermission: jest.fn().mockResolvedValue(true),
+  }),
 }));
 
 jest.mock('react-native-vision-camera-barcode-scanner', () => ({
-  CodeScanner: 'CodeScanner'
+  CodeScanner: 'CodeScanner',
 }));
 
 test('renders correctly', async () => {
@@ -183,4 +183,34 @@ test('session refresh routes unauthenticated users to settings', async () => {
 
   expect(refresh).not.toHaveBeenCalled();
   expect(routeToSettings).toHaveBeenCalledTimes(1);
+});
+
+test('unconfigured bridge status is setup, not error', () => {
+  expect(
+    getStatus({
+      authLoading: false,
+      settingsLoading: false,
+      healthLoading: false,
+      bridgeHealth: 'unconfigured',
+      hasConfiguredBridge: false,
+      paired: false,
+      socketState: 'idle',
+      errors: [],
+    }),
+  ).toEqual({ label: 'setup', kind: 'idle' });
+});
+
+test('configured disconnected bridge status is still error', () => {
+  expect(
+    getStatus({
+      authLoading: false,
+      settingsLoading: false,
+      healthLoading: false,
+      bridgeHealth: 'down',
+      hasConfiguredBridge: true,
+      paired: true,
+      socketState: 'error',
+      errors: [],
+    }),
+  ).toEqual({ label: 'error', kind: 'error' });
 });
