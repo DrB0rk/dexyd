@@ -12,6 +12,8 @@ import { DexydChatService } from '../services/dexyd-chat-service.js';
 import { DiffService } from '../services/diff-service.js';
 import { EventService } from '../services/event-service.js';
 import { FileService } from '../services/file-service.js';
+import { OpenCodeChatService } from '../services/opencode-chat-service.js';
+import { OpenCodeSessionService } from '../services/opencode-session-service.js';
 import { PairingService } from '../services/pairing-service.js';
 import { ProjectService } from '../services/project-service.js';
 import { RuntimeState } from './runtime-state.js';
@@ -27,6 +29,8 @@ export type AppContext = ModuleContext & {
   codexChatService: CodexChatService;
   commandService: CommandService;
   codexSessionService: CodexSessionService;
+  opencodeSessionService: OpenCodeSessionService;
+  opencodeChatService: OpenCodeChatService;
   fileService: FileService;
   dexydChatService: DexydChatService;
   diffService: DiffService;
@@ -104,6 +108,19 @@ export function buildAppContext(config: DexydConfig): AppContext {
     logger
   );
   const dexydChatService = new DexydChatService(config.codex.workspaceRoot);
+  const opencodeSessionService = new OpenCodeSessionService(
+    config.opencode.dataDir,
+    logger
+  );
+  const opencodeChatService = new OpenCodeChatService(
+    eventService,
+    opencodeSessionService,
+    {
+      runtimePath: config.opencode.runtimePath,
+      permissionMode: config.opencode.permissionMode
+    },
+    logger
+  );
   const fileService = new FileService();
   const projectService = new ProjectService(config.codex.workspaceRoot);
 
@@ -120,6 +137,8 @@ export function buildAppContext(config: DexydConfig): AppContext {
     codexChatService,
     commandService,
     codexSessionService,
+    opencodeSessionService,
+    opencodeChatService,
     dexydChatService,
     fileService,
     diffService,

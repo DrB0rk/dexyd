@@ -412,10 +412,16 @@ export async function registerRoutes(
     const hidden = context.db.listHiddenSessionIds();
     const allLocalSessions = context.db.listSessions(5000);
     const allCodexSessions = context.codexSessionService.listSessions(5000);
-    const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions]
+    const allOpenCodeSessions = context.opencodeSessionService.listSessions(5000);
+    const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions, ...allOpenCodeSessions]
       .filter((session) => !hidden.has(session.id))
       .filter((session) => !resolvedWorkspacePath || sessionWithinWorkspace(session.workspacePath, resolvedWorkspacePath))
-      .map((session) => context.codexChatService.applyRuntimeStatus(session)))
+      .map((session) => {
+        if (session.source === 'opencode') {
+          return context.opencodeChatService.applyRuntimeStatus(session);
+        }
+        return context.codexChatService.applyRuntimeStatus(session);
+      }))
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
       .slice(0, limit);
     return { sessions };
@@ -429,10 +435,16 @@ export async function registerRoutes(
     const hiddenIds = new Set(hidden.map((session) => session.id));
     const visibleRecords = mergeSessions([
       ...context.db.listSessions(5000),
-      ...context.codexSessionService.listSessions(5000)
+      ...context.codexSessionService.listSessions(5000),
+      ...context.opencodeSessionService.listSessions(5000)
     ])
       .filter((session) => hiddenIds.has(session.id))
-      .map((session) => context.codexChatService.applyRuntimeStatus(session));
+      .map((session) => {
+        if (session.source === 'opencode') {
+          return context.opencodeChatService.applyRuntimeStatus(session);
+        }
+        return context.codexChatService.applyRuntimeStatus(session);
+      });
     const byId = new Map(visibleRecords.map((session) => [session.id, session]));
 
     return {
@@ -637,7 +649,7 @@ export async function registerRoutes(
     }
 
     return {
-      messages: context.codexChatService.getMessages(params.data.sessionId, query.data.limit)
+      messages: getChatService(context, session).getMessages(params.data.sessionId, query.data.limit)
     };
   });
 
@@ -838,18 +850,22 @@ export async function registerRoutes(
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
-    const usage = context.codexSessionService.getUsageStatus(params.data.sessionId);
-    if (usage.limits.status === 'error') {
-      return reply.code(429).send({
-        error: 'usage_limit_reached',
-        detail: usage.limits.detail || 'Codex usage limit has been reached. Wait for the limit to reset or switch account.',
-        usage
-      });
+    if (session.source !== 'opencode') {
+      const usage = context.codexSessionService.getUsageStatus(params.data.sessionId);
+      if (usage.limits.status === 'error') {
+        return reply.code(429).send({
+          error: 'usage_limit_reached',
+          detail: usage.limits.detail || 'Codex usage limit has been reached. Wait for the limit to reset or switch account.',
+          usage
+        });
+      }
     }
 
-    let result: ReturnType<typeof context.codexChatService.sendMessage>;
+    const chatService = getChatService(context, session);
+
+    let result: ReturnType<typeof chatService.sendMessage>;
     try {
-      result = context.codexChatService.sendMessage({
+      result = chatService.sendMessage({
         session,
         message: body.data.message,
         actorDeviceId: auth.sub
@@ -882,7 +898,7 @@ export async function registerRoutes(
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
-    const killed = context.codexChatService.cancelSession(session.id);
+    const killed = getChatService(context, session).cancelSession(session.id);
     context.db.addAuditLog({
       actor: auth.sub,
       action: 'session.cancelled',
@@ -965,6 +981,9 @@ export async function registerRoutes(
     }
 
     if (query.data.turnId) {
+      if (session.source === 'opencode') {
+        return { status: '', stat: '', diff: '', truncated: false };
+      }
       return (
         context.codexChatService.getTurnDiff(params.data.sessionId, query.data.turnId) ?? {
           status: '',
@@ -1049,7 +1068,10 @@ export async function registerRoutes(
       ...replay,
       snapshot: replay.replayExpired
         ? {
-            sessions: context.codexSessionService.listSessions(200),
+sessions: [
+              ...context.codexSessionService.listSessions(200),
+              ...context.opencodeSessionService.listSessions(200)
+            ],
             sequence: context.runtime.currentSequence()
           }
         : null
@@ -1087,7 +1109,10 @@ export async function registerRoutes(
       context.streamHub.sendJson(socket, {
         type: 'replay.expired',
         snapshot: {
-          sessions: context.codexSessionService.listSessions(200),
+          sessions: [
+              ...context.codexSessionService.listSessions(200),
+              ...context.opencodeSessionService.listSessions(200)
+            ],
           sequence: context.runtime.currentSequence()
         }
       });
@@ -1107,10 +1132,23 @@ export async function registerRoutes(
 }
 
 
+function getChatService(context: AppContext, session: SessionRecord) {
+  return session.source === 'opencode' ? context.opencodeChatService : context.codexChatService;
+}
+
 function getSession(context: AppContext, sessionId: string) {
-  const sessions = [context.db.getSession(sessionId), context.codexSessionService.getSession(sessionId)]
+  const sessions = [
+    context.db.getSession(sessionId),
+    context.codexSessionService.getSession(sessionId),
+    context.opencodeSessionService.getSession(sessionId)
+  ]
     .filter((session): session is SessionRecord => session !== null)
-    .map((session) => context.codexChatService.applyRuntimeStatus(session));
+    .map((session) => {
+      if (session.source === 'opencode') {
+        return context.opencodeChatService.applyRuntimeStatus(session);
+      }
+      return context.codexChatService.applyRuntimeStatus(session);
+    });
   return mergeSessions(sessions)[0] ?? null;
 }
 

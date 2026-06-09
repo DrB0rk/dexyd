@@ -44,6 +44,8 @@ export type ModuleContext = {
   authService?: import('../services/auth-service.js').AuthService;
   pairingService?: import('../services/pairing-service.js').PairingService;
   codexChatService?: import('../services/codex-chat-service.js').CodexChatService;
+  opencodeSessionService?: import('../services/opencode-session-service.js').OpenCodeSessionService;
+  opencodeChatService?: import('../services/opencode-chat-service.js').OpenCodeChatService;
   fileService?: import('../services/file-service.js').FileService;
   diffService?: import('../services/diff-service.js').DiffService;
 };
