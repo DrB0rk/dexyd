@@ -6,7 +6,7 @@ export const createSessionRequestSchema = z.object({
   workspacePath: z.string().trim().min(1).default('.'),
   profile: z.string().trim().min(1).max(120).default('default'),
   title: z.string().trim().max(160).optional(),
-  source: z.enum(['dexyd', 'codex']).default('dexyd').optional()
+  source: z.enum(['dexyd', 'codex', 'opencode']).default('dexyd').optional()
 });
 
 export const patchSessionRequestSchema = z.object({
@@ -21,7 +21,7 @@ export const sessionRecordSchema = z.object({
   workspacePath: z.string().min(1),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
-  source: z.enum(['dexyd', 'codex']).default('dexyd').optional(),
+  source: z.enum(['dexyd', 'codex', 'opencode']).default('dexyd').optional(),
   title: z.string().nullable().optional(),
   omx: z.boolean().optional(),
   usageContext: z.object({

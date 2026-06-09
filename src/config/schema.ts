@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 
 const serverDefaults = {
@@ -38,6 +39,13 @@ const codexDefaults = {
     command: 'omx',
     args: [] as string[]
   }
+} as const;
+
+const opencodeDefaults = {
+  enabled: true,
+  runtimePath: 'opencode',
+  dataDir: join(homedir(), '.local/share/opencode'),
+  permissionMode: 'bypass'
 } as const;
 
 const pluginDefaults = {
@@ -106,6 +114,13 @@ const codexSchema = z.object({
   harness: codexHarnessSchema.default(codexDefaults.harness)
 });
 
+const opencodeSchema = z.object({
+  enabled: z.boolean().default(opencodeDefaults.enabled),
+  runtimePath: z.string().min(1).default(opencodeDefaults.runtimePath),
+  dataDir: z.string().min(1).default(opencodeDefaults.dataDir),
+  permissionMode: z.enum(['inherit', 'read-only', 'workspace-write', 'danger-full-access', 'bypass']).default(opencodeDefaults.permissionMode)
+});
+
 const pluginSchema = z.object({
   enabled: z.boolean().default(pluginDefaults.enabled),
   pluginDir: z.string().min(1).default(pluginDefaults.pluginDir)
@@ -122,6 +137,7 @@ export const dexydConfigSchema = z.object({
   auth: authSchema.default(authDefaults),
   stream: streamSchema.default(streamDefaults),
   codex: codexSchema.default(codexDefaults),
+  opencode: opencodeSchema.default(opencodeDefaults),
   plugins: pluginSchema.default(pluginDefaults),
   cloudflare: cloudflareSchema.default(cloudflareDefaults)
 });
