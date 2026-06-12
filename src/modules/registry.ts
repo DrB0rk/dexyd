@@ -45,6 +45,50 @@ export function createCoreModules(): DexydModule[] {
     }
   });
 
+  const opencodeAdapter = createScaffoldModule(
+    'opencodeAdapter',
+    'opencode serve daemon lifecycle, HTTP API client, tool/skill/agent surfaces, and SSE event bridge',
+    {
+      onStart: (ctx) => {
+        const manager = ctx.opencodeServerManager;
+        const chat = ctx.opencodeChatService;
+        if (!manager || !chat) return;
+        if (!manager.isEnabled()) {
+          ctx.logger.info({}, 'opencode integration disabled in config; adapter running in passive mode');
+          return;
+        }
+        manager
+          .ensureReady()
+          .then(async (handle) => {
+            if (!handle) return;
+            ctx.logger.info({ baseUrl: handle.baseUrl }, 'opencode serve daemon is ready');
+            await chat.startEventStream();
+          })
+          .catch((error) => {
+            ctx.logger.warn(
+              { error: error instanceof Error ? error.message : 'unknown' },
+              'opencode serve daemon failed to start; continuing in passive mode'
+            );
+          });
+      },
+      onStop: (ctx) => {
+        ctx.opencodeChatService?.stopEventStream().catch(() => undefined);
+        ctx.opencodeServerManager?.dispose().catch(() => undefined);
+      },
+      healthDetails: (ctx) => {
+        const state = ctx.opencodeServerManager?.state;
+        if (!state) return {};
+        return {
+          status: state.status,
+          version: state.version,
+          error: state.error,
+          baseUrl: state.handle?.baseUrl ?? null,
+          pid: state.handle?.pid ?? null
+        };
+      }
+    }
+  );
+
   return [
     createScaffoldModule('auth', 'tokens, device identity, revocation and replay protection'),
     createScaffoldModule('pairing', 'qr payload generation and device trust establishment'),
@@ -58,6 +102,7 @@ export function createCoreModules(): DexydModule[] {
     createScaffoldModule('diffReview', 'patch review state, hunk approvals and revert controls'),
     createScaffoldModule('notification', 'notification routing and provider dispatch'),
     createScaffoldModule('plugin', 'plugin lifecycle, permission checks and isolation'),
-    createScaffoldModule('tui', 'terminal dashboard and local admin workflows')
+    createScaffoldModule('tui', 'terminal dashboard and local admin workflows'),
+    opencodeAdapter
   ];
 }

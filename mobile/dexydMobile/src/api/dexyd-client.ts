@@ -8,6 +8,17 @@ import {
   DiffSummary,
   FileListResponse,
   FileReadResponse,
+  OpenCodeAgentsResponse,
+  OpenCodeCommandsResponse,
+  OpenCodeCreateSessionInput,
+  OpenCodeCreateSessionResponse,
+  OpenCodeModelsResponse,
+  OpenCodePermissionReplyInput,
+  OpenCodeProvidersResponse,
+  OpenCodeQuestionReplyInput,
+  OpenCodeSkillsResponse,
+  OpenCodeStatusResponse,
+  OpenCodeToolsResponse,
   PairingCompleteResponse,
   PairingStartResponse,
   ProjectBrowseResponse,
@@ -648,7 +659,7 @@ export async function getDiff(
   baseUrl: string,
   sessionId: string,
   tokens: AuthTokens,
-  turnId?: string | null,
+  turnId?: string | null
 ): Promise<DiffSummary> {
   const suffix = turnId
     ? `/diff?turnId=${encodeURIComponent(turnId)}`
@@ -657,6 +668,229 @@ export async function getDiff(
     baseUrl,
     sessionPath(sessionId, suffix),
     undefined,
-    tokens,
+    tokens
+  );
+}
+
+export async function getOpenCodeStatus(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeStatusResponse> {
+  return fetchJson<OpenCodeStatusResponse>(
+    baseUrl,
+    '/opencode/status',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeAgents(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeAgentsResponse> {
+  return fetchJson<OpenCodeAgentsResponse>(
+    baseUrl,
+    '/opencode/agents',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeSkills(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeSkillsResponse> {
+  return fetchJson<OpenCodeSkillsResponse>(
+    baseUrl,
+    '/opencode/skills',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeTools(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeToolsResponse> {
+  return fetchJson<OpenCodeToolsResponse>(
+    baseUrl,
+    '/opencode/tools',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeCommands(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeCommandsResponse> {
+  return fetchJson<OpenCodeCommandsResponse>(
+    baseUrl,
+    '/opencode/commands',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeProviders(
+  baseUrl: string,
+  tokens: AuthTokens
+): Promise<OpenCodeProvidersResponse> {
+  return fetchJson<OpenCodeProvidersResponse>(
+    baseUrl,
+    '/opencode/providers',
+    undefined,
+    tokens
+  );
+}
+
+export async function getOpenCodeModels(
+  baseUrl: string,
+  tokens: AuthTokens,
+  provider?: string
+): Promise<OpenCodeModelsResponse> {
+  const suffix = provider ? `?provider=${encodeURIComponent(provider)}` : '';
+  return fetchJson<OpenCodeModelsResponse>(
+    baseUrl,
+    `/opencode/models${suffix}`,
+    undefined,
+    tokens
+  );
+}
+
+export async function createOpenCodeSession(
+  baseUrl: string,
+  tokens: AuthTokens,
+  input: OpenCodeCreateSessionInput
+): Promise<OpenCodeCreateSessionResponse> {
+  return fetchJson<OpenCodeCreateSessionResponse>(
+    baseUrl,
+    '/opencode/sessions',
+    {
+      method: 'POST',
+      body: JSON.stringify(input)
+    },
+    tokens
+  );
+}
+
+export async function deleteOpenCodeSession(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens
+): Promise<{ deleted: boolean }> {
+  return fetchJson<{ deleted: boolean }>(
+    baseUrl,
+    `/opencode/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+    tokens
+  );
+}
+
+export async function abortOpenCodeSession(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens
+): Promise<{ aborted: boolean; cancelled: boolean }> {
+  return fetchJson<{ aborted: boolean; cancelled: boolean }>(
+    baseUrl,
+    `/opencode/sessions/${encodeURIComponent(sessionId)}/abort`,
+    { method: 'POST' },
+    tokens
+  );
+}
+
+export async function summarizeOpenCodeSession(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens
+): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(
+    baseUrl,
+    `/opencode/sessions/${encodeURIComponent(sessionId)}/summarize`,
+    { method: 'POST' },
+    tokens
+  );
+}
+
+export async function replyOpenCodePermission(
+  baseUrl: string,
+  requestId: string,
+  tokens: AuthTokens,
+  input: OpenCodePermissionReplyInput
+): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(
+    baseUrl,
+    `/opencode/permissions/${encodeURIComponent(requestId)}/reply`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input)
+    },
+    tokens
+  );
+}
+
+export async function replyOpenCodeQuestion(
+  baseUrl: string,
+  requestId: string,
+  tokens: AuthTokens,
+  input: OpenCodeQuestionReplyInput
+): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(
+    baseUrl,
+    `/opencode/questions/${encodeURIComponent(requestId)}/reply`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input)
+    },
+    tokens
+  );
+}
+
+export async function rejectOpenCodeQuestion(
+  baseUrl: string,
+  requestId: string,
+  tokens: AuthTokens
+): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(
+    baseUrl,
+    `/opencode/questions/${encodeURIComponent(requestId)}/reject`,
+    { method: 'POST' },
+    tokens
+  );
+}
+
+export async function runOpenCodeShell(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens,
+  command: string
+): Promise<{ callID: string; output: string; exitCode: number; durationMs: number }> {
+  return fetchJson<{ callID: string; output: string; exitCode: number; durationMs: number }>(
+    baseUrl,
+    `/opencode/sessions/${encodeURIComponent(sessionId)}/shell`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ command })
+    },
+    tokens
+  );
+}
+
+export async function runOpenCodeCommand(
+  baseUrl: string,
+  sessionId: string,
+  tokens: AuthTokens,
+  command: string,
+  args: string[] = []
+): Promise<{ callID: string; output: string }> {
+  return fetchJson<{ callID: string; output: string }>(
+    baseUrl,
+    `/opencode/sessions/${encodeURIComponent(sessionId)}/command`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ command, arguments: args })
+    },
+    tokens
   );
 }

@@ -127,6 +127,402 @@ export async function registerRoutes(
     };
   });
 
+  app.get('/opencode/status', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+
+    const state = context.opencodeServerManager.state;
+    return {
+      opencode: {
+        enabled: context.opencodeServerManager.isEnabled(),
+        status: state.status,
+        error: state.error,
+        version: state.version,
+        handle: state.handle,
+        checkedAt: state.checkedAt,
+        installHint: context.opencodeServerManager.resolveInstallHint(),
+        defaultAgent: context.opencodeSessionService.defaultAgent,
+        defaultModel: context.opencodeSessionService.defaultModel,
+        pendingTools: context.opencodeChatService.pendingTools.length,
+        pendingPermissions: context.opencodeChatService.pendingPermissions.length,
+        pendingQuestions: context.opencodeChatService.pendingQuestions.length
+      }
+    };
+  });
+
+  app.get('/opencode/agents', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const agents = await context.opencodeSessionService.listAgents();
+    return { agents, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/skills', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const skills = await context.opencodeSessionService.listSkills();
+    return { skills, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/tools', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const tools = await context.opencodeSessionService.listTools();
+    return { tools, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/commands', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const commands = await context.opencodeSessionService.listCommands();
+    return { commands, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/providers', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const providers = await context.opencodeSessionService.listProviders();
+    return { providers, updatedAt: new Date().toISOString() };
+  });
+
+  const opencodeModelsQuerySchema = z.object({
+    provider: z.string().trim().min(1).max(120).optional()
+  });
+  app.get('/opencode/models', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const parsed = opencodeModelsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+    }
+    const models = await context.opencodeSessionService.listModels(parsed.data.provider);
+    return { models, provider: parsed.data.provider ?? null, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/permissions', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const remote = await context.opencodeSessionService.listPermissions();
+    const local = context.opencodeChatService.pendingPermissions;
+    return {
+      permissions: local.length > 0 ? local : remote,
+      updatedAt: new Date().toISOString()
+    };
+  });
+
+  const opencodePermissionReplySchema = z.object({
+    decision: z.enum(['allow', 'deny', 'always'])
+  });
+  app.post('/opencode/permissions/:requestId/reply', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = z.object({ requestId: z.string().trim().min(1).max(200) }).safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_request_id', issues: params.error.issues });
+    }
+    const parsed = opencodePermissionReplySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+    try {
+      await context.opencodeSessionService.replyPermission(params.data.requestId, parsed.data.decision);
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.permission.replied',
+        target: params.data.requestId,
+        metadata: { decision: parsed.data.decision }
+      });
+      return { ok: true };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_permission_reply_failed' });
+    }
+  });
+
+  app.get('/opencode/questions', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const remote = await context.opencodeSessionService.listQuestions();
+    const local = context.opencodeChatService.pendingQuestions;
+    return {
+      questions: local.length > 0 ? local : remote,
+      updatedAt: new Date().toISOString()
+    };
+  });
+
+  const opencodeQuestionReplySchema = z.object({
+    answers: z.array(z.union([z.string(), z.object({ label: z.string().min(1) })])).min(1).max(20)
+  });
+  app.post('/opencode/questions/:requestId/reply', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = z.object({ requestId: z.string().trim().min(1).max(200) }).safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_request_id', issues: params.error.issues });
+    }
+    const parsed = opencodeQuestionReplySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+    try {
+      await context.opencodeSessionService.replyQuestion(params.data.requestId, parsed.data.answers);
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.question.replied',
+        target: params.data.requestId
+      });
+      return { ok: true };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_question_reply_failed' });
+    }
+  });
+
+  app.post('/opencode/questions/:requestId/reject', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = z.object({ requestId: z.string().trim().min(1).max(200) }).safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_request_id', issues: params.error.issues });
+    }
+    try {
+      await context.opencodeSessionService.rejectQuestion(params.data.requestId);
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.question.rejected',
+        target: params.data.requestId
+      });
+      return { ok: true };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_question_reject_failed' });
+    }
+  });
+
+  const opencodeCreateSessionSchema = z.object({
+    workspacePath: z.string().trim().min(1).max(2000),
+    title: z.string().trim().max(200).optional(),
+    agent: z.string().trim().min(1).max(120).optional(),
+    modelProviderID: z.string().trim().min(1).max(120).optional(),
+    modelID: z.string().trim().min(1).max(200).optional()
+  });
+  app.post('/opencode/sessions', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const parsed = opencodeCreateSessionSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+    try {
+      let workspacePath: string;
+      try {
+        workspacePath = context.projectService.resolveWorkspace(parsed.data.workspacePath);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'invalid_workspace' });
+      }
+      const session = await context.opencodeSessionService.createSession({
+        workspacePath,
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+        ...(parsed.data.modelProviderID ? { modelProviderID: parsed.data.modelProviderID } : {}),
+        ...(parsed.data.modelID ? { modelID: parsed.data.modelID } : {})
+      });
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.session.created',
+        target: session.id,
+        metadata: { agent: session.agent, model: session.model }
+      });
+      return reply.code(201).send({ session });
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_create_failed' });
+    }
+  });
+
+  app.delete('/opencode/sessions/:sessionId', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const deleted = await context.opencodeSessionService.deleteSession(params.data.sessionId);
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'opencode.session.deleted',
+      target: params.data.sessionId
+    });
+    return { deleted };
+  });
+
+  app.get('/opencode/sessions/:sessionId/diff', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const diff = await context.opencodeApiClient.getSessionDiff(params.data.sessionId);
+    return { diff, updatedAt: new Date().toISOString() };
+  });
+
+  app.get('/opencode/sessions/:sessionId/todos', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const todos = await context.opencodeApiClient.listTodos(params.data.sessionId);
+    return { todos, updatedAt: new Date().toISOString() };
+  });
+
+  const opencodeShellRequestSchema = z.object({
+    command: z.string().trim().min(1).max(2000)
+  });
+  app.post('/opencode/sessions/:sessionId/shell', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const parsed = opencodeShellRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+    try {
+      const result = await context.opencodeApiClient.runShell(params.data.sessionId, { command: parsed.data.command });
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.shell.executed',
+        target: params.data.sessionId,
+        metadata: { command: parsed.data.command.slice(0, 200), exitCode: result.exitCode }
+      });
+      return result;
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_shell_failed' });
+    }
+  });
+
+  const opencodeCommandRequestSchema = z.object({
+    command: z.string().trim().min(1).max(120),
+    arguments: z.array(z.string().max(2000)).max(20).optional()
+  });
+  app.post('/opencode/sessions/:sessionId/command', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const parsed = opencodeCommandRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+    try {
+      const commandInput: { command: string; arguments?: string[] } = { command: parsed.data.command };
+      if (parsed.data.arguments) commandInput.arguments = parsed.data.arguments;
+      const result = await context.opencodeApiClient.sendCommand(params.data.sessionId, commandInput);
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.command.executed',
+        target: params.data.sessionId,
+        metadata: { command: parsed.data.command }
+      });
+      return result;
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_command_failed' });
+    }
+  });
+
+  app.post('/opencode/sessions/:sessionId/abort', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const aborted = await context.opencodeSessionService.abortSession(params.data.sessionId);
+    const cancelled = context.opencodeChatService.cancelSession(params.data.sessionId);
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'opencode.session.aborted',
+      target: params.data.sessionId
+    });
+    return { aborted, cancelled };
+  });
+
+  app.post('/opencode/sessions/:sessionId/summarize', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    try {
+      const result = await context.opencodeApiClient.summarize(params.data.sessionId);
+      context.db.addAuditLog({
+        actor: auth.sub,
+        action: 'opencode.session.summarized',
+        target: params.data.sessionId
+      });
+      return result;
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_summarize_failed' });
+    }
+  });
+
+  app.post('/opencode/sessions/:sessionId/compact', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const result = await context.opencodeApiClient.compactSession(params.data.sessionId);
+    context.db.addAuditLog({
+      actor: auth.sub,
+      action: 'opencode.session.compacted',
+      target: params.data.sessionId
+    });
+    return result;
+  });
+
+  app.post('/opencode/sessions/:sessionId/fork', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    try {
+      const session = await context.opencodeApiClient.forkSession(params.data.sessionId);
+      return reply.code(201).send({ session });
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : 'opencode_fork_failed' });
+    }
+  });
+
+  app.post('/opencode/sessions/:sessionId/share', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const result = await context.opencodeApiClient.shareSession(params.data.sessionId);
+    return result;
+  });
+
+  app.delete('/opencode/sessions/:sessionId/share', async (request, reply) => {
+    const auth = requireAuth(request.headers.authorization, context, reply);
+    if (!auth) return;
+    const params = sessionIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
+    }
+    const result = await context.opencodeApiClient.unshareSession(params.data.sessionId);
+    return result;
+  });
+
   app.post('/pairing/start', async (request, reply) => {
     if (!isLocalOrPrivateClient(request.ip)) {
       context.logger.warn({ remoteAddress: request.ip }, 'rejected non-local pairing start request');
@@ -412,7 +808,7 @@ export async function registerRoutes(
     const hidden = context.db.listHiddenSessionIds();
     const allLocalSessions = context.db.listSessions(5000);
     const allCodexSessions = context.codexSessionService.listSessions(5000);
-    const allOpenCodeSessions = context.opencodeSessionService.listSessions(5000);
+    const allOpenCodeSessions = await context.opencodeSessionService.listSessions(5000);
     const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions, ...allOpenCodeSessions]
       .filter((session) => !hidden.has(session.id))
       .filter((session) => !resolvedWorkspacePath || sessionWithinWorkspace(session.workspacePath, resolvedWorkspacePath))
@@ -433,10 +829,11 @@ export async function registerRoutes(
 
     const hidden = context.db.listHiddenSessions();
     const hiddenIds = new Set(hidden.map((session) => session.id));
+    const allOpenCodeSessionsForHidden = await context.opencodeSessionService.listSessions(5000);
     const visibleRecords = mergeSessions([
       ...context.db.listSessions(5000),
       ...context.codexSessionService.listSessions(5000),
-      ...context.opencodeSessionService.listSessions(5000)
+      ...allOpenCodeSessionsForHidden
     ])
       .filter((session) => hiddenIds.has(session.id))
       .map((session) => {
@@ -465,7 +862,7 @@ export async function registerRoutes(
     }
 
     const restored = context.db.restoreSession(params.data.sessionId);
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     context.eventService.emit({
       eventType: 'session.restored',
       source: 'session',
@@ -489,7 +886,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -544,7 +941,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       context.db.hideSession(params.data.sessionId);
       return { deleted: false, hidden: true };
@@ -613,7 +1010,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -643,13 +1040,13 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
     return {
-      messages: getChatService(context, session).getMessages(params.data.sessionId, query.data.limit)
+      messages: await getChatService(context, session).getMessages(params.data.sessionId, query.data.limit)
     };
   });
 
@@ -662,7 +1059,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -684,7 +1081,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -717,7 +1114,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_queue_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -748,7 +1145,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -770,7 +1167,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -808,7 +1205,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_schedule_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -845,7 +1242,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_request', issues: body.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -893,7 +1290,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -923,7 +1320,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -949,7 +1346,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -975,7 +1372,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
     }
 
-    const session = getSession(context, params.data.sessionId);
+    const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
@@ -1014,7 +1411,7 @@ export async function registerRoutes(
     }
 
     if (body.data.sessionId) {
-      const session = getSession(context, body.data.sessionId);
+      const session = await getSession(context, body.data.sessionId);
       if (!session) {
         return reply.code(404).send({ error: 'session_not_found' });
       }
@@ -1064,13 +1461,14 @@ export async function registerRoutes(
       ...(parsed.data.sessionId ? { sessionId: parsed.data.sessionId } : {})
     });
 
+    const opencodeSnapshot = replay.replayExpired ? await context.opencodeSessionService.listSessions(200) : [];
     return {
       ...replay,
       snapshot: replay.replayExpired
         ? {
 sessions: [
               ...context.codexSessionService.listSessions(200),
-              ...context.opencodeSessionService.listSessions(200)
+              ...opencodeSnapshot
             ],
             sequence: context.runtime.currentSequence()
           }
@@ -1097,7 +1495,7 @@ sessions: [
     context.streamHub.registerConnection(socket);
   });
 
-  context.streamHub.on('replayRequested', ({ socket, request }) => {
+  context.streamHub.on('replayRequested', async ({ socket, request }) => {
     context.logger.info(request, 'websocket replay request received');
 
     const replay = context.eventService.replay({
@@ -1106,12 +1504,13 @@ sessions: [
     });
 
     if (replay.replayExpired) {
+      const opencodeReplaySessions = await context.opencodeSessionService.listSessions(200);
       context.streamHub.sendJson(socket, {
         type: 'replay.expired',
         snapshot: {
           sessions: [
               ...context.codexSessionService.listSessions(200),
-              ...context.opencodeSessionService.listSessions(200)
+              ...opencodeReplaySessions
             ],
           sequence: context.runtime.currentSequence()
         }
@@ -1136,20 +1535,23 @@ function getChatService(context: AppContext, session: SessionRecord) {
   return session.source === 'opencode' ? context.opencodeChatService : context.codexChatService;
 }
 
-function getSession(context: AppContext, sessionId: string) {
-  const sessions = [
-    context.db.getSession(sessionId),
-    context.codexSessionService.getSession(sessionId),
-    context.opencodeSessionService.getSession(sessionId)
-  ]
-    .filter((session): session is SessionRecord => session !== null)
-    .map((session) => {
+async function getSession(context: AppContext, sessionId: string): Promise<SessionRecord | null> {
+  const localSession = context.db.getSession(sessionId);
+  const codexSession = context.codexSessionService.getSession(sessionId);
+  const opencodeSession = await context.opencodeSessionService.getSession(sessionId);
+  const sessions: SessionRecord[] = [];
+  if (localSession) sessions.push(localSession);
+  if (codexSession) sessions.push(codexSession);
+  if (opencodeSession) sessions.push(opencodeSession);
+  const merged = mergeSessions(
+    sessions.map((session) => {
       if (session.source === 'opencode') {
         return context.opencodeChatService.applyRuntimeStatus(session);
       }
       return context.codexChatService.applyRuntimeStatus(session);
-    });
-  return mergeSessions(sessions)[0] ?? null;
+    })
+  );
+  return merged[0] ?? null;
 }
 
 function sessionWithinWorkspace(sessionPath: string, workspacePath: string): boolean {

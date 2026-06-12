@@ -13,9 +13,16 @@ export type DexydSession = {
   workspacePath: string;
   createdAt: string;
   updatedAt: string;
-  source?: 'dexyd' | 'codex';
+  source?: 'dexyd' | 'codex' | 'opencode';
   title?: string;
   omx?: boolean;
+  agent?: string;
+  model?: string | null;
+  tokenUsage?: {
+    input: number | null;
+    output: number | null;
+    total: number | null;
+  };
   usageContext?: {
     usedTokens: number | null;
     windowTokens: number | null;

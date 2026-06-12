@@ -12,7 +12,9 @@ import { DexydChatService } from '../services/dexyd-chat-service.js';
 import { DiffService } from '../services/diff-service.js';
 import { EventService } from '../services/event-service.js';
 import { FileService } from '../services/file-service.js';
+import { OpenCodeApiClient } from '../services/opencode-api-client.js';
 import { OpenCodeChatService } from '../services/opencode-chat-service.js';
+import { OpenCodeServerManager } from '../services/opencode-server-manager.js';
 import { OpenCodeSessionService } from '../services/opencode-session-service.js';
 import { PairingService } from '../services/pairing-service.js';
 import { ProjectService } from '../services/project-service.js';
@@ -29,6 +31,8 @@ export type AppContext = ModuleContext & {
   codexChatService: CodexChatService;
   commandService: CommandService;
   codexSessionService: CodexSessionService;
+  opencodeServerManager: OpenCodeServerManager;
+  opencodeApiClient: OpenCodeApiClient;
   opencodeSessionService: OpenCodeSessionService;
   opencodeChatService: OpenCodeChatService;
   fileService: FileService;
@@ -108,19 +112,59 @@ export function buildAppContext(config: DexydConfig): AppContext {
     logger
   );
   const dexydChatService = new DexydChatService(config.codex.workspaceRoot);
-  const opencodeSessionService = new OpenCodeSessionService(
-    config.opencode.dataDir,
-    logger
-  );
-  const opencodeChatService = new OpenCodeChatService(
-    eventService,
-    opencodeSessionService,
+
+  const opencodeServerManager = new OpenCodeServerManager(
     {
+      enabled: config.opencode.enabled,
       runtimePath: config.opencode.runtimePath,
-      permissionMode: config.opencode.permissionMode
+      host: config.opencode.server.host,
+      port: config.opencode.server.port,
+      startTimeoutMs: config.opencode.server.startTimeoutMs,
+      healthTimeoutMs: config.opencode.server.healthTimeoutMs,
+      ...(config.opencode.server.password ? { password: config.opencode.server.password } : {}),
+      cors: config.opencode.server.cors,
+      mdns: config.opencode.server.mdns,
+      mdnsDomain: config.opencode.server.mdnsDomain,
+      extraArgs: config.opencode.server.extraArgs
     },
     logger
   );
+
+  const opencodeApiClient = new OpenCodeApiClient(
+    {
+      baseUrl: `http://${config.opencode.server.host}:${config.opencode.server.port}`,
+      ...(config.opencode.server.password ? { password: config.opencode.server.password } : {}),
+      timeoutMs: 30_000,
+      retries: 2
+    },
+    logger
+  );
+
+  const opencodeSessionService = new OpenCodeSessionService({
+    dataDir: config.opencode.dataDir,
+    apiClient: opencodeApiClient,
+    serverManager: opencodeServerManager,
+    defaultAgent: config.opencode.defaultAgent,
+    defaultModel: config.opencode.defaultModel,
+    logger
+  });
+
+  const opencodeChatService = new OpenCodeChatService(
+    eventService,
+    opencodeSessionService,
+    opencodeApiClient,
+    {
+      runtimePath: config.opencode.runtimePath,
+      permissionMode: config.opencode.permissionMode,
+      defaultAgent: config.opencode.defaultAgent,
+      defaultModel: config.opencode.defaultModel,
+      eventStreamEnabled: config.opencode.eventStreamEnabled,
+      streamReconnectMs: config.opencode.streamReconnectMs,
+      streamIdleTimeoutMs: config.opencode.streamIdleTimeoutMs
+    },
+    logger
+  );
+
   const fileService = new FileService();
   const projectService = new ProjectService(config.codex.workspaceRoot);
 
@@ -137,6 +181,8 @@ export function buildAppContext(config: DexydConfig): AppContext {
     codexChatService,
     commandService,
     codexSessionService,
+    opencodeServerManager,
+    opencodeApiClient,
     opencodeSessionService,
     opencodeChatService,
     dexydChatService,

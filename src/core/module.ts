@@ -13,7 +13,8 @@ export const MODULE_NAMES = [
   'diffReview',
   'notification',
   'plugin',
-  'tui'
+  'tui',
+  'opencodeAdapter'
 ] as const;
 
 export type ModuleName = (typeof MODULE_NAMES)[number];
@@ -46,6 +47,7 @@ export type ModuleContext = {
   codexChatService?: import('../services/codex-chat-service.js').CodexChatService;
   opencodeSessionService?: import('../services/opencode-session-service.js').OpenCodeSessionService;
   opencodeChatService?: import('../services/opencode-chat-service.js').OpenCodeChatService;
+  opencodeServerManager?: import('../services/opencode-server-manager.js').OpenCodeServerManager;
   fileService?: import('../services/file-service.js').FileService;
   diffService?: import('../services/diff-service.js').DiffService;
 };

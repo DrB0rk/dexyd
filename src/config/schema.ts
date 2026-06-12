@@ -45,7 +45,24 @@ const opencodeDefaults = {
   enabled: true,
   runtimePath: 'opencode',
   dataDir: join(homedir(), '.local/share/opencode'),
-  permissionMode: 'bypass'
+  permissionMode: 'bypass',
+  server: {
+    autoStart: true,
+    host: '127.0.0.1',
+    port: 4243,
+    startTimeoutMs: 15_000,
+    healthTimeoutMs: 4_000,
+    password: '',
+    cors: [] as string[],
+    mdns: false,
+    mdnsDomain: 'opencode.local',
+    extraArgs: [] as string[]
+  },
+  defaultAgent: 'build',
+  defaultModel: '',
+  eventStreamEnabled: true,
+  streamReconnectMs: 2_000,
+  streamIdleTimeoutMs: 0
 } as const;
 
 const pluginDefaults = {
@@ -114,11 +131,30 @@ const codexSchema = z.object({
   harness: codexHarnessSchema.default(codexDefaults.harness)
 });
 
+const opencodeServerSchema = z.object({
+  autoStart: z.boolean().default(opencodeDefaults.server.autoStart),
+  host: z.string().trim().min(1).default(opencodeDefaults.server.host),
+  port: z.number().int().min(1).max(65535).default(opencodeDefaults.server.port),
+  startTimeoutMs: z.number().int().min(1_000).max(120_000).default(opencodeDefaults.server.startTimeoutMs),
+  healthTimeoutMs: z.number().int().min(500).max(30_000).default(opencodeDefaults.server.healthTimeoutMs),
+  password: z.string().default(opencodeDefaults.server.password),
+  cors: z.array(z.string().trim().min(1).max(2000)).max(64).default(opencodeDefaults.server.cors),
+  mdns: z.boolean().default(opencodeDefaults.server.mdns),
+  mdnsDomain: z.string().trim().min(1).max(120).default(opencodeDefaults.server.mdnsDomain),
+  extraArgs: z.array(z.string().refine((value) => !value.includes('\0'), 'extraArgs cannot contain NUL bytes')).max(40).default(opencodeDefaults.server.extraArgs)
+});
+
 const opencodeSchema = z.object({
   enabled: z.boolean().default(opencodeDefaults.enabled),
   runtimePath: z.string().min(1).default(opencodeDefaults.runtimePath),
   dataDir: z.string().min(1).default(opencodeDefaults.dataDir),
-  permissionMode: z.enum(['inherit', 'read-only', 'workspace-write', 'danger-full-access', 'bypass']).default(opencodeDefaults.permissionMode)
+  permissionMode: z.enum(['inherit', 'read-only', 'workspace-write', 'danger-full-access', 'bypass']).default(opencodeDefaults.permissionMode),
+  server: opencodeServerSchema.default(opencodeDefaults.server),
+  defaultAgent: z.string().trim().min(1).max(120).default(opencodeDefaults.defaultAgent),
+  defaultModel: z.string().trim().max(240).default(opencodeDefaults.defaultModel),
+  eventStreamEnabled: z.boolean().default(opencodeDefaults.eventStreamEnabled),
+  streamReconnectMs: z.number().int().min(250).max(60_000).default(opencodeDefaults.streamReconnectMs),
+  streamIdleTimeoutMs: z.number().int().min(0).max(3_600_000).default(opencodeDefaults.streamIdleTimeoutMs)
 });
 
 const pluginSchema = z.object({

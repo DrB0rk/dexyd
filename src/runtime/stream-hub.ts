@@ -46,7 +46,7 @@ export class StreamHub {
     });
   }
 
-  on(eventName: 'replayRequested', listener: (event: ReplayRequestEvent) => void): void {
+  on(eventName: 'replayRequested', listener: (event: ReplayRequestEvent) => void | Promise<void>): void {
     this.#events.on(eventName, listener);
   }
 

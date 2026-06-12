@@ -1,6 +1,6 @@
 {
   "name": "dexyd",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "description": "dexyd bridge foundation",
   "type": "module",
   "private": true,

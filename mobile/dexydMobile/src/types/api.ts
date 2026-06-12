@@ -156,3 +156,146 @@ export type CommandsResponse = {
   sessionId: string | null;
   updatedAt: string;
 };
+
+export type OpenCodeAgent = {
+  name: string;
+  description?: string;
+  mode?: 'primary' | 'subagent' | 'all';
+  model?: { providerID?: string; modelID?: string } | null;
+};
+
+export type OpenCodeSkill = {
+  name: string;
+  description?: string;
+  location?: string;
+};
+
+export type OpenCodeTool = {
+  id: string;
+  description?: string;
+  category?: string;
+};
+
+export type OpenCodeCommand = {
+  name: string;
+  description?: string;
+  template?: string;
+  agent?: string;
+};
+
+export type OpenCodeProvider = {
+  id: string;
+  name?: string;
+  source?: string;
+};
+
+export type OpenCodeModel = {
+  id: string;
+  name?: string;
+  providerID?: string;
+  family?: string;
+};
+
+export type OpenCodePendingPermission = {
+  sessionId: string;
+  requestID: string;
+  tool: string | null;
+  message: string;
+  patterns: string[];
+  metadata: Record<string, unknown>;
+  receivedAt: number;
+};
+
+export type OpenCodePendingQuestion = {
+  sessionId: string;
+  requestID: string;
+  questions: Array<{ question: string; header?: string; options: Array<{ label: string; description?: string }> }>;
+  receivedAt: number;
+};
+
+export type OpenCodeStatus = {
+  enabled: boolean;
+  status: 'disabled' | 'starting' | 'ready' | 'degraded' | 'failed' | 'stopped';
+  error: string | null;
+  version: string | null;
+  handle: {
+    baseUrl: string;
+    host: string;
+    port: number;
+    pid: number | null;
+    startedAt: string;
+  } | null;
+  checkedAt: string;
+  installHint: string | null;
+  defaultAgent: string;
+  defaultModel: string;
+  pendingTools: number;
+  pendingPermissions: number;
+  pendingQuestions: number;
+};
+
+export type OpenCodeStatusResponse = {
+  opencode: OpenCodeStatus;
+};
+
+export type OpenCodeAgentsResponse = {
+  agents: OpenCodeAgent[];
+  updatedAt: string;
+};
+
+export type OpenCodeSkillsResponse = {
+  skills: OpenCodeSkill[];
+  updatedAt: string;
+};
+
+export type OpenCodeToolsResponse = {
+  tools: OpenCodeTool[];
+  updatedAt: string;
+};
+
+export type OpenCodeCommandsResponse = {
+  commands: OpenCodeCommand[];
+  updatedAt: string;
+};
+
+export type OpenCodeProvidersResponse = {
+  providers: OpenCodeProvider[];
+  updatedAt: string;
+};
+
+export type OpenCodeModelsResponse = {
+  models: OpenCodeModel[];
+  provider: string | null;
+  updatedAt: string;
+};
+
+export type OpenCodeCreateSessionInput = {
+  workspacePath: string;
+  title?: string;
+  agent?: string;
+  modelProviderID?: string;
+  modelID?: string;
+};
+
+export type OpenCodeCreateSessionResponse = {
+  session: {
+    id: string;
+    status: string;
+    workspacePath: string;
+    createdAt: string;
+    updatedAt: string;
+    source: 'opencode';
+    title?: string;
+    model?: string | null;
+    agent?: string | null;
+    tokenUsage?: { input: number | null; output: number | null; total: number | null } | null;
+  };
+};
+
+export type OpenCodePermissionReplyInput = {
+  decision: 'allow' | 'deny' | 'always';
+};
+
+export type OpenCodeQuestionReplyInput = {
+  answers: Array<string | { label: string }>;
+};
