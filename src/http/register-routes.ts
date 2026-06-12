@@ -1,4 +1,5 @@
 import websocket from '@fastify/websocket';
+import { advertisedBridgeBaseUrl } from '../config/bridge-url.js';
 import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { ModuleManager } from '../core/module-manager.js';
@@ -90,12 +91,36 @@ export async function registerRoutes(
         ? 'ready'
         : 'degraded';
 
+    const bridgeBaseUrl = advertisedBridgeBaseUrl({
+      host: context.config.server.host,
+      port: context.config.server.port,
+      publicBaseUrl: context.config.server.publicBaseUrl
+    });
+    const cloudflareHostname = context.config.cloudflare.hostname.trim();
+
     return {
       status: overallStatus,
       version: DEXYD_VERSION,
       timestamp: new Date().toISOString(),
       database: databaseHealth,
-      modules: moduleHealth
+      modules: moduleHealth,
+      bridge: {
+        host: context.config.server.host,
+        port: context.config.server.port,
+        publicBaseUrl: context.config.server.publicBaseUrl || null,
+        advertisedBaseUrl: bridgeBaseUrl
+      },
+      cloudflare: {
+        hostname: cloudflareHostname || null,
+        tunnelName: context.config.cloudflare.tunnelName,
+        publicUrl: cloudflareHostname ? `https://${cloudflareHostname}` : null,
+        configured: Boolean(cloudflareHostname)
+      },
+      assistant: {
+        codexHarnessMode: context.config.codex.harness.mode,
+        opencodeEnabled: context.opencodeServerManager.isEnabled(),
+        opencodeStatus: context.opencodeServerManager.state.status
+      }
     };
   });
 

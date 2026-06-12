@@ -51,6 +51,79 @@ function createDb(tempDir: string): Database.Database {
   return db;
 }
 
+
+function createOpenCode117Db(tempDir: string): Database.Database {
+  const db = new Database(join(tempDir, 'opencode.db'));
+  db.exec(`
+    CREATE TABLE project (
+      id TEXT PRIMARY KEY,
+      worktree TEXT NOT NULL
+    );
+
+    CREATE TABLE session (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      parent_id TEXT,
+      slug TEXT NOT NULL,
+      directory TEXT NOT NULL,
+      title TEXT NOT NULL,
+      version TEXT NOT NULL,
+      share_url TEXT,
+      summary_additions INTEGER,
+      summary_deletions INTEGER,
+      summary_files INTEGER,
+      summary_diffs TEXT,
+      revert TEXT,
+      permission TEXT,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      time_compacting INTEGER,
+      time_archived INTEGER,
+      workspace_id TEXT,
+      path TEXT,
+      agent TEXT,
+      model TEXT,
+      cost REAL DEFAULT 0 NOT NULL,
+      tokens_input INTEGER DEFAULT 0 NOT NULL,
+      tokens_output INTEGER DEFAULT 0 NOT NULL,
+      tokens_reasoning INTEGER DEFAULT 0 NOT NULL,
+      tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+      tokens_cache_write INTEGER DEFAULT 0 NOT NULL,
+      metadata TEXT,
+      FOREIGN KEY (project_id) REFERENCES project(id)
+    );
+
+    CREATE TABLE message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      data TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES session(id)
+    );
+
+    CREATE TABLE part (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      data TEXT NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES message(id)
+    );
+
+    CREATE TABLE session_message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      data TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      time_created TEXT NOT NULL
+    );
+  `);
+  return db;
+}
+
 function createMockServerManager(state: Partial<OpenCodeServerState> = {}): OpenCodeServerManager {
   const handle = state.handle ?? {
     baseUrl: 'http://127.0.0.1:4243',

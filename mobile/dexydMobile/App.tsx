@@ -32,7 +32,11 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { getHealth, respondToInteraction } from './src/api/dexyd-client';
+import {
+  getHealth,
+  getOpenCodeStatus,
+  respondToInteraction,
+} from './src/api/dexyd-client';
 import { useAppUpdater, type AppUpdateInfo } from './src/hooks/use-app-updater';
 import { DexydNotifications } from './src/native/dexyd-notifications';
 import { useAuth } from './src/hooks/use-auth';
@@ -59,6 +63,7 @@ import {
   CodexAuthStatus,
   DiffSummary,
   ProjectBrowseResponse,
+  OpenCodeStatus,
   ProjectSuggestResponse,
   SlashCommand,
   UsageLimit,
@@ -167,9 +172,12 @@ type NotificationSettings = {
   usage: boolean;
   alerts: boolean;
 };
+type AssistantMode = 'omx' | 'opencode';
+
 type SettingsPaneKey =
   | 'connection'
   | 'pairing'
+  | 'assistant'
   | 'account'
   | 'security'
   | 'notifications'
@@ -196,6 +204,7 @@ const NOTIFICATION_SETTINGS_KEY = 'dexyd.notification.settings.v1';
 const USAGE_WARNING_STATE_KEY = 'dexyd.usage.warning.state.v1';
 const CHAT_DRAFT_KEY = 'dexyd.chat.draft.v1';
 const CHAT_VERBOSE_TOOL_CALLS_KEY = 'dexyd.chat.verboseToolCalls.v1';
+const ASSISTANT_MODE_KEY = 'dexyd.assistant.mode.v1';
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   inApp: true,
   system: true,
@@ -280,7 +289,11 @@ export default function App() {
   const [systemNotification, setSystemNotification] =
     useState<SystemNotification | null>(null);
   const [bridgeHealth, setBridgeHealth] = useState('unknown');
+  const [bridgeStatus, setBridgeStatus] = useState<Awaited<ReturnType<typeof getHealth>> | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [assistantMode, setAssistantModeState] = useState<AssistantMode>('omx');
+  const [opencodeStatus, setOpenCodeStatus] = useState<OpenCodeStatus | null>(null);
+  const [opencodeStatusLoading, setOpenCodeStatusLoading] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -379,6 +392,21 @@ export default function App() {
     AsyncStorage.getItem(ONBOARDING_DISMISSED_KEY)
       .then(value => setOnboardingDismissed(value === 'true'))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.getItem(ASSISTANT_MODE_KEY)
+      .then(value => {
+        if (value === 'opencode' || value === 'omx') {
+          setAssistantModeState(value);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const setAssistantMode = useCallback((next: AssistantMode) => {
+    setAssistantModeState(next);
+    AsyncStorage.setItem(ASSISTANT_MODE_KEY, next).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -612,8 +640,10 @@ export default function App() {
       );
       try {
         const health = await getHealth(url);
+        setBridgeStatus(health);
         setBridgeHealth(health.status);
       } catch {
+        setBridgeStatus(null);
         setBridgeHealth('down');
       } finally {
         setHealthLoading(false);
@@ -625,6 +655,26 @@ export default function App() {
   useEffect(() => {
     refreshHealth().catch(() => undefined);
   }, [refreshHealth]);
+
+  const refreshOpenCodeStatus = useCallback(async () => {
+    if (!tokens) {
+      setOpenCodeStatus(null);
+      return;
+    }
+    setOpenCodeStatusLoading(true);
+    try {
+      const status = await getOpenCodeStatus(bridgeSettings.bridgeUrl, tokens);
+      setOpenCodeStatus(status.opencode);
+    } catch {
+      setOpenCodeStatus(null);
+    } finally {
+      setOpenCodeStatusLoading(false);
+    }
+  }, [bridgeSettings.bridgeUrl, tokens]);
+
+  useEffect(() => {
+    refreshOpenCodeStatus().catch(() => undefined);
+  }, [refreshOpenCodeStatus]);
 
   useEffect(() => {
     const show = Keyboard.addListener(
@@ -924,7 +974,7 @@ export default function App() {
     (project: ProjectOption, title: string) => {
       if (!tokens) return;
       sessions
-        .create(project.path, title)
+        .create(project.path, title, assistantMode === 'opencode' ? 'opencode' : 'codex')
         .then(session => {
           if (!session) return;
           setTransientSession(session);
@@ -935,7 +985,7 @@ export default function App() {
         })
         .catch(() => undefined);
     },
-    [selectProject, sessions, tokens],
+    [assistantMode, selectProject, sessions, tokens],
   );
 
   const removeProject = useCallback(
@@ -1275,6 +1325,12 @@ export default function App() {
                 authReady={Boolean(auth.auth)}
                 items={attentionItems}
                 bridgeHealth={bridgeHealth}
+                bridgeStatus={bridgeStatus}
+                assistantMode={assistantMode}
+                onAssistantModeChange={setAssistantMode}
+                opencodeStatus={opencodeStatus}
+                opencodeStatusLoading={opencodeStatusLoading}
+                onRefreshOpenCodeStatus={refreshOpenCodeStatus}
                 socketState={stream.socketState}
                 sessionsCount={sessions.sessions.length}
                 usage={usage.usage}
@@ -1337,7 +1393,13 @@ export default function App() {
                 bridgeSettings={bridgeSettings}
                 onRemoveComputer={forgetComputerProfile}
                 bridgeHealth={bridgeHealth}
+                bridgeStatus={bridgeStatus}
                 refreshHealth={refreshHealth}
+                assistantMode={assistantMode}
+                onAssistantModeChange={setAssistantMode}
+                opencodeStatus={opencodeStatus}
+                opencodeStatusLoading={opencodeStatusLoading}
+                onRefreshOpenCodeStatus={refreshOpenCodeStatus}
                 scannerOpen={scannerOpen}
                 setScannerOpen={setScannerOpen}
                 socketState={stream.socketState}
@@ -4711,7 +4773,13 @@ function SettingsScreen({
   bridgeSettings,
   onRemoveComputer,
   bridgeHealth,
+  bridgeStatus,
   refreshHealth,
+  assistantMode,
+  onAssistantModeChange,
+  opencodeStatus,
+  opencodeStatusLoading,
+  onRefreshOpenCodeStatus,
   scannerOpen,
   setScannerOpen,
   socketState,
@@ -4739,7 +4807,13 @@ function SettingsScreen({
   bridgeSettings: ReturnType<typeof useBridgeSettings>;
   onRemoveComputer: (profile: BridgeProfile) => Promise<void>;
   bridgeHealth: string;
+  bridgeStatus: Awaited<ReturnType<typeof getHealth>> | null;
   refreshHealth: (bridgeUrl?: string) => Promise<void>;
+  assistantMode: AssistantMode;
+  onAssistantModeChange: (mode: AssistantMode) => void;
+  opencodeStatus: OpenCodeStatus | null;
+  opencodeStatusLoading: boolean;
+  onRefreshOpenCodeStatus: () => Promise<void>;
   scannerOpen: boolean;
   setScannerOpen: (open: boolean) => void;
   socketState: string;
@@ -4844,6 +4918,15 @@ function SettingsScreen({
         ? 'warn'
         : 'error';
   const authTone = auth.auth ? 'ok' : 'warn';
+  const opencodeReady = opencodeStatus?.status === 'ready';
+  const assistantTone: StatusKind =
+    assistantMode === 'omx'
+      ? 'ok'
+      : opencodeReady
+        ? 'ok'
+        : opencodeStatusLoading
+          ? 'warn'
+          : 'error';
   const realtimeTone = !bridgeSettings.activeBridge
     ? 'idle'
     : socketState === 'open'
@@ -4881,6 +4964,20 @@ function SettingsScreen({
       detail: auth.auth ? 'phone paired' : 'scan QR or paste URI',
       tone: authTone,
       attention: !auth.auth,
+    },
+    {
+      key: 'assistant',
+      icon: '✦',
+      title: 'Assistant mode',
+      subtitle: 'Choose OpenCode or OMX for new sessions.',
+      detail:
+        assistantMode === 'opencode'
+          ? opencodeReady
+            ? 'opencode ready'
+            : `opencode ${opencodeStatus?.status ?? 'unknown'}`
+          : 'OMX / Codex',
+      tone: assistantTone,
+      attention: assistantTone === 'error' || assistantTone === 'warn',
     },
     {
       key: 'account',
@@ -5004,7 +5101,7 @@ function SettingsScreen({
   const settingsGroups: Array<{ title: string; panes: SettingsPane[] }> = [
     {
       title: 'Connection',
-      panes: (['connection', 'pairing', 'account'] as SettingsPaneKey[]).map(
+      panes: (['connection', 'pairing', 'assistant', 'account'] as SettingsPaneKey[]).map(
         key => paneByKey.get(key)!,
       ),
     },
@@ -5144,6 +5241,61 @@ function SettingsScreen({
                 />
               ) : null}
             </View>
+          </SettingsSection>
+        );
+
+      case 'assistant':
+        return (
+          <SettingsSection
+            title="Assistant mode"
+            subtitle="Pick which runtime creates new project sessions from this phone. Existing sessions keep their original runtime."
+          >
+            <StatusRow
+              label="Selected"
+              value={assistantMode === 'opencode' ? 'OpenCode' : 'OMX / Codex'}
+              tone={assistantTone}
+            />
+            <StatusRow
+              label="OpenCode"
+              value={opencodeStatus?.status ?? (opencodeStatusLoading ? 'checking' : 'unknown')}
+              tone={opencodeReady ? 'ok' : opencodeStatusLoading ? 'warn' : 'idle'}
+            />
+            <SettingLine
+              label="Endpoint"
+              value={opencodeStatus?.handle?.baseUrl || 'not connected'}
+            />
+            <SettingLine
+              label="Version"
+              value={opencodeStatus?.version || 'unknown'}
+            />
+            <SettingLine
+              label="Agent / model"
+              value={`${opencodeStatus?.defaultAgent || 'build'} / ${opencodeStatus?.defaultModel || 'default'}`}
+            />
+            <SettingLine
+              label="Pending"
+              value={`${opencodeStatus?.pendingTools ?? 0} tools · ${opencodeStatus?.pendingPermissions ?? 0} approvals · ${opencodeStatus?.pendingQuestions ?? 0} questions`}
+            />
+            <View style={styles.settingsActions}>
+              <TextButton
+                label="Use OpenCode"
+                variant={assistantMode === 'opencode' ? 'primary' : 'secondary'}
+                onPress={() => onAssistantModeChange('opencode')}
+              />
+              <TextButton
+                label="Use OMX"
+                variant={assistantMode === 'omx' ? 'primary' : 'secondary'}
+                onPress={() => onAssistantModeChange('omx')}
+              />
+              <TextButton
+                label={opencodeStatusLoading ? 'Checking…' : 'Refresh'}
+                disabled={opencodeStatusLoading}
+                onPress={() => onRefreshOpenCodeStatus().catch(() => undefined)}
+              />
+            </View>
+            <Text style={styles.settingHint}>
+              OpenCode mode uses the bridge's OpenCode server. OMX mode uses the existing Codex harness setting on the bridge.
+            </Text>
           </SettingsSection>
         );
 
@@ -5580,6 +5732,22 @@ function SettingsScreen({
                 <SettingLine
                   label="WebSocket"
                   value={bridgeSettings.wsUrl || 'not configured'}
+                />
+                <SettingLine
+                  label="Advertised bridge"
+                  value={bridgeStatus?.bridge?.advertisedBaseUrl || 'unknown'}
+                />
+                <SettingLine
+                  label="Tunnel"
+                  value={bridgeStatus?.cloudflare?.publicUrl || 'not configured'}
+                />
+                <SettingLine
+                  label="Bridge mode"
+                  value={bridgeStatus?.assistant?.codexHarnessMode || 'unknown'}
+                />
+                <SettingLine
+                  label="OpenCode status"
+                  value={opencodeStatus?.status || bridgeStatus?.assistant?.opencodeStatus || 'unknown'}
                 />
                 {errors.length === 0 ? (
                   <Text style={styles.settingHint}>No current errors.</Text>

@@ -1,3 +1,27 @@
+
+export type BridgeHealthResponse = {
+  status: string;
+  version?: string;
+  timestamp?: string;
+  bridge?: {
+    host: string;
+    port: number;
+    publicBaseUrl: string | null;
+    advertisedBaseUrl: string;
+  };
+  cloudflare?: {
+    hostname: string | null;
+    tunnelName: string;
+    publicUrl: string | null;
+    configured: boolean;
+  };
+  assistant?: {
+    codexHarnessMode: 'direct' | 'omx' | 'custom';
+    opencodeEnabled: boolean;
+    opencodeStatus: string;
+  };
+};
+
 export type PairingStartResponse = {
   pairingId: string;
   expiresAt: string;

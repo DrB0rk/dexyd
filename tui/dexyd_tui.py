@@ -59,7 +59,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
 LOG_LEVELS = {"fatal", "error", "warn", "info", "debug", "trace"}
 HARNESS_MODES = {"direct", "omx", "custom"}
 PERMISSION_MODES = {"inherit", "read-only", "workspace-write", "danger-full-access", "bypass"}
-CLOUDFLARE_LOG_DIR = Path.cwd() / ".dexyd" / "cloudflared"
+# The dexyd.service runs with WorkingDirectory=~/.local/share/dexyd and writes
+# the cloudflared PID file to that directory's `.dexyd/cloudflared/`.  The TUI
+# historically used Path.cwd() which broke when the TUI was launched from the
+# repo (e.g. via `npm run tui`) because cwd pointed to the project instead of
+# the install location.  Resolve the canonical install directory so both the
+# service and the TUI always agree on the same on-disk path.
+DEXYD_DATA_DIR = Path(
+    os.environ.get("DEXYD_DATA_DIR")
+    or (
+        Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+        / "dexyd"
+    )
+)
+CLOUDFLARE_LOG_DIR = DEXYD_DATA_DIR / ".dexyd" / "cloudflared"
 CLOUDFLARE_PID_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.pid"
 CLOUDFLARE_LOG_FILE = CLOUDFLARE_LOG_DIR / "cloudflared.log"
 CLOUDFLARE_CONFIG_FILE = CLOUDFLARE_LOG_DIR / "config.yml"

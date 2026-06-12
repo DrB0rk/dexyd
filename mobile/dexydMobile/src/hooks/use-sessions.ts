@@ -254,7 +254,7 @@ export function useSessions(
   );
 
   const create = useCallback(
-    async (targetWorkspacePath: string, title?: string) => {
+    async (targetWorkspacePath: string, title?: string, source: 'codex' | 'opencode' = 'codex') => {
       if (!tokens) return null;
       setError(null);
       try {
@@ -263,6 +263,7 @@ export function useSessions(
           targetWorkspacePath,
           tokens,
           title,
+          source,
         );
         await refresh();
         return session;

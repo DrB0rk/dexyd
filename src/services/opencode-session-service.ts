@@ -60,15 +60,26 @@ type LoggerLike = {
 
 type SessionRow = {
   id: string;
-  directory: string;
+  directory: string | null;
+  path: string | null;
   title: string | null;
   agent: string | null;
   model: string | null;
   tokens_input: number | null;
   tokens_output: number | null;
   tokens_total: number | null;
-  time_created: string;
-  time_updated: string;
+  tokens_reasoning: number | null;
+  tokens_cache_read: number | null;
+  tokens_cache_write: number | null;
+  time_created: string | number;
+  time_updated: string | number;
+  version: string | null;
+  cost: number | null;
+  summary_additions: number | null;
+  summary_deletions: number | null;
+  summary_files: number | null;
+  slug: string | null;
+  parent_id: string | null;
 };
 
 type MessageRow = {
@@ -77,7 +88,23 @@ type MessageRow = {
   type: string;
   data: string;
   seq: number;
-  time_created: string;
+  time_created: string | number;
+};
+
+type OpenCodeMessageRow = {
+  id: string;
+  session_id: string;
+  data: string;
+  seq: number;
+  time_created: string | number;
+};
+
+type OpenCodePartRow = {
+  id: string;
+  message_id: string;
+  session_id: string;
+  data: string;
+  time_created: string | number;
 };
 
 export type OpenCodeSessionServiceOptions = {
@@ -175,17 +202,7 @@ export class OpenCodeSessionService {
   listSessionsFromSqlite(limit = 100): OpenCodeSessionDetail[] {
     if (!this.db) return [];
     try {
-      const rows = this.db
-        .prepare(
-          `SELECT s.id, s.directory, s.title, s.agent, s.model,
-                  s.tokens_input, s.tokens_output, s.tokens_total,
-                  s.time_created, s.time_updated
-           FROM session s
-           LEFT JOIN project p ON s.project_id = p.id
-           ORDER BY s.time_updated DESC
-           LIMIT ?`
-        )
-        .all(limit) as SessionRow[];
+      const rows = this.#selectSessionRows(`ORDER BY s.time_updated DESC LIMIT ?`, [limit]);
 
       return rows.map((row) => this.#mapSqliteSessionRow(row));
     } catch (error) {
@@ -224,16 +241,7 @@ export class OpenCodeSessionService {
   getSessionFromSqlite(sessionId: string): OpenCodeSessionDetail | null {
     if (!this.db) return null;
     try {
-      const row = this.db
-        .prepare(
-          `SELECT s.id, s.directory, s.title, s.agent, s.model,
-                  s.tokens_input, s.tokens_output, s.tokens_total,
-                  s.time_created, s.time_updated
-           FROM session s
-           LEFT JOIN project p ON s.project_id = p.id
-           WHERE s.id = ?`
-        )
-        .get(sessionId) as SessionRow | undefined;
+      const row = this.#selectSessionRows('WHERE s.id = ?', [sessionId])[0];
       if (!row) return null;
       return this.#mapSqliteSessionRow(row);
     } catch (error) {
@@ -262,17 +270,54 @@ export class OpenCodeSessionService {
   getMessagesFromSqlite(sessionId: string, limit = 200): ChatMessage[] {
     if (!this.db) return [];
     try {
+      if (this.#hasTable('session_message')) {
+        const rows = this.db
+          .prepare(
+            `SELECT id, session_id, type, data, seq, time_created
+             FROM session_message
+             WHERE session_id = ?
+             ORDER BY seq ASC
+             LIMIT ?`
+          )
+          .all(sessionId, limit) as MessageRow[];
+
+        if (rows.length > 0) {
+          return rows.map((row) => this.#mapLegacySqliteMessageRow(row));
+        }
+      }
+
+      if (!this.#hasTable('message') || !this.#hasTable('part')) return [];
+
       const rows = this.db
         .prepare(
-          `SELECT id, session_id, type, data, seq, time_created
-           FROM session_message
+          `SELECT id, session_id, data, row_number() OVER (ORDER BY time_created ASC, id ASC) AS seq, time_created
+           FROM message
            WHERE session_id = ?
-           ORDER BY seq ASC
+           ORDER BY time_created ASC, id ASC
            LIMIT ?`
         )
-        .all(sessionId, limit) as MessageRow[];
+        .all(sessionId, limit) as OpenCodeMessageRow[];
 
-      return rows.map((row) => this.#mapSqliteMessageRow(row));
+      if (rows.length === 0) return [];
+
+      const partRows = this.db
+        .prepare(
+          `SELECT id, message_id, session_id, data, time_created
+           FROM part
+           WHERE session_id = ?
+           ORDER BY message_id ASC, time_created ASC, id ASC`
+        )
+        .all(sessionId) as OpenCodePartRow[];
+      const partsByMessage = new Map<string, OpenCodePartRow[]>();
+      for (const part of partRows) {
+        const existing = partsByMessage.get(part.message_id) ?? [];
+        existing.push(part);
+        partsByMessage.set(part.message_id, existing);
+      }
+
+      return rows
+        .map((row) => this.#mapOpenCodeSqliteMessageRow(row, partsByMessage.get(row.id) ?? []))
+        .filter((message): message is ChatMessage => message !== null);
     } catch (error) {
       this.#logger.warn({ error, sessionId }, 'Failed to get OpenCode session messages from sqlite');
       return [];
@@ -470,52 +515,115 @@ export class OpenCodeSessionService {
     };
   }
 
+  #selectSessionRows(clause: string, params: unknown[]): SessionRow[] {
+    if (!this.db) return [];
+    const sessionColumns = this.#tableColumns('session');
+    const selectOptional = (column: string, fallback = 'NULL') =>
+      sessionColumns.has(column) ? `s.${column} AS ${column}` : `${fallback} AS ${column}`;
+
+    return this.db
+      .prepare(
+        `SELECT s.id,
+                ${selectOptional('directory', "''")},
+                ${selectOptional('path')},
+                s.title, s.agent, s.model,
+                ${selectOptional('tokens_input')},
+                ${selectOptional('tokens_output')},
+                ${selectOptional('tokens_total')},
+                ${selectOptional('tokens_reasoning')},
+                ${selectOptional('tokens_cache_read')},
+                ${selectOptional('tokens_cache_write')},
+                s.time_created, s.time_updated,
+                ${selectOptional('version')},
+                ${selectOptional('cost')},
+                ${selectOptional('summary_additions')},
+                ${selectOptional('summary_deletions')},
+                ${selectOptional('summary_files')},
+                ${selectOptional('slug')},
+                ${selectOptional('parent_id')}
+         FROM session s
+         LEFT JOIN project p ON s.project_id = p.id
+         ${clause}`
+      )
+      .all(...params) as SessionRow[];
+  }
+
+  #hasTable(tableName: string): boolean {
+    if (!this.db) return false;
+    const row = this.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(tableName) as { name: string } | undefined;
+    return Boolean(row);
+  }
+
+  #tableColumns(tableName: string): Set<string> {
+    if (!this.db) return new Set();
+    const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+    return new Set(rows.map((row) => row.name));
+  }
+
   #mapSqliteSessionRow(row: SessionRow): OpenCodeSessionDetail {
     const tokenInput = row.tokens_input ?? null;
     const tokenOutput = row.tokens_output ?? null;
-    const tokenTotal = row.tokens_total ?? null;
-    const hasTokens = tokenInput !== null || tokenOutput !== null || tokenTotal !== null;
+    const tokenReasoning = row.tokens_reasoning ?? null;
+    const tokenTotal = row.tokens_total ?? (tokenInput !== null || tokenOutput !== null || tokenReasoning !== null
+      ? (tokenInput ?? 0) + (tokenOutput ?? 0) + (tokenReasoning ?? 0)
+      : null);
+    const cacheRead = row.tokens_cache_read ?? null;
+    const cacheWrite = row.tokens_cache_write ?? null;
+    const hasTokens = tokenInput !== null || tokenOutput !== null || tokenTotal !== null || tokenReasoning !== null;
     let model: string | null = null;
     let modelID: string | null = null;
     let modelProviderID: string | null = null;
     if (row.model) {
       try {
-        const parsed = JSON.parse(row.model);
-        model = parsed.id ?? row.model;
-        modelID = parsed.modelID ?? null;
-        modelProviderID = parsed.providerID ?? null;
+        const parsed = JSON.parse(row.model) as Record<string, unknown>;
+        model = typeof parsed.id === 'string' ? parsed.id : row.model;
+        modelID = typeof parsed.modelID === 'string' ? parsed.modelID : typeof parsed.id === 'string' ? parsed.id : null;
+        modelProviderID = typeof parsed.providerID === 'string' ? parsed.providerID : null;
       } catch {
         model = row.model;
+        modelID = row.model;
       }
     }
+    const workspacePath = cleanPath(row.directory) || cleanPath(row.path) || '';
+    const summary = row.summary_additions !== null || row.summary_deletions !== null || row.summary_files !== null
+      ? {
+          additions: row.summary_additions ?? 0,
+          deletions: row.summary_deletions ?? 0,
+          files: row.summary_files ?? 0
+        }
+      : null;
+
     return {
       id: row.id,
       status: 'idle',
       profile: 'opencode',
-      workspacePath: row.directory,
-      createdAt: row.time_created,
-      updatedAt: row.time_updated,
+      workspacePath,
+      createdAt: normalizeOpenCodeTimestamp(row.time_created),
+      updatedAt: normalizeOpenCodeTimestamp(row.time_updated),
       source: 'opencode',
       title: cleanTitle(row.title) || undefined,
       model,
       agent: row.agent,
       tokenUsage: hasTokens ? { input: tokenInput, output: tokenOutput, total: tokenTotal } : null,
+      opencodeVersion: row.version,
       modelID,
       modelProviderID,
-      summary: null,
-      cost: null,
+      summary,
+      cost: typeof row.cost === 'number' ? row.cost : null,
       tokens: hasTokens
         ? {
             input: tokenInput,
             output: tokenOutput,
-            reasoning: null,
-            cacheRead: null,
-            cacheWrite: null
+            reasoning: tokenReasoning,
+            cacheRead,
+            cacheWrite
           }
         : null,
-      slug: null,
-      opencodePath: null,
-      parentID: null
+      slug: row.slug,
+      opencodePath: cleanPath(row.path) || null,
+      parentID: row.parent_id
     };
   }
 
@@ -552,7 +660,7 @@ export class OpenCodeSessionService {
     };
   }
 
-  #mapSqliteMessageRow(row: MessageRow): ChatMessage {
+  #mapLegacySqliteMessageRow(row: MessageRow): ChatMessage {
     const data = parseDataField(row.data);
     const content = extractTextContentFromSqlite(row.type, data);
 
@@ -561,11 +669,55 @@ export class OpenCodeSessionService {
       turnId: `${row.session_id}-${row.seq}`,
       role: mapRole(row.type),
       content,
-      createdAt: row.time_created,
+      createdAt: normalizeOpenCodeTimestamp(row.time_created),
       sequence: row.seq,
       status: 'sent'
     };
   }
+
+  #mapOpenCodeSqliteMessageRow(row: OpenCodeMessageRow, partRows: OpenCodePartRow[]): ChatMessage | null {
+    const data = parseDataField(row.data);
+    const role = mapRole(data && typeof data === 'object' && !Array.isArray(data)
+      ? String((data as Record<string, unknown>).role ?? 'system')
+      : 'system');
+    const parts = partRows.map((part) => parseDataField(part.data));
+    const content = extractTextContent({
+      ...(data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : {}),
+      parts: parts.filter((part): part is { type?: string; text?: string; content?: string | unknown[]; state?: unknown } =>
+        Boolean(part) && typeof part === 'object' && !Array.isArray(part)
+      )
+    });
+    if (!content && role !== 'tool') return null;
+
+    return {
+      id: row.id,
+      turnId: row.id,
+      role,
+      content,
+      createdAt: normalizeOpenCodeTimestamp(row.time_created),
+      sequence: row.seq,
+      status: 'sent'
+    };
+  }
+}
+
+function normalizeOpenCodeTimestamp(value: string | number | null | undefined): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return new Date(Number(trimmed)).toISOString();
+    }
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return new Date(0).toISOString();
+}
+
+function cleanPath(value: string | null | undefined): string {
+  return (value || '').trim();
 }
 
 function parseDataField(raw: string): unknown {
@@ -600,6 +752,16 @@ function extractTextContent(message: { parts?: Array<{ type?: string; text?: str
             .map((item) => (typeof item === 'string' ? item : ''))
             .filter(Boolean)
             .join('\n');
+        }
+        const state = (part as { state?: unknown }).state;
+        if (state && typeof state === 'object' && !Array.isArray(state)) {
+          const output = (state as { output?: unknown; error?: unknown; title?: unknown }).output;
+          const error = (state as { error?: unknown }).error;
+          const title = (state as { title?: unknown }).title;
+          if (typeof output === 'string') return output;
+          if (Array.isArray(output)) return output.map((item) => (typeof item === 'string' ? item : '')).filter(Boolean).join('\n');
+          if (typeof error === 'string') return error;
+          if (typeof title === 'string') return title;
         }
         return '';
       })

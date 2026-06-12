@@ -1,4 +1,4 @@
-import { deleteSession, getQueuedMessages, getSessions, pairingStart, removeQueuedMessage, steerQueuedMessage } from '../src/api/dexyd-client';
+import { createSession, deleteSession, getQueuedMessages, getSessions, pairingStart, removeQueuedMessage, steerQueuedMessage } from '../src/api/dexyd-client';
 
 const mockFetch = jest.fn();
 
@@ -105,5 +105,37 @@ describe('dexyd client request headers', () => {
       })
     );
   });
+
+  it('routes opencode-mode session creation to the OpenCode endpoint', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: jest.fn().mockResolvedValue({
+        session: {
+          id: 'ses-opencode',
+          status: 'idle',
+          workspacePath: '/workspace',
+          createdAt: '2026-06-12T00:00:00.000Z',
+          updatedAt: '2026-06-12T00:00:00.000Z',
+          source: 'opencode'
+        }
+      }),
+      text: jest.fn().mockResolvedValue('')
+    });
+
+    await expect(createSession('http://bridge.local', '/workspace', {
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token'
+    }, 'New OpenCode', 'opencode')).resolves.toMatchObject({ id: 'ses-opencode', source: 'opencode' });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://bridge.local/opencode/sessions',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ workspacePath: '/workspace', title: 'New OpenCode' }),
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' })
+      })
+    );
+  });
+
 
 });

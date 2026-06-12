@@ -39,6 +39,9 @@ describe('dexyd app foundation', () => {
       expect(body.status).toBe('ready');
       expect(body.database.status).toBe('ready');
       expect(body.modules).toBeDefined();
+      expect(body.bridge.advertisedBaseUrl).toBe('http://127.0.0.1:4555');
+      expect(body.cloudflare).toMatchObject({ configured: false, tunnelName: 'dexyd', publicUrl: null });
+      expect(body.assistant).toMatchObject({ codexHarnessMode: 'direct', opencodeEnabled: true });
 
       const caps = await service.app.inject({ method: 'GET', url: '/capabilities' });
       expect(caps.statusCode).toBe(200);

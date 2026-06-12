@@ -2,6 +2,7 @@ import { normalizeBridgeHttpUrl } from '../config/bridge';
 
 const API_TIMEOUT_MS = 15000;
 import {
+  BridgeHealthResponse,
   CodexAuthStatus,
   CommandsResponse,
   DeviceRecord,
@@ -330,7 +331,15 @@ export async function createSession(
   workspacePath: string,
   tokens: AuthTokens,
   title?: string,
+  source: 'codex' | 'opencode' = 'codex',
 ): Promise<DexydSession> {
+  if (source === 'opencode') {
+    const result = await createOpenCodeSession(baseUrl, tokens, {
+      workspacePath,
+      ...(title?.trim() ? { title: title.trim() } : {}),
+    });
+    return result.session as DexydSession;
+  }
   const result = await fetchJson<{ session: DexydSession }>(
     baseUrl,
     '/sessions',
@@ -398,8 +407,8 @@ export async function patchSessionStatus(
   return result.session;
 }
 
-export async function getHealth(baseUrl: string): Promise<{ status: string }> {
-  return fetchJson<{ status: string }>(baseUrl, '/health/ready');
+export async function getHealth(baseUrl: string): Promise<BridgeHealthResponse> {
+  return fetchJson<BridgeHealthResponse>(baseUrl, '/health/ready');
 }
 
 export async function getDevices(
