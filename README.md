@@ -3,7 +3,7 @@
 
 # Dexyd
 
-**A mobile control surface for Codex and OMX sessions.**
+**A mobile control surface for Codex, OMX, and OpenCode sessions.**
 
 Pair your phone with your computer, manage sessions by project, chat with agents, answer approvals, inspect diffs, and keep bridge/mobile updates close at hand.
 
@@ -21,16 +21,17 @@ Pair your phone with your computer, manage sessions by project, chat with agents
 
 ## Why Dexyd?
 
-Dexyd runs a small bridge on your computer and connects it to a trusted mobile app. It is built for people who use Codex/OMX locally and want a clean phone interface for monitoring and steering sessions without exposing their whole machine carelessly.
+Dexyd runs a small bridge on your computer and connects it to a trusted mobile app. It is built for people who use Codex, OMX, or OpenCode locally and want a clean phone interface for monitoring and steering sessions without exposing their whole machine carelessly.
 
 ## Highlights
 
 - **Pair once, switch easily** — save one or more bridge profiles on your phone.
-- **Sessions by project** — see Codex/OMX sessions grouped by workspace.
+- **Sessions by project** — see Codex, OMX, and OpenCode sessions grouped by workspace.
 - **Focused chat** — open chat only from a session, with no distracting bottom nav.
 - **Queued follow-ups** — send another message while a session is busy and steer queued prompts before they run.
 - **Approvals and questions** — answer agent prompts from integrated mobile UI.
 - **Per-prompt diffs** — view changed files after a completed response.
+- **OpenCode tool use and skills** — the bridge drives OpenCode's HTTP `serve` daemon, streaming text deltas, reasoning, tool calls, shell output, skill usage, permission prompts, and question prompts back to the mobile app in real time.
 - **Useful notifications** — responses, prompt completion, alerts, approvals, questions, and important account-usage changes.
 - **Connection setup** — LAN, HTTPS domain/Caddy, or Cloudflare named tunnel from the TUI.
 - **Built-in updates** — update the bridge/TUI from the TUI and the Android APK from the mobile app.
@@ -41,6 +42,7 @@ Dexyd runs a small bridge on your computer and connects it to a trusted mobile a
 - Node.js 20+ and Python 3; installers detect missing dependencies and ask before installing them where supported.
 - Codex CLI authenticated on the bridge computer.
 - Optional: OMX for OMX-backed sessions and harness behavior.
+- Optional: [OpenCode](https://opencode.ai) `opencode` on PATH for OpenCode-backed sessions. The bridge starts the `opencode serve` daemon for you and surfaces its tools, skills, agents, commands, providers, and models.
 - Android phone with the Dexyd APK installed.
 - Optional iOS bring-up: macOS with Xcode for simulator/iPhone builds.
 - Optional remote access: HTTPS domain/Caddy or Cloudflare named tunnel.
@@ -159,6 +161,7 @@ Android does not allow normal APK apps to silently self-update; you still confir
 - Old phones can be revoked.
 - Mobile-started Codex turns default to desktop-style unsandboxed execution through `codex.permissionMode: bypass`; change it to `inherit`, `workspace-write`, or `read-only` if you want a stricter mode.
 - Project/file access is confined to `codex.workspaceRoot`.
+- OpenCode turns go through the OpenCode HTTP `serve` daemon; tool permissions are surfaced to the mobile app for review before the bridge approves them.
 - Prefer HTTPS or Cloudflare named tunnels outside your LAN.
 - Keep the bridge on networks you trust.
 
