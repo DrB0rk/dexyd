@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import copy
+import datetime as dt
 import json
 import os
 import platform
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -52,19 +55,38 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "permissionMode": "bypass",
         "harness": {"mode": "direct", "command": "omx", "args": []},
     },
+    "opencode": {
+        "enabled": True,
+        "runtimePath": "opencode",
+        "dataDir": str(Path.home() / ".local" / "share" / "opencode"),
+        "permissionMode": "bypass",
+        "server": {
+            "autoStart": True,
+            "host": "127.0.0.1",
+            "port": 4243,
+            "startTimeoutMs": 15000,
+            "healthTimeoutMs": 4000,
+            "password": "",
+            "cors": [],
+            "mdns": False,
+            "mdnsDomain": "opencode.local",
+            "extraArgs": [],
+        },
+        "defaultAgent": "build",
+        "defaultModel": "",
+        "eventStreamEnabled": True,
+        "streamReconnectMs": 2000,
+        "streamIdleTimeoutMs": 0,
+    },
+    "assistant": {"mode": "codex"},
     "plugins": {"enabled": True, "pluginDir": ".dexyd/plugins"},
     "cloudflare": {"hostname": "", "tunnelName": "dexyd"},
 }
 
 LOG_LEVELS = {"fatal", "error", "warn", "info", "debug", "trace"}
 HARNESS_MODES = {"direct", "omx", "custom"}
+ASSISTANT_MODES = {"codex", "opencode"}
 PERMISSION_MODES = {"inherit", "read-only", "workspace-write", "danger-full-access", "bypass"}
-# The dexyd.service runs with WorkingDirectory=~/.local/share/dexyd and writes
-# the cloudflared PID file to that directory's `.dexyd/cloudflared/`.  The TUI
-# historically used Path.cwd() which broke when the TUI was launched from the
-# repo (e.g. via `npm run tui`) because cwd pointed to the project instead of
-# the install location.  Resolve the canonical install directory so both the
-# service and the TUI always agree on the same on-disk path.
 DEXYD_DATA_DIR = Path(
     os.environ.get("DEXYD_DATA_DIR")
     or (
@@ -111,6 +133,10 @@ class SessionRecord:
     workspace_path: str
     updated_at: str
     title: str | None = None
+    source: str = "dexyd"
+    created_at: str | None = None
+    model: str | None = None
+    agent: str | None = None
 
 
 @dataclass
@@ -143,6 +169,17 @@ class UpdateInfo:
     update_available: bool
 
 
+@dataclass
+class InstalledRuntimeInfo:
+    running_root: Path
+    running_version: str
+    installed_command: Path | None
+    installed_target: Path | None
+    installed_root: Path | None
+    installed_version: str
+    command_matches_running_root: bool
+
+
 def app_root() -> Path:
     return Path.cwd().resolve()
 
@@ -158,6 +195,22 @@ def installed_command_target() -> Path | None:
         return command.resolve(strict=True)
     except OSError:
         return None
+
+
+def installed_runtime_info(root: Path | None = None) -> InstalledRuntimeInfo:
+    running_root = (root or app_root()).resolve()
+    command = Path.home() / ".local" / "bin" / "dexyd"
+    command_target = installed_command_target()
+    installed_root = command_target.parent.parent.resolve(strict=False) if command_target else None
+    return InstalledRuntimeInfo(
+        running_root=running_root,
+        running_version=read_package_version(running_root),
+        installed_command=command if command.exists() else None,
+        installed_target=command_target,
+        installed_root=installed_root,
+        installed_version=read_package_version(installed_root) if installed_root else "not installed",
+        command_matches_running_root=command_target == (running_root / "bin" / "dexyd").resolve(strict=False),
+    )
 
 
 def read_package_version(root: Path | None = None) -> str:
@@ -219,12 +272,17 @@ def latest_release_info() -> UpdateInfo:
     )
 
 
-def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "") -> str:
+def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "", relaunch_pending: bool = False) -> str:
+    runtime = installed_runtime_info()
     if info is None:
         lines = [
             "UPDATES",
             "",
-            f"Installed bridge/TUI: {read_package_version()}",
+            f"Running TUI version:  {runtime.running_version}",
+            f"Installed command:    {runtime.installed_command or 'missing'}",
+            f"Installed target:     {runtime.installed_target or 'missing'}",
+            f"Installed version:    {runtime.installed_version}",
+            f"Running from install: {'yes' if runtime.command_matches_running_root else 'no'}",
             "Latest release: not checked",
             "",
             "Use Check updates to query GitHub Releases.",
@@ -233,7 +291,11 @@ def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "
         lines = [
             "UPDATES",
             "",
-            f"Installed bridge/TUI: {info.current_version}",
+            f"Running TUI version:  {runtime.running_version}",
+            f"Installed command:    {runtime.installed_command or 'missing'}",
+            f"Installed target:     {runtime.installed_target or 'missing'}",
+            f"Installed version:    {runtime.installed_version}",
+            f"Running from install: {'yes' if runtime.command_matches_running_root else 'no'}",
             f"Latest release:      {info.latest_version}",
             f"Status:              {'update available' if info.update_available else 'up to date'}",
             f"Release:             {info.release_url}",
@@ -245,11 +307,14 @@ def format_update_info(info: UpdateInfo | None, busy: bool = False, log: str = "
             [
                 "",
                 "Install / repair bridge reruns the official installer for the latest release, preserving dexyd.config.yaml and .dexyd data.",
+                "After a successful install, this TUI relaunches through ~/.local/bin/dexyd so you land in the updated version automatically.",
                 "The Android app updates from Settings → Updates on the phone; Android will ask before installing APKs.",
             ]
         )
     if busy:
-        lines.extend(["", "Task: running"])
+        lines.extend(["", "TASK STATUS", "", "● Update task is running. Leave this TUI open; installer output streams below."])
+    if relaunch_pending:
+        lines.extend(["", "RELAUNCH", "", "● Update installed. Relaunching the TUI through the installed dexyd command…"])
     if log.strip():
         lines.extend(["", "RECENT ACTIVITY", "", log.strip()])
     return "\n".join(lines)
@@ -359,6 +424,16 @@ def verify_update_result(root: Path, target_version: str) -> str:
     return installed_version
 
 
+def relaunch_installed_tui(config_path: Path | None = None) -> None:
+    command = installed_command_target()
+    if not command or not executable_at(command):
+        raise RuntimeError("Cannot relaunch: ~/.local/bin/dexyd is missing or not executable.")
+    args = [str(command), "--tui"]
+    if config_path:
+        args.append(str(config_path))
+    os.execv(str(command), args)
+
+
 def install_latest_bridge_update(
     root: Path,
     info: UpdateInfo | None = None,
@@ -391,7 +466,7 @@ def install_latest_bridge_update(
         installed_version = verify_update_result(root, target_version)
         return (
             f"Bridge/TUI install repaired at {root} ({reason}). Installed version: {installed_version}. "
-            "Restart this TUI to load updated code."
+            "Relaunching this TUI through ~/.local/bin/dexyd to load updated code."
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -415,6 +490,29 @@ def parse_int(value: Any, fallback: int, minimum: int = 1) -> int:
     except (TypeError, ValueError):
         pass
     return fallback
+
+
+def parse_bool(value: Any, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return fallback
+
+
+def normalize_assistant_mode(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("mode") or value.get("defaultMode")
+    mode = str(value or "").strip().lower()
+    if mode in {"omx", "direct", "custom"}:
+        return "codex"
+    return mode if mode in ASSISTANT_MODES else DEFAULT_CONFIG["assistant"]["mode"]
 
 
 def normalize_public_base_url(value: Any) -> str:
@@ -485,6 +583,45 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     args = harness.get("args")
     harness["args"] = [str(arg) for arg in args if "\0" not in str(arg)] if isinstance(args, list) else []
     merged["codex"]["harness"] = harness
+
+    opencode = merged.get("opencode")
+    if not isinstance(opencode, dict):
+        opencode = copy.deepcopy(DEFAULT_CONFIG["opencode"])
+    opencode["enabled"] = parse_bool(opencode.get("enabled"), DEFAULT_CONFIG["opencode"]["enabled"])
+    opencode["runtimePath"] = str(opencode.get("runtimePath") or DEFAULT_CONFIG["opencode"]["runtimePath"]).strip() or DEFAULT_CONFIG["opencode"]["runtimePath"]
+    opencode["dataDir"] = str(opencode.get("dataDir") or DEFAULT_CONFIG["opencode"]["dataDir"]).strip() or DEFAULT_CONFIG["opencode"]["dataDir"]
+    opencode["permissionMode"] = str(opencode.get("permissionMode") or DEFAULT_CONFIG["opencode"]["permissionMode"]).strip()
+    if opencode["permissionMode"] not in PERMISSION_MODES:
+        opencode["permissionMode"] = DEFAULT_CONFIG["opencode"]["permissionMode"]
+    server = opencode.get("server")
+    if not isinstance(server, dict):
+        server = copy.deepcopy(DEFAULT_CONFIG["opencode"]["server"])
+    server["autoStart"] = parse_bool(server.get("autoStart"), DEFAULT_CONFIG["opencode"]["server"]["autoStart"])
+    server["host"] = str(server.get("host") or DEFAULT_CONFIG["opencode"]["server"]["host"]).strip() or DEFAULT_CONFIG["opencode"]["server"]["host"]
+    server["port"] = parse_int(server.get("port"), DEFAULT_CONFIG["opencode"]["server"]["port"], 1)
+    server["startTimeoutMs"] = parse_int(server.get("startTimeoutMs"), DEFAULT_CONFIG["opencode"]["server"]["startTimeoutMs"], 1000)
+    server["healthTimeoutMs"] = parse_int(server.get("healthTimeoutMs"), DEFAULT_CONFIG["opencode"]["server"]["healthTimeoutMs"], 500)
+    server["password"] = str(server.get("password") or "")
+    cors = server.get("cors")
+    server["cors"] = [str(item).strip() for item in cors if str(item).strip()] if isinstance(cors, list) else []
+    server["mdns"] = parse_bool(server.get("mdns"), DEFAULT_CONFIG["opencode"]["server"]["mdns"])
+    server["mdnsDomain"] = str(server.get("mdnsDomain") or DEFAULT_CONFIG["opencode"]["server"]["mdnsDomain"]).strip() or DEFAULT_CONFIG["opencode"]["server"]["mdnsDomain"]
+    extra_args = server.get("extraArgs")
+    server["extraArgs"] = [str(arg) for arg in extra_args if "\0" not in str(arg)] if isinstance(extra_args, list) else []
+    opencode["server"] = server
+    opencode["defaultAgent"] = str(opencode.get("defaultAgent") or DEFAULT_CONFIG["opencode"]["defaultAgent"]).strip() or DEFAULT_CONFIG["opencode"]["defaultAgent"]
+    opencode["defaultModel"] = str(opencode.get("defaultModel") or "")
+    opencode["eventStreamEnabled"] = parse_bool(opencode.get("eventStreamEnabled"), DEFAULT_CONFIG["opencode"]["eventStreamEnabled"])
+    opencode["streamReconnectMs"] = parse_int(opencode.get("streamReconnectMs"), DEFAULT_CONFIG["opencode"]["streamReconnectMs"], 250)
+    opencode["streamIdleTimeoutMs"] = max(0, parse_int(opencode.get("streamIdleTimeoutMs"), DEFAULT_CONFIG["opencode"]["streamIdleTimeoutMs"] or 1, 1) if opencode.get("streamIdleTimeoutMs") else 0)
+    merged["opencode"] = opencode
+
+    assistant = merged.get("assistant")
+    if not isinstance(assistant, dict):
+        assistant = copy.deepcopy(DEFAULT_CONFIG["assistant"])
+    assistant["mode"] = normalize_assistant_mode(assistant)
+    assistant["defaultMode"] = assistant["mode"]
+    merged["assistant"] = assistant
 
     cloudflare = merged.get("cloudflare")
     if not isinstance(cloudflare, dict):
@@ -1037,23 +1174,72 @@ def advertised_bridge_url(config: dict[str, Any]) -> str:
     return bridge_url(config)
 
 
-def http_json(url: str, method: str = "GET", body: dict[str, Any] | None = None, timeout: int = 8) -> dict[str, Any]:
+def http_json(
+    url: str,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    timeout: int = 8,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     payload = None if body is None else json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"} if payload is not None else {}
-    req = request.Request(url=url, data=payload, headers=headers, method=method)
+    request_headers = dict(headers or {})
+    if payload is not None:
+        request_headers.setdefault("Content-Type", "application/json")
+    req = request.Request(url=url, data=payload, headers=request_headers, method=method)
     with request.urlopen(req, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}
 
 
-def get_bridge_health(base_url: str) -> tuple[str, str]:
+def get_bridge_health_payload(base_url: str) -> tuple[dict[str, Any] | None, str]:
     try:
         result = http_json(f"{base_url}/health/ready", timeout=3)
-        return str(result.get("status", "unknown")), "Bridge responded to /health/ready."
+        return result, "Bridge responded to /health/ready."
     except error.URLError:
-        return "down", "Cannot reach bridge. Start dexyd or npm run dev, then refresh."
+        return None, "Cannot reach bridge. Start dexyd or npm run dev, then refresh."
     except Exception as exc:
-        return "error", str(exc)
+        return None, str(exc)
+
+
+def get_bridge_health(base_url: str) -> tuple[str, str]:
+    result, detail = get_bridge_health_payload(base_url)
+    if not result:
+        return ("down" if detail.startswith("Cannot reach") else "error"), detail
+    return str(result.get("status", "unknown")), detail
+
+
+def opencode_server_base_url(config: dict[str, Any]) -> str:
+    server = config["opencode"]["server"]
+    host = str(server["host"])
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{server['port']}"
+
+
+def opencode_auth_headers(config: dict[str, Any]) -> dict[str, str]:
+    password = str(config.get("opencode", {}).get("server", {}).get("password") or "")
+    if not password:
+        return {}
+    token = base64.b64encode(f"opencode:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+def get_opencode_health(config: dict[str, Any]) -> tuple[str, str, str | None]:
+    opencode = config.get("opencode", {})
+    if not opencode.get("enabled"):
+        return "disabled", "OpenCode integration disabled in config.", None
+    base_url = opencode_server_base_url(config)
+    try:
+        result = http_json(f"{base_url}/global/health", timeout=2, headers=opencode_auth_headers(config))
+        healthy = bool(result.get("healthy"))
+        version = str(result.get("version") or "") or None
+        return ("ready" if healthy else "degraded"), f"{base_url}/global/health responded.", version
+    except error.URLError:
+        return "stopped", f"Cannot reach OpenCode server at {base_url}.", None
+    except Exception as exc:
+        return "error", str(exc), None
 
 
 def wait_for_bridge_ready(base_url: str, timeout_seconds: int = 90, pid: int | None = None) -> tuple[bool, str]:
@@ -1141,6 +1327,15 @@ def sqlite_path_for(config: dict[str, Any]) -> Path:
     return sqlite_path if sqlite_path.is_absolute() else (Path.cwd() / sqlite_path).resolve()
 
 
+def opencode_sqlite_path_for(config: dict[str, Any]) -> Path:
+    data_dir = Path(str(config["opencode"]["dataDir"])).expanduser()
+    return (data_dir if data_dir.is_absolute() else (Path.cwd() / data_dir)).resolve() / "opencode.db"
+
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser().resolve()
+
+
 def read_devices(sqlite_path: Path) -> list[DeviceRecord]:
     if not sqlite_path.exists():
         return []
@@ -1180,12 +1375,171 @@ def read_sessions(sqlite_path: Path, limit: int = 20) -> list[SessionRecord]:
             """,
             (limit,),
         )
-        return [SessionRecord(*row) for row in cursor.fetchall()]
+        return [
+            SessionRecord(
+                id=str(row[0]),
+                status=str(row[1]),
+                profile=str(row[2]),
+                workspace_path=str(row[3]),
+                updated_at=str(row[4]),
+                title=str(row[5]) if row[5] else None,
+                source="dexyd",
+            )
+            for row in cursor.fetchall()
+        ]
     except sqlite3.Error:
         return []
     finally:
         connection.close()
 
+
+def normalize_external_timestamp(value: Any) -> str:
+    if isinstance(value, (int, float)) and value > 0:
+        try:
+            return dt.datetime.fromtimestamp(value / 1000 if value > 10_000_000_000 else value, tz=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OSError, OverflowError, ValueError):
+            return "1970-01-01T00:00:00.000Z"
+    raw = str(value or "").strip()
+    if raw.isdigit():
+        return normalize_external_timestamp(int(raw))
+    if raw:
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return parsed.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
+    return "1970-01-01T00:00:00.000Z"
+
+
+def sqlite_table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    cursor = connection.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in cursor.fetchall()}
+
+
+def sqlite_table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return cursor.fetchone() is not None
+
+
+def read_opencode_sessions(config: dict[str, Any], limit: int = 20) -> list[SessionRecord]:
+    sqlite_path = opencode_sqlite_path_for(config)
+    if not sqlite_path.exists():
+        return []
+    connection = sqlite3.connect(str(sqlite_path))
+    try:
+        if not sqlite_table_exists(connection, "session"):
+            return []
+        columns = sqlite_table_columns(connection, "session")
+        select_optional = lambda name, fallback="NULL": f"s.{name} AS {name}" if name in columns else f"{fallback} AS {name}"
+        order = "s.time_updated DESC" if "time_updated" in columns else "s.id DESC"
+        cursor = connection.cursor()
+        cursor.execute(
+            f"""
+            SELECT s.id,
+                   {select_optional('directory', "''")},
+                   {select_optional('path')},
+                   {select_optional('title', "''")},
+                   {select_optional('agent')},
+                   {select_optional('model')},
+                   {select_optional('time_created', "0")},
+                   {select_optional('time_updated', "0")}
+            FROM session s
+            ORDER BY {order}
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        sessions: list[SessionRecord] = []
+        for session_id, directory, path_value, title, agent, model, created_at, updated_at in cursor.fetchall():
+            model_name = str(model or "")
+            if model_name.startswith("{"):
+                try:
+                    parsed = json.loads(model_name)
+                    if isinstance(parsed, dict):
+                        model_name = str(parsed.get("id") or parsed.get("modelID") or model_name)
+                except json.JSONDecodeError:
+                    pass
+            workspace = str(directory or path_value or "").strip()
+            sessions.append(
+                SessionRecord(
+                    id=str(session_id),
+                    status="idle",
+                    profile="opencode",
+                    workspace_path=workspace,
+                    updated_at=normalize_external_timestamp(updated_at),
+                    title=str(title).strip() or None,
+                    source="opencode",
+                    created_at=normalize_external_timestamp(created_at),
+                    model=model_name or None,
+                    agent=str(agent).strip() or None,
+                )
+            )
+        return sessions
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+
+
+def read_codex_sessions(config: dict[str, Any], limit: int = 20) -> list[SessionRecord]:
+    index_path = codex_home() / "session_index.jsonl"
+    if not index_path.exists():
+        return []
+    try:
+        lines = [line for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+    sessions: list[SessionRecord] = []
+    workspace_root = str(workspace_root_for(config))
+    for line in reversed(lines[-500:]):
+        if len(sessions) >= limit:
+            break
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        session_id = str(parsed.get("id") or "").strip()
+        if not session_id:
+            continue
+        title = str(parsed.get("thread_name") or parsed.get("title") or "").strip() or None
+        updated = normalize_external_timestamp(parsed.get("updated_at") or parsed.get("timestamp"))
+        sessions.append(
+            SessionRecord(
+                id=session_id,
+                status="idle",
+                profile="codex",
+                workspace_path=workspace_root,
+                updated_at=updated,
+                title=title,
+                source="codex",
+                created_at=updated,
+            )
+        )
+    return sessions
+
+
+def read_visible_sessions(config: dict[str, Any], limit: int = 20) -> list[SessionRecord]:
+    sqlite_path = sqlite_path_for(config)
+    sessions = [
+        *read_sessions(sqlite_path, limit=limit),
+        *read_opencode_sessions(config, limit=limit),
+        *read_codex_sessions(config, limit=limit),
+    ]
+    seen: set[str] = set()
+    unique: list[SessionRecord] = []
+    for session in sorted(sessions, key=lambda item: item.updated_at, reverse=True):
+        if session.id in seen:
+            continue
+        seen.add(session.id)
+        unique.append(session)
+        if len(unique) >= limit:
+            break
+    return unique
 
 
 def read_chat_messages(sqlite_path: Path, session_id: str, limit: int = 40) -> list[str]:
@@ -1225,6 +1579,110 @@ def read_chat_messages(sqlite_path: Path, session_id: str, limit: int = 40) -> l
         role = event_type.replace("chat.message.", "") if event_type.startswith("chat.message.") else source
         messages.append(f"[{created_at}] {role}\n{content[:1600]}")
     return messages
+
+
+def extract_opencode_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(filter(None, (extract_opencode_text(item) for item in value))).strip()
+    if not isinstance(value, dict):
+        return ""
+    if isinstance(value.get("text"), str):
+        return str(value["text"]).strip()
+    if isinstance(value.get("content"), str):
+        return str(value["content"]).strip()
+    if isinstance(value.get("content"), list):
+        return extract_opencode_text(value["content"])
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        return extract_opencode_text(parts)
+    return ""
+
+
+def parse_json_field(raw: Any) -> Any:
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def read_opencode_chat_messages(config: dict[str, Any], session_id: str, limit: int = 40) -> list[str]:
+    sqlite_path = opencode_sqlite_path_for(config)
+    if not sqlite_path.exists() or not session_id.strip():
+        return []
+    connection = sqlite3.connect(str(sqlite_path))
+    try:
+        cursor = connection.cursor()
+        if sqlite_table_exists(connection, "session_message"):
+            cursor.execute(
+                """
+                SELECT type, data, time_created
+                FROM session_message
+                WHERE session_id = ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (session_id.strip(), limit),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                messages: list[str] = []
+                for role, raw_data, created_at in rows:
+                    data = parse_json_field(raw_data)
+                    content = extract_opencode_text(data) or extract_opencode_text(data.get("message") if isinstance(data, dict) else "")
+                    if content:
+                        messages.append(f"[{normalize_external_timestamp(created_at)}] {str(role)}\n{content[:1600]}")
+                return messages
+
+        if not sqlite_table_exists(connection, "message") or not sqlite_table_exists(connection, "part"):
+            return []
+        cursor.execute(
+            """
+            SELECT id, data, time_created
+            FROM message
+            WHERE session_id = ?
+            ORDER BY time_created ASC, id ASC
+            LIMIT ?
+            """,
+            (session_id.strip(), limit),
+        )
+        message_rows = cursor.fetchall()
+        if not message_rows:
+            return []
+        cursor.execute(
+            """
+            SELECT message_id, data
+            FROM part
+            WHERE session_id = ?
+            ORDER BY message_id ASC, time_created ASC, id ASC
+            """,
+            (session_id.strip(),),
+        )
+        parts_by_message: dict[str, list[Any]] = {}
+        for message_id, raw_part in cursor.fetchall():
+            parts_by_message.setdefault(str(message_id), []).append(parse_json_field(raw_part))
+        messages = []
+        for message_id, raw_message, created_at in message_rows:
+            data = parse_json_field(raw_message)
+            role = str(data.get("role") or "system") if isinstance(data, dict) else "system"
+            content = extract_opencode_text({"parts": parts_by_message.get(str(message_id), [])}) or extract_opencode_text(data)
+            if content:
+                messages.append(f"[{normalize_external_timestamp(created_at)}] {role}\n{content[:1600]}")
+        return messages
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+
+
+def read_any_chat_messages(config: dict[str, Any], session_id: str, limit: int = 40) -> list[str]:
+    local = read_chat_messages(sqlite_path_for(config), session_id, limit=limit)
+    if local:
+        return local
+    return read_opencode_chat_messages(config, session_id, limit=limit)
 
 
 def ensure_dexyd_help_workspace(config: dict[str, Any]) -> Path:
@@ -1447,6 +1905,72 @@ def create_local_session(sqlite_path: Path, workspace_path: str, title: str) -> 
         connection.commit()
     finally:
         connection.close()
+    return session_id
+
+
+def codex_session_file_timestamp(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z").replace(":", "-").replace(".", "-")
+
+
+def create_codex_session(config: dict[str, Any], workspace_path: str, title: str) -> str:
+    workspace = Path(workspace_path).expanduser().resolve()
+    if not workspace.exists():
+        raise RuntimeError(f"Workspace does not exist: {workspace}")
+    session_id = str(uuid.uuid4())
+    now = dt.datetime.now(dt.timezone.utc)
+    timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    session_dir = codex_home() / "sessions" / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    codex_home().mkdir(parents=True, exist_ok=True)
+    session_path = session_dir / f"rollout-{codex_session_file_timestamp(now)}-{session_id}.jsonl"
+    clean_title = re.sub(r"\s+", " ", title or "").strip()[:120] or workspace.name or "Dexyd session"
+    meta = {
+        "timestamp": timestamp,
+        "type": "session_meta",
+        "payload": {
+            "id": session_id,
+            "timestamp": timestamp,
+            "cwd": str(workspace),
+            "originator": "dexyd",
+            "source": "dexyd-tui",
+            "thread_source": "user",
+        },
+    }
+    with session_path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(meta, separators=(",", ":")) + "\n")
+    with (codex_home() / "session_index.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"id": session_id, "thread_name": clean_title, "updated_at": timestamp}, separators=(",", ":")) + "\n")
+    return session_id
+
+
+def create_opencode_session(config: dict[str, Any], title: str) -> str:
+    if not config["opencode"].get("enabled"):
+        raise RuntimeError("OpenCode integration is disabled. Switch to OpenCode or enable it in Advanced first.")
+    body: dict[str, Any] = {}
+    clean_title = re.sub(r"\s+", " ", title or "").strip()[:200]
+    if clean_title:
+        body["title"] = clean_title
+    agent = str(config["opencode"].get("defaultAgent") or "").strip()
+    if agent:
+        body["agent"] = agent
+    default_model = str(config["opencode"].get("defaultModel") or "").strip()
+    if "/" in default_model:
+        provider, model = default_model.split("/", 1)
+        if provider and model:
+            body["providerID"] = provider
+            body["modelID"] = model
+    result = http_json(
+        f"{opencode_server_base_url(config)}/session",
+        method="POST",
+        body=body,
+        timeout=10,
+        headers=opencode_auth_headers(config),
+    )
+    session_id = str(result.get("id") or result.get("sessionID") or "").strip()
+    if not session_id and isinstance(result.get("session"), dict):
+        session_id = str(result["session"].get("id") or "").strip()
+    if not session_id:
+        raise RuntimeError(f"OpenCode did not return a session id: {result}")
     return session_id
 
 
@@ -1695,10 +2219,29 @@ class DexydTextualApp(App[None]):
         self.update_log_text = ""
         self.update_busy = False
         self.update_info: UpdateInfo | None = None
+        self.update_relaunch_pending = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent(id="main"):
+            with TabPane("Assistant", id="assistant"):
+                with VerticalScroll(classes="page"):
+                    yield Static(
+                        "ASSISTANT MODE\n\n"
+                        "Choose what new sessions use. Codex / OMX writes normal Codex sessions and honors the configured harness. "
+                        "OpenCode talks to the configured local OpenCode server and shows OpenCode sessions.",
+                        classes="hero",
+                    )
+                    yield Static("", id="assistant_mode_status_big", classes="panel")
+                    with Horizontal(classes="action_row"):
+                        yield Button("Switch to Codex / OMX", id="assistant_use_codex_mode", variant="primary")
+                        yield Button("Switch to OpenCode", id="assistant_use_opencode_mode", variant="success")
+                    yield Static(
+                        "TIP\n\n"
+                        "After switching, use Work → Create session. If OpenCode shows stopped, start dexyd.service or run OpenCode on the configured host/port.",
+                        classes="soft_panel",
+                    )
+
             with TabPane("Home", id="dashboard"):
                 with VerticalScroll(classes="page"):
                     yield Static("", id="dashboard_hero", classes="hero")
@@ -1707,6 +2250,7 @@ class DexydTextualApp(App[None]):
                         yield Static("", id="storage_card", classes="panel col")
                     with Horizontal(classes="row"):
                         yield Static("", id="security_card", classes="panel col")
+                        yield Static("", id="assistant_card", classes="panel col")
                         yield Static("", id="next_steps_card", classes="panel col")
                     with Horizontal(classes="action_row"):
                         yield Button("Refresh", id="refresh_dashboard", variant="primary")
@@ -1743,7 +2287,18 @@ class DexydTextualApp(App[None]):
 
             with TabPane("Work", id="sessions"):
                 with VerticalScroll(classes="page"):
-                    yield Static("WORKSPACES & SESSIONS\n\nCreate local helper sessions, inspect recent sessions, and view chat/diff snippets from the bridge side.", classes="hero")
+                    yield Static("WORKSPACES & SESSIONS\n\nSwitch the default assistant, create Codex/OpenCode sessions, inspect recent sessions, and view chat/diff snippets from the bridge side.", classes="hero")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("ASSISTANT MODE", classes="section_title")
+                            yield Static("", id="assistant_mode_status")
+                            with Horizontal(classes="action_row"):
+                                yield Button("Use Codex / OMX", id="use_codex_mode", variant="primary")
+                                yield Button("Use OpenCode", id="use_opencode_mode", variant="success")
+                        yield Static(
+                            "MODE HELP\n\nCodex mode creates sessions in ~/.codex and honors the Codex/OMX harness settings used by the bridge. OpenCode mode creates sessions through the local OpenCode server and shows OpenCode SQLite-backed sessions/messages.",
+                            classes="soft_panel col",
+                        )
                     with Horizontal(classes="row"):
                         with Vertical(classes="panel col"):
                             yield Static("PROJECT", classes="section_title")
@@ -1857,6 +2412,38 @@ class DexydTextualApp(App[None]):
                             yield Static("Optional args before exec.", classes="field_help")
                             yield Input(placeholder="--profile mobile", id="cfg_codex_harness_args")
                         yield Static("", id="settings_summary", classes="panel col")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="panel col"):
+                            yield Static("ASSISTANT DEFAULT", classes="section_title")
+                            yield Static("Default mode", classes="field_label")
+                            yield Static("codex uses Codex/OMX; opencode uses OpenCode sessions.", classes="field_help")
+                            yield Input(placeholder="codex | opencode", id="cfg_assistant_mode")
+                            with Horizontal(classes="action_row"):
+                                yield Button("Codex default", id="advanced_use_codex_mode")
+                                yield Button("OpenCode default", id="advanced_use_opencode_mode")
+                        with Vertical(classes="panel col"):
+                            yield Static("OPENCODE", classes="section_title")
+                            yield Static("Enabled", classes="field_label")
+                            yield Static("true or false. When true, the bridge can auto-start/adopt opencode serve.", classes="field_help")
+                            yield Input(placeholder="true", id="cfg_opencode_enabled")
+                            yield Static("Runtime", classes="field_label")
+                            yield Input(placeholder="opencode", id="cfg_opencode_runtime_path")
+                            yield Static("Data dir", classes="field_label")
+                            yield Input(placeholder="~/.local/share/opencode", id="cfg_opencode_data_dir")
+                            yield Static("Server host", classes="field_label")
+                            yield Input(placeholder="127.0.0.1", id="cfg_opencode_server_host")
+                            yield Static("Server port", classes="field_label")
+                            yield Input(placeholder="4243", id="cfg_opencode_server_port", type="integer")
+                            yield Static("Default agent", classes="field_label")
+                            yield Input(placeholder="build", id="cfg_opencode_default_agent")
+                            yield Static("Default model", classes="field_label")
+                            yield Static("Optional provider/model, e.g. anthropic/claude-sonnet-4.", classes="field_help")
+                            yield Input(placeholder="provider/model", id="cfg_opencode_default_model")
+                            yield Static("Permission mode", classes="field_label")
+                            yield Input(placeholder="bypass | inherit | workspace-write", id="cfg_opencode_permission_mode")
+                            yield Static("Server password", classes="field_label")
+                            yield Static("Optional OPENCODE_SERVER_PASSWORD for protected servers.", classes="field_help")
+                            yield Input(placeholder="optional", id="cfg_opencode_server_password", password=True)
                     with Horizontal(classes="action_row"):
                         yield Button("Save advanced settings", id="save_settings", variant="success")
                         yield Button("Reset form", id="reset_settings")
@@ -1902,6 +2489,7 @@ class DexydTextualApp(App[None]):
         self._load_settings_inputs()
         self.refresh_all()
         self.refresh_settings_summary()
+        self.refresh_assistant_status()
         self.refresh_cloudflare()
         self.refresh_updates()
 
@@ -1916,6 +2504,7 @@ class DexydTextualApp(App[None]):
         self.refresh_projects()
         self.refresh_cloudflare()
         self.refresh_bridge_config_status()
+        self.refresh_assistant_status()
         self.refresh_updates()
 
     def reload_config(self) -> None:
@@ -1957,6 +2546,18 @@ class DexydTextualApp(App[None]):
         self.query_one("#cfg_codex_harness_mode", Input).value = str(harness["mode"])
         self.query_one("#cfg_codex_harness_command", Input).value = str(harness["command"])
         self.query_one("#cfg_codex_harness_args", Input).value = shlex.join([str(arg) for arg in harness.get("args", [])])
+        opencode = config["opencode"]
+        opencode_server = opencode["server"]
+        self.query_one("#cfg_assistant_mode", Input).value = normalize_assistant_mode(config.get("assistant", {}))
+        self.query_one("#cfg_opencode_enabled", Input).value = "true" if opencode.get("enabled") else "false"
+        self.query_one("#cfg_opencode_runtime_path", Input).value = str(opencode.get("runtimePath") or "opencode")
+        self.query_one("#cfg_opencode_data_dir", Input).value = str(opencode.get("dataDir") or DEFAULT_CONFIG["opencode"]["dataDir"])
+        self.query_one("#cfg_opencode_server_host", Input).value = str(opencode_server.get("host") or "127.0.0.1")
+        self.query_one("#cfg_opencode_server_port", Input).value = str(opencode_server.get("port") or 4243)
+        self.query_one("#cfg_opencode_default_agent", Input).value = str(opencode.get("defaultAgent") or "build")
+        self.query_one("#cfg_opencode_default_model", Input).value = str(opencode.get("defaultModel") or "")
+        self.query_one("#cfg_opencode_permission_mode", Input).value = str(opencode.get("permissionMode") or DEFAULT_CONFIG["opencode"]["permissionMode"])
+        self.query_one("#cfg_opencode_server_password", Input).value = str(opencode_server.get("password") or "")
 
     def save_cloudflare_settings_from_inputs(self, persist: bool = True) -> tuple[str, str]:
         hostname = normalize_cloudflare_hostname(self.query_one("#cf_hostname", Input).value)
@@ -2006,6 +2607,12 @@ class DexydTextualApp(App[None]):
         devices = read_devices(sqlite_path)
         session_count = read_session_count(sqlite_path)
         health, health_detail = get_bridge_health(base_url)
+        bridge_payload, _ = get_bridge_health_payload(base_url)
+        assistant_info = bridge_payload.get("assistant", {}) if isinstance(bridge_payload, dict) else {}
+        bridge_info = bridge_payload.get("bridge", {}) if isinstance(bridge_payload, dict) else {}
+        cloudflare_info = bridge_payload.get("cloudflare", {}) if isinstance(bridge_payload, dict) else {}
+        opencode_health, _opencode_detail, opencode_version = get_opencode_health(config)
+        assistant_mode = normalize_assistant_mode(config.get("assistant", {}))
 
         hero = (
             "dexyd\n\n"
@@ -2017,11 +2624,13 @@ class DexydTextualApp(App[None]):
             f"{config['server']['host']}:{config['server']['port']}\n"
             f"Log: {config['server']['logLevel']}\n"
             f"Ready: {health}\n"
-            f"Version: {read_package_version()}"
+            f"Version: {read_package_version()}\n"
+            f"Advertised: {bridge_info.get('advertisedBaseUrl') or external_url}"
         )
         storage = (
             "DATA\n\n"
             f"Sessions: {session_count}\n"
+            f"OpenCode DB: {'ready' if opencode_sqlite_path_for(config).exists() else 'missing'}\n"
             f"Devices: {len(devices)}\n"
             f"DB: {'ready' if sqlite_path.exists() else 'new'}"
         )
@@ -2031,21 +2640,35 @@ class DexydTextualApp(App[None]):
             f"Refresh: {config['auth']['refreshTokenTtlSeconds']}s\n"
             f"Key: {'set' if config['auth']['signingKey'] else 'missing'}"
         )
+        assistant = (
+            "ASSISTANT\n\n"
+            f"Default: {assistant_mode.upper()}\n"
+            f"Codex harness: {assistant_info.get('codexHarnessMode') or config['codex']['harness']['mode']}\n"
+            f"OpenCode: {assistant_info.get('opencodeStatus') or opencode_health}"
+            f"{f' · {opencode_version}' if opencode_version else ''}\n"
+            f"Tunnel: {'configured' if cloudflare_info.get('configured') else 'not configured'}"
+        )
         next_steps = (
             "ACTIONS\n\n"
             "Connection → service, tunnel, QR\n"
-            "Sessions → inspect chat\n"
+            "Work → switch Codex/OpenCode\n"
             "Updates → check latest release"
         )
         self.query_one("#dashboard_hero", Static).update(hero)
         self.query_one("#bridge_card", Static).update(bridge)
         self.query_one("#storage_card", Static).update(storage)
         self.query_one("#security_card", Static).update(security)
+        self.query_one("#assistant_card", Static).update(assistant)
         self.query_one("#next_steps_card", Static).update(next_steps)
 
     def refresh_updates(self) -> None:
         self.query_one("#update_output", Static).update(
-            format_update_info(self.update_info, busy=self.update_busy, log=self.update_log_text)
+            format_update_info(
+                self.update_info,
+                busy=self.update_busy,
+                log=self.update_log_text,
+                relaunch_pending=self.update_relaunch_pending,
+            )
         )
 
     def append_update_output(self, message: str) -> None:
@@ -2102,20 +2725,57 @@ class DexydTextualApp(App[None]):
         if self.update_info is None:
             self.update_info = latest_release_info()
             self.call_from_thread(self.refresh_updates)
-        return install_latest_bridge_update(app_root(), self.update_info, log=self.append_update_output)
+        result = install_latest_bridge_update(app_root(), self.update_info, log=self.append_update_output)
+        self.call_from_thread(self.schedule_relaunch_after_update)
+        return result
+
+    def schedule_relaunch_after_update(self) -> None:
+        self.update_relaunch_pending = True
+        self.append_update_output("Update verified. Relaunching through installed dexyd in 2 seconds…")
+        self.refresh_updates()
+        timer = threading.Timer(2.0, self.perform_update_relaunch)
+        timer.daemon = True
+        timer.start()
+
+    def perform_update_relaunch(self) -> None:
+        try:
+            relaunch_installed_tui(self.store.path)
+        except Exception as exc:  # pragma: no cover - process replacement guard
+            self.call_from_thread(self.append_update_output, f"Relaunch failed: {exc}. Run `dexyd --tui` manually.")
 
     def refresh_settings_summary(self) -> None:
         harness = self.store.config["codex"]["harness"]
+        opencode_health, opencode_detail, opencode_version = get_opencode_health(self.store.config)
         summary = (
             "CONFIG\n\n"
             f"{self.store.path}\n"
             f"{self.store.format} · {'editable' if self.store.editable else 'read-only'}\n\n"
             "LAUNCHER\n\n"
+            f"assistant default: {normalize_assistant_mode(self.store.config.get('assistant', {})).upper()}\n"
             f"{self.store.config['codex']['runtimePath']} · {harness['mode']}\n"
             f"permissions: {self.store.config['codex'].get('permissionMode', DEFAULT_CONFIG['codex']['permissionMode'])}\n"
-            f"{harness['command']} {shlex.join([str(arg) for arg in harness.get('args', [])])}"
+            f"{harness['command']} {shlex.join([str(arg) for arg in harness.get('args', [])])}\n\n"
+            "OPENCODE\n\n"
+            f"{'enabled' if self.store.config['opencode'].get('enabled') else 'disabled'} · {opencode_health}"
+            f"{f' · {opencode_version}' if opencode_version else ''}\n"
+            f"{opencode_server_base_url(self.store.config)}\n"
+            f"{opencode_detail}"
         )
         self.query_one("#settings_summary", Static).update(summary)
+
+    def refresh_assistant_status(self) -> None:
+        mode = normalize_assistant_mode(self.store.config.get("assistant", {}))
+        opencode_health, opencode_detail, opencode_version = get_opencode_health(self.store.config)
+        harness = self.store.config["codex"]["harness"]
+        status = (
+            f"Current default: {mode.upper()}\n"
+            f"Codex runtime: {self.store.config['codex']['runtimePath']} · harness {harness['mode']}\n"
+            f"OpenCode: {opencode_health}{f' · {opencode_version}' if opencode_version else ''}\n"
+            f"OpenCode URL: {opencode_server_base_url(self.store.config)}\n"
+            f"{opencode_detail}"
+        )
+        self.query_one("#assistant_mode_status", Static).update(status)
+        self.query_one("#assistant_mode_status_big", Static).update(status)
 
     def refresh_cloudflare(self) -> None:
         output = cloudflare_status_text(self.store.config)
@@ -2130,6 +2790,11 @@ class DexydTextualApp(App[None]):
         base_url = bridge_url(config)
         public_url = advertised_bridge_url(config)
         health, detail = get_bridge_health(base_url)
+        bridge_payload, _payload_detail = get_bridge_health_payload(base_url)
+        bridge_meta = bridge_payload.get("bridge", {}) if isinstance(bridge_payload, dict) else {}
+        cloudflare_meta = bridge_payload.get("cloudflare", {}) if isinstance(bridge_payload, dict) else {}
+        assistant_meta = bridge_payload.get("assistant", {}) if isinstance(bridge_payload, dict) else {}
+        opencode_health, _opencode_detail, opencode_version = get_opencode_health(config)
         bridge_active, bridge_enabled = user_service_state("dexyd.service")
         tunnel_active, tunnel_enabled = user_service_state("dexyd-cloudflared.service")
         pid = read_pid(CLOUDFLARE_PID_FILE)
@@ -2146,6 +2811,9 @@ class DexydTextualApp(App[None]):
             f"{'●' if config_state == 'present' else '○'} tunnel config: {config_state}\n"
             f"{'●' if tunnel_process == 'running' else '○'} tunnel process: {tunnel_process}{f' · pid {pid}' if process_is_running(pid) else ''}\n"
             f"{'●' if public_url else '○'} pairing URL: {public_url}\n"
+            f"advertised URL: {bridge_meta.get('advertisedBaseUrl') or public_url}\n"
+            f"cloudflare: {cloudflare_meta.get('publicUrl') or '(not configured)'} · {cloudflare_meta.get('tunnelName') or config.get('cloudflare', {}).get('tunnelName') or 'dexyd'}\n"
+            f"assistant: codex/{assistant_meta.get('codexHarnessMode') or config['codex']['harness']['mode']} · opencode/{assistant_meta.get('opencodeStatus') or opencode_health}{f' · {opencode_version}' if opencode_version else ''}\n"
             f"cloudflared: {'installed' if cloudflared else 'missing'}{f' · {cloudflared}' if cloudflared else ''}\n"
             f"health detail: {detail}"
             f"{legacy_line}\n"
@@ -2404,8 +3072,7 @@ class DexydTextualApp(App[None]):
         )
 
     def refresh_sessions(self) -> None:
-        sqlite_path = sqlite_path_for(self.store.config)
-        sessions = read_sessions(sqlite_path)
+        sessions = read_visible_sessions(self.store.config)
         if not sessions:
             self.query_one("#session_output", Static).update("No sessions yet. Create one from the mobile Chat or Sessions screen.")
             self.query_one("#diff_output", Static).update("No session diff available.")
@@ -2415,10 +3082,12 @@ class DexydTextualApp(App[None]):
         for index, session in enumerate(sessions, start=1):
             title = session.title or Path(session.workspace_path).name or session.id[:8]
             rows.append(
-                f"{index}. {session.status.upper()}  {title}\n"
+                f"{index}. {session.status.upper()}  [{session.source}] {title}\n"
                 f"   project: {session.workspace_path}\n"
                 f"   id: {session.id}\n"
                 f"   profile: {session.profile}  updated: {session.updated_at}"
+                f"{f'  agent: {session.agent}' if session.agent else ''}"
+                f"{f'  model: {session.model}' if session.model else ''}"
             )
         self.query_one("#session_output", Static).update("\n\n".join(rows))
         chat_input = self.query_one("#chat_session_id", Input)
@@ -2428,9 +3097,8 @@ class DexydTextualApp(App[None]):
         self.query_one("#diff_output", Static).update("LATEST SESSION DIFF\n\n" + git_diff_summary(sessions[0].workspace_path))
 
     def refresh_chat_output(self) -> None:
-        sqlite_path = sqlite_path_for(self.store.config)
         session_id = self.query_one("#chat_session_id", Input).value.strip()
-        messages = read_chat_messages(sqlite_path, session_id)
+        messages = read_any_chat_messages(self.store.config, session_id)
         if not session_id:
             self.query_one("#chat_output", Static).update("CHAT\n\nEnter a session id or refresh sessions to auto-select the newest session.")
             return
@@ -2527,10 +3195,24 @@ class DexydTextualApp(App[None]):
         harness_mode = self.query_one("#cfg_codex_harness_mode", Input).value.strip().lower() or config["codex"]["harness"]["mode"]
         harness_command = self.query_one("#cfg_codex_harness_command", Input).value.strip() or config["codex"]["harness"]["command"]
         harness_args_raw = self.query_one("#cfg_codex_harness_args", Input).value.strip()
+        assistant_mode = normalize_assistant_mode(self.query_one("#cfg_assistant_mode", Input).value)
+        opencode_enabled = parse_bool(self.query_one("#cfg_opencode_enabled", Input).value, config["opencode"].get("enabled", True))
+        opencode_runtime = self.query_one("#cfg_opencode_runtime_path", Input).value.strip() or config["opencode"]["runtimePath"]
+        opencode_data_dir = self.query_one("#cfg_opencode_data_dir", Input).value.strip() or config["opencode"]["dataDir"]
+        opencode_host = self.query_one("#cfg_opencode_server_host", Input).value.strip() or config["opencode"]["server"]["host"]
+        opencode_port = parse_int(self.query_one("#cfg_opencode_server_port", Input).value, config["opencode"]["server"]["port"], 1)
+        opencode_agent = self.query_one("#cfg_opencode_default_agent", Input).value.strip() or config["opencode"]["defaultAgent"]
+        opencode_model = self.query_one("#cfg_opencode_default_model", Input).value.strip()
+        opencode_permission_mode = self.query_one("#cfg_opencode_permission_mode", Input).value.strip() or config["opencode"].get("permissionMode", DEFAULT_CONFIG["opencode"]["permissionMode"])
+        opencode_password = self.query_one("#cfg_opencode_server_password", Input).value
         if permission_mode not in PERMISSION_MODES:
             raise RuntimeError("Permission mode must be one of: inherit, read-only, workspace-write, danger-full-access, bypass")
         if harness_mode not in HARNESS_MODES:
             raise RuntimeError("Harness mode must be one of: direct, omx, custom")
+        if opencode_permission_mode not in PERMISSION_MODES:
+            raise RuntimeError("OpenCode permission mode must be one of: inherit, read-only, workspace-write, danger-full-access, bypass")
+        if opencode_port > 65535:
+            raise RuntimeError("OpenCode server port must be between 1 and 65535")
         if harness_mode != "direct" and not harness_command:
             raise RuntimeError("Harness command is required when harness mode is omx or custom")
         try:
@@ -2563,7 +3245,38 @@ class DexydTextualApp(App[None]):
             "command": harness_command,
             "args": harness_args,
         }
+        config.setdefault("assistant", {})
+        config["assistant"]["mode"] = assistant_mode
+        config["assistant"]["defaultMode"] = assistant_mode
+        config.setdefault("opencode", copy.deepcopy(DEFAULT_CONFIG["opencode"]))
+        config["opencode"]["enabled"] = opencode_enabled
+        config["opencode"]["runtimePath"] = opencode_runtime
+        config["opencode"]["dataDir"] = opencode_data_dir
+        config["opencode"]["permissionMode"] = opencode_permission_mode
+        config["opencode"].setdefault("server", copy.deepcopy(DEFAULT_CONFIG["opencode"]["server"]))
+        config["opencode"]["server"]["host"] = opencode_host
+        config["opencode"]["server"]["port"] = opencode_port
+        config["opencode"]["server"]["password"] = opencode_password
+        config["opencode"]["defaultAgent"] = opencode_agent
+        config["opencode"]["defaultModel"] = opencode_model
         save_config_store(self.store)
+
+    def set_assistant_mode(self, mode: str) -> None:
+        normalized = normalize_assistant_mode(mode)
+        self.store.config.setdefault("assistant", {})
+        self.store.config["assistant"]["mode"] = normalized
+        self.store.config["assistant"]["defaultMode"] = normalized
+        if normalized == "opencode":
+            self.store.config.setdefault("opencode", copy.deepcopy(DEFAULT_CONFIG["opencode"]))
+            self.store.config["opencode"]["enabled"] = True
+            self.query_one("#cfg_opencode_enabled", Input).value = "true"
+        self.query_one("#cfg_assistant_mode", Input).value = normalized
+        save_config_store(self.store)
+        self.refresh_dashboard()
+        self.refresh_settings_summary()
+        self.refresh_assistant_status()
+        self.refresh_bridge_config_status()
+        self.set_status(f"Assistant default switched to {normalized.upper()}. Restart bridge/service if runtime config changed.")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -2601,10 +3314,14 @@ class DexydTextualApp(App[None]):
             elif button_id == "create_session":
                 project = create_project_dir(self.store.config, self.query_one("#project_path", Input).value)
                 title = self.query_one("#session_title", Input).value
-                session_id = create_local_session(sqlite_path_for(self.store.config), str(project), title)
+                assistant_mode = normalize_assistant_mode(self.store.config.get("assistant", {}))
+                if assistant_mode == "opencode":
+                    session_id = create_opencode_session(self.store.config, title or project.name)
+                else:
+                    session_id = create_codex_session(self.store.config, str(project), title)
                 self.query_one("#chat_session_id", Input).value = session_id
                 self.refresh_sessions()
-                self.set_status(f"Session created: {session_id}")
+                self.set_status(f"{assistant_mode.upper()} session created: {session_id}")
             elif button_id == "set_session_status":
                 session_id = self.query_one("#chat_session_id", Input).value.strip()
                 status = self.query_one("#session_status", Input).value.strip().lower()
@@ -2618,10 +3335,15 @@ class DexydTextualApp(App[None]):
                 self.set_status(f"Session {'deleted' if deleted else 'hidden'}: {session_id} ({'hidden' if hidden else 'visible'})")
             elif button_id == "open_dexyd_chat":
                 self.open_dexyd_help_session()
+            elif button_id in {"use_codex_mode", "advanced_use_codex_mode", "assistant_use_codex_mode"}:
+                self.set_assistant_mode("codex")
+            elif button_id in {"use_opencode_mode", "advanced_use_opencode_mode", "assistant_use_opencode_mode"}:
+                self.set_assistant_mode("opencode")
             elif button_id in {"save_settings", "save_connection"}:
                 self._save_settings()
                 self.refresh_dashboard()
                 self.refresh_settings_summary()
+                self.refresh_assistant_status()
                 self.refresh_bridge_config_status()
                 self.set_status("Settings saved. Restart bridge/service to apply runtime changes.")
             elif button_id == "reset_settings":

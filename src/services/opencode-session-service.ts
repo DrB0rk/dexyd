@@ -216,9 +216,6 @@ export class OpenCodeSessionService {
       const cached = this.#cache.sessions.find((entry) => entry.id === sessionId);
       if (cached) return cached;
     }
-    // Only consult the opencode HTTP API for ids that look like opencode
-    // session ids (e.g. `ses_…`). Other ids (UUIDs from codex) cause the opencode
-    // server to return 500, which would be wasteful and noisy in logs.
     if (isOpenCodeSessionId(sessionId)) {
       const ready = await this.ensureServer();
       if (ready.baseUrl) {
@@ -628,9 +625,6 @@ export class OpenCodeSessionService {
   }
 
   #mapApiMessageRow(sessionId: string, rawMessage: NonNullable<Awaited<ReturnType<OpenCodeApiClient['listMessages']>>[number]>, index: number): ChatMessage | null {
-    // OpenCode 1.17 wraps each message in `{info, parts}`. Older API shapes
-    // expose the fields directly. Normalize so downstream code sees a
-    // consistent view.
     const info = (rawMessage as { info?: Record<string, unknown> }).info ?? (rawMessage as unknown as Record<string, unknown>);
     const parts = (rawMessage as { parts?: unknown[] }).parts ?? [];
     const message = { ...(info as Record<string, unknown>), parts } as {

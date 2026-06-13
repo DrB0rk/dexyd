@@ -1,4 +1,7 @@
 import pino from 'pino';
+import { accessSync, constants, existsSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
 import { advertisedBridgeBaseUrl } from '../config/bridge-url.js';
 import { DexydConfig } from '../config/schema.js';
 import { ModuleContext } from '../core/module.js';
@@ -98,6 +101,10 @@ export function buildAppContext(config: DexydConfig): AppContext {
   const commandService = new CommandService();
   const codexSessionService = new CodexSessionService(config.codex.workspaceRoot, logger);
   const diffService = new DiffService();
+  const opencodeRuntimePath = resolveExecutablePath(config.opencode.runtimePath, [
+    join(homedir(), '.opencode', 'bin', 'opencode'),
+    join(homedir(), '.local', 'bin', 'opencode')
+  ]);
 
   const codexChatService = new CodexChatService(
     db,
@@ -116,7 +123,7 @@ export function buildAppContext(config: DexydConfig): AppContext {
   const opencodeServerManager = new OpenCodeServerManager(
     {
       enabled: config.opencode.enabled,
-      runtimePath: config.opencode.runtimePath,
+      runtimePath: opencodeRuntimePath,
       host: config.opencode.server.host,
       port: config.opencode.server.port,
       startTimeoutMs: config.opencode.server.startTimeoutMs,
@@ -154,7 +161,7 @@ export function buildAppContext(config: DexydConfig): AppContext {
     opencodeSessionService,
     opencodeApiClient,
     {
-      runtimePath: config.opencode.runtimePath,
+      runtimePath: opencodeRuntimePath,
       permissionMode: config.opencode.permissionMode,
       defaultAgent: config.opencode.defaultAgent,
       defaultModel: config.opencode.defaultModel,
@@ -190,6 +197,31 @@ export function buildAppContext(config: DexydConfig): AppContext {
     diffService,
     projectService
   };
+}
+
+function resolveExecutablePath(command: string, fallbacks: string[]): string {
+  if (isExecutable(command)) return command;
+  if (!isAbsolute(command) && !command.includes('/')) {
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+      if (!directory) continue;
+      const candidate = join(directory, command);
+      if (isExecutable(candidate)) return candidate;
+    }
+  }
+  for (const fallback of fallbacks) {
+    if (isExecutable(fallback)) return fallback;
+  }
+  return command;
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    if (!existsSync(path)) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function serializeRequest(request: {

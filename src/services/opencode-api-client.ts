@@ -784,11 +784,6 @@ export class OpenCodeApiClient {
     });
   }
 
-  /**
-   * Subscribe to OpenCode SSE events. Returns an async iterator that yields
-   * parsed events. The iterator terminates when the connection drops or the
-   * signal is aborted.
-   */
   async *subscribeEvents(signal?: AbortSignal): AsyncGenerator<OpenCodeEvent, void, void> {
     const url = `${this.#baseUrl}/event`;
     const headers = this.#headers({ Accept: 'text/event-stream' });
@@ -827,7 +822,6 @@ export class OpenCodeApiClient {
       try {
         await reader.cancel();
       } catch {
-        // ignore
       }
     }
   }
@@ -878,7 +872,6 @@ function parseSseBlock(block: string): OpenCodeEvent | null {
     } else if (line.startsWith('data:')) {
       dataPayload += line.slice(5).trim();
     } else if (line.startsWith(':')) {
-      // SSE comment, ignore
     }
   }
   if (!dataPayload) return null;

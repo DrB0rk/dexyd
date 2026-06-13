@@ -238,9 +238,6 @@ export class OpenCodeChatService {
         : null
     );
 
-    // If the session detail didn't have a model assigned yet (freshly created
-    // sessions get the model only after their first message), fall back to the
-    // bridge's configured defaults so the prompt can be dispatched.
     const agent = turn.agent ?? this.#config.defaultAgent;
     const defaultModel = !turn.model ? await this.#sessionService.resolveDefaultModel() : null;
 

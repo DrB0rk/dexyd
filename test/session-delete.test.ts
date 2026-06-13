@@ -66,7 +66,7 @@ describe('session deletion', () => {
     }
   });
 
-  it('lists hidden sessions, restores them, and keeps project session filters exact', async () => {
+  it('lists hidden sessions, restores them, and includes child workspaces in project session filters', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'dexyd-session-restore-'));
     cleanupPaths.push(tempDir);
     const workspaceRoot = join(tempDir, 'workspace');
@@ -119,7 +119,7 @@ codex:
       expect(listedByProject.statusCode).toBe(200);
       const listedProjectSessionIds = listedByProject.json().sessions.map((session: { id: string }) => session.id);
       expect(listedProjectSessionIds).toContain(sessionId);
-      expect(listedProjectSessionIds).not.toContain(nestedSessionId);
+      expect(listedProjectSessionIds).toContain(nestedSessionId);
 
       const deleted = await service.app.inject({ method: 'DELETE', url: `/sessions/${sessionId}`, headers });
       expect(deleted.statusCode).toBe(200);

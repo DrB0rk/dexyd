@@ -196,7 +196,6 @@ describe('OpenCodeApiClient', () => {
     const client = new OpenCodeApiClient({ baseUrl, timeoutMs: 1000, retries: 0 });
     const events: unknown[] = [];
     client.addEventListener((event) => events.push(event));
-    // Internal emit is private; ensure addEventListener is wired
     expect(typeof client.addEventListener).toBe('function');
   });
 

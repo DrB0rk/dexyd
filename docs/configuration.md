@@ -226,6 +226,39 @@ codex:
 
 Custom mode should behave like a Codex-compatible wrapper that accepts `exec` and streams recognizable output.
 
+## `opencode`
+
+Dexyd can start and monitor an OpenCode `serve` daemon for OpenCode-backed sessions.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `true` | Enables OpenCode bridge support. |
+| `runtimePath` | `opencode` | OpenCode executable. Dexyd also checks common user install paths when this is not on `PATH`. |
+| `dataDir` | `~/.local/share/opencode` | OpenCode data directory used for SQLite session fallback reads. |
+| `permissionMode` | `bypass` | OpenCode permission mode for mobile-started turns. |
+| `defaultAgent` | `build` | Agent used when creating OpenCode sessions. |
+| `defaultModel` | empty | Optional default model, such as `provider/model`. |
+| `eventStreamEnabled` | `true` | Streams OpenCode server events into Dexyd realtime updates. |
+| `streamReconnectMs` | `2000` | Delay between OpenCode event stream reconnect attempts. |
+| `streamIdleTimeoutMs` | `0` | Optional idle timeout for event streams; `0` disables it. |
+| `server.autoStart` | `true` | Starts `opencode serve` when needed. |
+| `server.host` | `127.0.0.1` | OpenCode server bind host. |
+| `server.port` | `4243` | OpenCode server port. |
+| `server.startTimeoutMs` | `15000` | Startup wait limit. |
+| `server.healthTimeoutMs` | `4000` | Health-check timeout. |
+| `server.password` | empty | Optional OpenCode server password for Basic auth. |
+| `server.cors` | `[]` | CORS origins passed to OpenCode. |
+| `server.mdns` | `false` | Enables OpenCode mDNS when supported. |
+| `server.mdnsDomain` | `opencode.local` | mDNS domain when enabled. |
+| `server.extraArgs` | `[]` | Extra arguments passed to `opencode serve`. |
+
+## `assistant`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `defaultMode` | `codex` | Default assistant backend for new TUI/mobile work: `codex` or `opencode`. |
+| `mode` | unset | Backward-compatible alias for `defaultMode`. |
+
 ## `plugins`
 
 | Key | Default | Purpose |

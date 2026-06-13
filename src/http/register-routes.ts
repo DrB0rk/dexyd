@@ -117,6 +117,7 @@ export async function registerRoutes(
         configured: Boolean(cloudflareHostname)
       },
       assistant: {
+        defaultMode: context.config.assistant.defaultMode,
         codexHarnessMode: context.config.codex.harness.mode,
         opencodeEnabled: context.opencodeServerManager.isEnabled(),
         opencodeStatus: context.opencodeServerManager.state.status
@@ -833,16 +834,19 @@ export async function registerRoutes(
     const hidden = context.db.listHiddenSessionIds();
     const allLocalSessions = context.db.listSessions(5000);
     const allCodexSessions = context.codexSessionService.listSessions(5000);
-    const allOpenCodeSessions = await context.opencodeSessionService.listSessions(5000);
-    const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions, ...allOpenCodeSessions]
+    const allOpenCodeSessions = await listOpenCodeSessionsForAggregate(context, 5000);
+    const sessions = mergeSessions([...allLocalSessions, ...allCodexSessions, ...allOpenCodeSessions])
       .filter((session) => !hidden.has(session.id))
-      .filter((session) => !resolvedWorkspacePath || sessionWithinWorkspace(session.workspacePath, resolvedWorkspacePath))
+      .filter((session) => {
+        if (!resolvedWorkspacePath) return true;
+        return isRootedInWorkspace(session.workspacePath, resolvedWorkspacePath);
+      })
       .map((session) => {
         if (session.source === 'opencode') {
           return context.opencodeChatService.applyRuntimeStatus(session);
         }
         return context.codexChatService.applyRuntimeStatus(session);
-      }))
+      })
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
       .slice(0, limit);
     return { sessions };
@@ -854,7 +858,7 @@ export async function registerRoutes(
 
     const hidden = context.db.listHiddenSessions();
     const hiddenIds = new Set(hidden.map((session) => session.id));
-    const allOpenCodeSessionsForHidden = await context.opencodeSessionService.listSessions(5000);
+    const allOpenCodeSessionsForHidden = await listOpenCodeSessionsForAggregate(context, 5000);
     const visibleRecords = mergeSessions([
       ...context.db.listSessions(5000),
       ...context.codexSessionService.listSessions(5000),
@@ -1486,7 +1490,7 @@ export async function registerRoutes(
       ...(parsed.data.sessionId ? { sessionId: parsed.data.sessionId } : {})
     });
 
-    const opencodeSnapshot = replay.replayExpired ? await context.opencodeSessionService.listSessions(200) : [];
+    const opencodeSnapshot = replay.replayExpired ? await listOpenCodeSessionsForAggregate(context, 200) : [];
     return {
       ...replay,
       snapshot: replay.replayExpired
@@ -1529,7 +1533,7 @@ sessions: [
     });
 
     if (replay.replayExpired) {
-      const opencodeReplaySessions = await context.opencodeSessionService.listSessions(200);
+      const opencodeReplaySessions = await listOpenCodeSessionsForAggregate(context, 200);
       context.streamHub.sendJson(socket, {
         type: 'replay.expired',
         snapshot: {
@@ -1560,6 +1564,13 @@ function getChatService(context: AppContext, session: SessionRecord) {
   return session.source === 'opencode' ? context.opencodeChatService : context.codexChatService;
 }
 
+async function listOpenCodeSessionsForAggregate(context: AppContext, limit: number): Promise<SessionRecord[]> {
+  if (context.opencodeSessionService.serverState.status === 'ready') {
+    return context.opencodeSessionService.listSessions(limit);
+  }
+  return context.opencodeSessionService.listSessionsFromSqlite(limit);
+}
+
 async function getSession(context: AppContext, sessionId: string): Promise<SessionRecord | null> {
   const localSession = context.db.getSession(sessionId);
   const codexSession = context.codexSessionService.getSession(sessionId);
@@ -1583,6 +1594,13 @@ function sessionWithinWorkspace(sessionPath: string, workspacePath: string): boo
   const normalizedSession = normalizeComparablePath(sessionPath);
   const normalizedWorkspace = normalizeComparablePath(workspacePath);
   return normalizedSession === normalizedWorkspace;
+}
+
+function isRootedInWorkspace(sessionPath: string, workspacePath: string): boolean {
+  const normalizedSession = normalizeComparablePath(sessionPath);
+  const normalizedWorkspace = normalizeComparablePath(workspacePath);
+  if (normalizedSession === normalizedWorkspace) return true;
+  return normalizedSession.startsWith(`${normalizedWorkspace}/`);
 }
 
 function normalizeComparablePath(path: string): string {

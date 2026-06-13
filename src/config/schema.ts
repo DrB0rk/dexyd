@@ -65,6 +65,10 @@ const opencodeDefaults = {
   streamIdleTimeoutMs: 0
 } as const;
 
+const assistantDefaults = {
+  defaultMode: 'codex'
+} as const;
+
 const pluginDefaults = {
   enabled: true,
   pluginDir: '.dexyd/plugins'
@@ -157,6 +161,13 @@ const opencodeSchema = z.object({
   streamIdleTimeoutMs: z.number().int().min(0).max(3_600_000).default(opencodeDefaults.streamIdleTimeoutMs)
 });
 
+const assistantSchema = z.object({
+  defaultMode: z.enum(['codex', 'opencode']).optional(),
+  mode: z.enum(['codex', 'opencode']).optional()
+}).transform((value) => ({
+  defaultMode: value.defaultMode ?? value.mode ?? assistantDefaults.defaultMode
+}));
+
 const pluginSchema = z.object({
   enabled: z.boolean().default(pluginDefaults.enabled),
   pluginDir: z.string().min(1).default(pluginDefaults.pluginDir)
@@ -174,6 +185,7 @@ export const dexydConfigSchema = z.object({
   stream: streamSchema.default(streamDefaults),
   codex: codexSchema.default(codexDefaults),
   opencode: opencodeSchema.default(opencodeDefaults),
+  assistant: assistantSchema.default(assistantDefaults),
   plugins: pluginSchema.default(pluginDefaults),
   cloudflare: cloudflareSchema.default(cloudflareDefaults)
 });

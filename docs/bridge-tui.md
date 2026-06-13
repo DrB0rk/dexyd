@@ -133,6 +133,8 @@ Advanced edits local configuration:
 - workspace root;
 - Codex runtime;
 - Codex/OMX/custom harness mode;
+- assistant mode for Codex/OpenCode;
+- OpenCode runtime, data directory, server, agent, model, and permission settings;
 - token and stream settings.
 
 Use a narrower workspace root when you want the app to see fewer files. Cloudflare hostname/name are saved in `cloudflare.*` so updates and restarts do not require re-entering them.
@@ -158,7 +160,7 @@ Updates checks GitHub Releases from inside the TUI. It shows:
 - release page URL;
 - attached Android APK name and URL when present.
 
-**Install / repair bridge** downloads the official installer to a temporary directory and reruns it against the current installed Dexyd app directory using the latest release tag. It uses a sanitized environment, streams progress, preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, restarts the user service when enabled, and verifies the installed command/version. Restart the TUI after updating so the running interface uses the new code.
+**Install / repair bridge** downloads the official installer to a temporary directory and reruns it against the current installed Dexyd app directory using the latest release tag. It uses a sanitized environment, streams progress, preserves `dexyd.config.yaml` and `.dexyd` data, reinstalls dependencies, rebuilds the bridge, restarts the user service when enabled, verifies the installed command/version, and relaunches the TUI through the installed `dexyd` command.
 
 For safety, the TUI refuses to self-update a development checkout outside the installed app directory. Use git and the release workflow for development trees.
 

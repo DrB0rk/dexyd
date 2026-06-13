@@ -35,7 +35,6 @@ describe('OpenCodeServerManager', () => {
     );
 
     expect(manager.isEnabled()).toBe(false);
-    // The initial state is "stopped" until start() flips it to "disabled"
     expect(manager.state.status).toBe('stopped');
   });
 

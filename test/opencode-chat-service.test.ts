@@ -368,9 +368,6 @@ describe('OpenCodeChatService - SSE event handling', () => {
       { info: () => undefined, warn: () => undefined, debug: () => undefined }
     );
 
-    // Start the event stream so listeners get registered. The mock
-    // subscribeEvents generator never yields so the loop blocks on the
-    // first iteration, which is fine for the test.
     void service.startEventStream();
   });
 

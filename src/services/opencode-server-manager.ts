@@ -178,9 +178,6 @@ export class OpenCodeServerManager {
       const healthy = await this.healthCheck(this.#state.handle);
       if (healthy.healthy) return this.#state.handle;
     }
-    // If a server is already listening on the configured port, adopt it
-    // instead of spawning a duplicate process. This makes the bridge
-    // coexist with externally-managed opencode serve daemons.
     const existing = await probePort(this.config.host, this.config.port, 500);
     if (existing) {
       const handle = this.#deriveHandle(this.config.host, this.config.port);
@@ -311,7 +308,6 @@ export async function probePort(host: string, port: number, timeoutMs = 500): Pr
       try {
         socket.destroy();
       } catch {
-        // ignore
       }
       resolve(result);
     };

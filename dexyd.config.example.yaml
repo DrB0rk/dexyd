@@ -39,6 +39,31 @@ codex:
     command: omx
     args: []
 
+opencode:
+  enabled: true
+  runtimePath: opencode
+  dataDir: ~/.local/share/opencode
+  permissionMode: bypass
+  defaultAgent: build
+  defaultModel: ""
+  eventStreamEnabled: true
+  streamReconnectMs: 2000
+  streamIdleTimeoutMs: 0
+  server:
+    autoStart: true
+    host: 127.0.0.1
+    port: 4243
+    startTimeoutMs: 15000
+    healthTimeoutMs: 4000
+    password: ""
+    cors: []
+    mdns: false
+    mdnsDomain: opencode.local
+    extraArgs: []
+
+assistant:
+  defaultMode: codex
+
 plugins:
   enabled: true
   pluginDir: .dexyd/plugins

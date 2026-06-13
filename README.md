@@ -146,7 +146,7 @@ Open:
 dexyd --tui
 ```
 
-Go to **Updates → Check updates → Install / repair bridge**. The TUI reruns the official installer for the latest release tag in the installed app directory, streams progress, verifies the command target/version, and preserves `dexyd.config.yaml` and `.dexyd` data. Restart the TUI after updating.
+Go to **Updates → Check updates → Install / repair bridge**. The TUI reruns the official installer for the latest release tag in the installed app directory, streams progress, verifies the command target/version, preserves `dexyd.config.yaml` and `.dexyd` data, and relaunches through the installed `dexyd` command.
 
 ### Android app
 
