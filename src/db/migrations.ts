@@ -127,5 +127,12 @@ export const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_scheduled_messages_session ON scheduled_messages(session_id);
       CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, next_run_at);
     `
+  },
+  {
+    id: '0006_session_source',
+    sql: `
+      ALTER TABLE sessions ADD COLUMN source TEXT DEFAULT 'dexyd';
+      CREATE INDEX IF NOT EXISTS idx_sessions_source_updated_at ON sessions(source, updated_at);
+    `
   }
 ];

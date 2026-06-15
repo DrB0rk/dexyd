@@ -1,12 +1,12 @@
 # Mobile app
 
-The Dexyd mobile app is the focused phone interface for Codex/OMX sessions. Android is the primary target today. iOS has an initial native target that shares the same JavaScript app.
+The Dexyd mobile app is the focused phone interface for Codex/OMX and OpenCode sessions. Android is the primary target today. iOS has an initial native target that shares the same JavaScript app.
 
 ## Core ideas
 
 - **Bridge profile**: one paired computer/bridge, including URL and tokens.
 - **Project**: a workspace directory under the bridge `codex.workspaceRoot`.
-- **Session**: a Codex/OMX conversation for a project.
+- **Session**: a Codex/OMX or OpenCode conversation for a project.
 - **Inbox item**: something that needs attention, such as a question, approval, alert, or important update.
 - **Chat page**: a full-screen conversation view opened from a session.
 
@@ -53,7 +53,7 @@ Removing a project from the app only removes it from Dexyd's selector/cache. It 
 
 ## Sessions screen
 
-Sessions are grouped by project. Each session row shows status so multiple sessions can be monitored at once.
+Sessions are grouped by project and then by runtime. OpenCode sessions and Codex/OMX sessions can appear together in the same project, but each row keeps its original runtime label.
 
 Common statuses:
 
@@ -72,9 +72,13 @@ Swipe down to refresh Sessions. Cached sessions remain visible if the bridge is 
 
 ## Creating sessions
 
-Use the plus action near the project selector or Sessions screen to create a new session for the selected project. Dexyd starts sessions in the selected workspace and launches Codex either directly or through the configured harness.
+Use the plus action near the project selector or Sessions screen to create a new session for the selected project. The New Session panel lets you choose **Codex / OMX** or **OpenCode** for that session.
+
+Dexyd starts sessions in the selected workspace and keeps the selected runtime attached to the session. Changing the default assistant mode later does not move existing sessions between runtimes.
 
 If the bridge is configured for OMX harness mode, mobile turns can use OMX behavior and commands through the bridge-side runtime.
+
+OpenCode sessions use the bridge's OpenCode integration and are listed separately from Codex/OMX sessions inside the project.
 
 ## Chat
 
@@ -85,12 +89,12 @@ Chat includes:
 - user messages;
 - assistant messages;
 - compact working status;
-- queued follow-up messages;
+- queued follow-up messages where supported by the runtime;
 - approval/question interactions;
 - usage/account context in appropriate places;
 - **View message diff** action after completed responses that changed files.
 
-If a session is already busy, a newly sent message is queued instead of being dropped. The queue is visible from chat, and queued messages can be steered with extra guidance before they run.
+For Codex/OMX sessions, if a session is already busy, a newly sent message is queued instead of being dropped. The queue is visible from chat, and queued messages can be steered with extra guidance before they run.
 
 The input box is docked above the keyboard and should remain visible across screen sizes.
 

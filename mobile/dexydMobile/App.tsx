@@ -971,10 +971,10 @@ export default function App() {
   }, [sessions, tokens]);
 
   const createNamedSession = useCallback(
-    (project: ProjectOption, title: string) => {
+    (project: ProjectOption, title: string, source: 'codex' | 'opencode') => {
       if (!tokens) return;
       sessions
-        .create(project.path, title, assistantMode === 'opencode' ? 'opencode' : 'codex')
+        .create(project.path, title, source)
         .then(session => {
           if (!session) return;
           setTransientSession(session);
@@ -985,7 +985,7 @@ export default function App() {
         })
         .catch(() => undefined);
     },
-    [assistantMode, selectProject, sessions, tokens],
+    [selectProject, sessions, tokens],
   );
 
   const removeProject = useCallback(
@@ -1273,6 +1273,7 @@ export default function App() {
                 visible={addSessionOpen}
                 projects={projectOptions}
                 selectedProject={selectedProject}
+                assistantMode={assistantMode}
                 onClose={() => setAddSessionOpen(false)}
                 onNewProject={() => {
                   setAddSessionOpen(false);
@@ -1325,12 +1326,6 @@ export default function App() {
                 authReady={Boolean(auth.auth)}
                 items={attentionItems}
                 bridgeHealth={bridgeHealth}
-                bridgeStatus={bridgeStatus}
-                assistantMode={assistantMode}
-                onAssistantModeChange={setAssistantMode}
-                opencodeStatus={opencodeStatus}
-                opencodeStatusLoading={opencodeStatusLoading}
-                onRefreshOpenCodeStatus={refreshOpenCodeStatus}
                 socketState={stream.socketState}
                 sessionsCount={sessions.sessions.length}
                 usage={usage.usage}
@@ -1874,6 +1869,7 @@ function AddSessionModal({
   visible,
   projects,
   selectedProject,
+  assistantMode,
   onClose,
   onNewProject,
   onCreate,
@@ -1881,18 +1877,21 @@ function AddSessionModal({
   visible: boolean;
   projects: ProjectOption[];
   selectedProject: ProjectOption;
+  assistantMode: AssistantMode;
   onClose: () => void;
   onNewProject: () => void;
-  onCreate: (project: ProjectOption, title: string) => void;
+  onCreate: (project: ProjectOption, title: string, source: 'codex' | 'opencode') => void;
 }) {
   const [project, setProject] = useState(selectedProject);
   const [title, setTitle] = useState('');
+  const [source, setSource] = useState<'codex' | 'opencode'>('codex');
 
   useEffect(() => {
     if (!visible) return;
     setProject(selectedProject);
     setTitle('');
-  }, [selectedProject, visible]);
+    setSource(assistantMode === 'opencode' ? 'opencode' : 'codex');
+  }, [assistantMode, selectedProject, visible]);
 
   if (!visible) return null;
 
@@ -1920,6 +1919,19 @@ function AddSessionModal({
           placeholder="Optional title"
           autoCapitalize="sentences"
         />
+        <Text style={styles.inputLabel}>Runtime</Text>
+        <View style={styles.settingsActions}>
+          <TextButton
+            label="Codex / OMX"
+            variant={source === 'codex' ? 'primary' : 'secondary'}
+            onPress={() => setSource('codex')}
+          />
+          <TextButton
+            label="OpenCode"
+            variant={source === 'opencode' ? 'primary' : 'secondary'}
+            onPress={() => setSource('opencode')}
+          />
+        </View>
         <Text style={styles.inputLabel}>Project</Text>
         <ScrollView
           style={styles.projectPickList}
@@ -1954,7 +1966,7 @@ function AddSessionModal({
           <TextButton
             label="Create"
             variant="primary"
-            onPress={() => onCreate(project, title)}
+            onPress={() => onCreate(project, title, source)}
           />
         </View>
       </Pressable>
@@ -2213,7 +2225,8 @@ function ChatScreen({
     error: slashCommandsError,
     refresh: refreshSlashCommands,
   } = slashCommands;
-  const usageBlockMessage = usageSendBlockMessage(usage);
+  const usageBlockMessage =
+    activeSession?.source === 'opencode' ? null : usageSendBlockMessage(usage);
   const commandQuery = commandQueryFromText(text);
   const commandSuggestions = useMemo(
     () =>
@@ -2528,7 +2541,8 @@ function ChatScreen({
     chat.sending ||
     !activeSession ||
     Boolean(usageBlockMessage);
-  const scheduleDisabled = sendDisabled || Boolean(steeringQueueId);
+  const scheduleDisabled =
+    sendDisabled || Boolean(steeringQueueId) || activeSession?.source === 'opencode';
   const steeringTarget = steeringQueueId
     ? (chat.queuedMessages.find(item => item.queueId === steeringQueueId) ??
       null)
@@ -2554,8 +2568,8 @@ function ChatScreen({
         </Text>
         <Text style={styles.chatHeaderMeta} numberOfLines={1}>
           {activeSession
-            ? `${activeSession.status} · ${
-                usage
+            ? `${sessionProviderLabel(activeSession)} · ${activeSession.status} · ${
+                activeSession.source !== 'opencode' && usage
                   ? usageSummary(usage)
                   : activeSession.workspacePath || 'workspace'
               }`
@@ -2790,7 +2804,7 @@ function ChatScreen({
                 ? steeringQueueId
                   ? 'Add steering for queued message'
                   : 'Message'
-                : 'Select a Codex session first'
+                : 'Select a session first'
             }
             placeholderTextColor={palette.dim}
             style={styles.composerInput}
@@ -3010,15 +3024,16 @@ function workingStatusText(
   activeSession: DexydSession | null,
   sending: boolean,
 ): string | null {
-  if (sending) return 'sending · handing this to Codex';
+  const provider = activeSession ? sessionProviderLabel(activeSession) : 'assistant';
+  if (sending) return `sending · handing this to ${provider}`;
   const running = [...messages]
     .reverse()
     .find(message => message.role === 'tool' && message.status === 'running');
   const isWorking = activeSession?.status === 'running' || Boolean(running);
   if (!isWorking) return null;
   const rawDetail = running?.content.replace(/…+$/, '').trim() ?? '';
-  if (!rawDetail || /^Codex is working$/i.test(rawDetail)) {
-    return 'Codex is working…';
+  if (!rawDetail || /^(Codex|OpenCode|OMX \/ Codex) is working$/i.test(rawDetail)) {
+    return `${provider} is working…`;
   }
 
   const phrase =
@@ -4259,13 +4274,24 @@ function SessionsScreen({
   );
   const visibleCount = visibleSessions.length;
   const sessionListItems = useMemo(() => {
-    const items: SessionListItem[] = sortedVisibleSessions.map(session => ({
-      type: 'session',
-      key: `session-${session.id}`,
-      session,
-      pendingAttention: pendingBySession.get(session.id) ?? [],
-      active: activeSessionId === session.id,
-    }));
+    const items: SessionListItem[] = [];
+    for (const group of groupSessionsByProvider(sortedVisibleSessions)) {
+      items.push({
+        type: 'section',
+        key: `section-${group.key}`,
+        title: group.title,
+        count: group.sessions.length,
+      });
+      for (const session of group.sessions) {
+        items.push({
+          type: 'session',
+          key: `session-${session.id}`,
+          session,
+          pendingAttention: pendingBySession.get(session.id) ?? [],
+          active: activeSessionId === session.id,
+        });
+      }
+    }
 
     if (visibleCount === 0 && hiddenSessions.length > 0) {
       items.push({ type: 'hidden-empty', key: 'hidden-empty' });
@@ -4312,7 +4338,14 @@ function SessionsScreen({
 
   const renderSessionItem = useCallback(
     ({ item }: { item: SessionListItem }) => {
-      if (item.type === 'section') return null;
+      if (item.type === 'section') {
+        return (
+          <View style={styles.sessionSectionHeader}>
+            <Text style={styles.sessionSectionTitle}>{item.title}</Text>
+            <Text style={styles.sessionSectionCount}>{item.count}</Text>
+          </View>
+        );
+      }
 
       if (item.type === 'hidden-empty') {
         return (
@@ -4493,6 +4526,7 @@ const SessionListRow = React.memo(function SessionListRow({
 }) {
   const status = sessionUiStatus(session, pendingAttention);
   const contextLabel = sessionContextLabel(session);
+  const providerLabel = sessionProviderLabel(session);
 
   return (
     <Pressable
@@ -4519,7 +4553,7 @@ const SessionListRow = React.memo(function SessionListRow({
           ) : null}
         </View>
         <Text style={styles.terminalMeta} numberOfLines={1}>
-          {status.detail} · {formatDate(session.updatedAt)}
+          {providerLabel} · {status.detail} · {formatDate(session.updatedAt)}
           {contextLabel ? ` · ${contextLabel}` : ''}
         </Text>
       </View>
@@ -4578,6 +4612,31 @@ function sessionContextLabel(session: DexydSession): string | null {
     return `ctx ${formatCompactNumber(context.usedTokens)}`;
   }
   return null;
+}
+
+function sessionProviderKey(session: DexydSession): 'opencode' | 'codex' {
+  return session.source === 'opencode' ? 'opencode' : 'codex';
+}
+
+function sessionProviderLabel(session: DexydSession): string {
+  if (session.source === 'opencode') return 'OpenCode';
+  return session.omx || session.profile === 'omx' ? 'OMX / Codex' : 'Codex';
+}
+
+function groupSessionsByProvider(sessions: DexydSession[]) {
+  const groups = [
+    {
+      key: 'opencode',
+      title: 'OpenCode',
+      sessions: sessions.filter(session => sessionProviderKey(session) === 'opencode'),
+    },
+    {
+      key: 'codex',
+      title: 'Codex / OMX',
+      sessions: sessions.filter(session => sessionProviderKey(session) === 'codex'),
+    },
+  ];
+  return groups.filter(group => group.sessions.length > 0);
 }
 
 function normalizeProjectPath(path: string): string {
@@ -5542,8 +5601,8 @@ function SettingsScreen({
               tone={sessionsCount > 0 ? 'ok' : 'idle'}
             />
             <Text style={styles.settingHint}>
-              Refresh and select Codex/OMX sessions from Sessions. Chat resumes
-              the selected Codex session.
+              Refresh and select OpenCode or Codex/OMX sessions from Sessions.
+              Chat resumes the selected session with its original runtime.
             </Text>
           </SettingsSection>
         );
@@ -6945,7 +7004,7 @@ function TextButton({
 }: {
   label: string;
   onPress: () => void;
-  variant?: 'default' | 'primary' | 'danger';
+  variant?: 'default' | 'primary' | 'secondary' | 'danger';
   disabled?: boolean;
 }) {
   return (

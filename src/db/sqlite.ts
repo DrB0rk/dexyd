@@ -22,6 +22,7 @@ type SessionRow = {
   created_at: string;
   updated_at: string;
   title: string | null;
+  source: string | null;
 };
 
 export type HiddenSessionRecord = {
@@ -108,6 +109,11 @@ function cleanOptionalTitle(value: string | null | undefined): string | null {
   return title ? title.slice(0, 160) : null;
 }
 
+function mapSessionSource(value: string | null | undefined): SessionRecord['source'] {
+  if (value === 'codex' || value === 'opencode' || value === 'dexyd') return value;
+  return 'dexyd';
+}
+
 export class SqliteService {
   #db: Database.Database;
 
@@ -159,35 +165,58 @@ export class SqliteService {
     return row.maxSequence;
   }
 
-  createSession(input: { workspacePath: string; profile: string; title?: string | null }): SessionRecord {
-    const id = randomUUID();
+  createSession(input: {
+    workspacePath: string;
+    profile: string;
+    title?: string | null;
+    id?: string;
+    source?: SessionRecord['source'];
+    status?: SessionStatus;
+    createdAt?: string;
+    updatedAt?: string;
+  }): SessionRecord {
+    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const createdAt = input.createdAt ?? now;
+    const updatedAt = input.updatedAt ?? now;
+    const source = input.source ?? 'dexyd';
+    const status = input.status ?? 'created';
+    const title = cleanOptionalTitle(input.title);
 
     this.#db
       .prepare(
         `
-        INSERT INTO sessions (id, status, profile, workspace_path, created_at, updated_at, title)
-        VALUES (@id, @status, @profile, @workspacePath, @createdAt, @updatedAt, @title)
+        INSERT INTO sessions (id, status, profile, workspace_path, created_at, updated_at, title, source)
+        VALUES (@id, @status, @profile, @workspacePath, @createdAt, @updatedAt, @title, @source)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          profile = excluded.profile,
+          workspace_path = excluded.workspace_path,
+          updated_at = excluded.updated_at,
+          title = COALESCE(excluded.title, sessions.title),
+          source = excluded.source
       `
       )
       .run({
         id,
-        status: 'created',
+        status,
         profile: input.profile,
         workspacePath: input.workspacePath,
-        createdAt: now,
-        updatedAt: now,
-        title: cleanOptionalTitle(input.title)
+        createdAt,
+        updatedAt,
+        title,
+        source
       });
 
     return {
       id,
-      status: 'created',
+      status,
       profile: input.profile,
       workspacePath: input.workspacePath,
-      createdAt: now,
-      updatedAt: now,
-      ...(cleanOptionalTitle(input.title) ? { title: cleanOptionalTitle(input.title) ?? undefined } : {})
+      createdAt,
+      updatedAt,
+      source,
+      ...(title ? { title } : {})
     };
   }
 
@@ -195,7 +224,7 @@ export class SqliteService {
     const rows = this.#db
       .prepare(
         `
-      SELECT id, status, profile, workspace_path, created_at, updated_at, title
+      SELECT id, status, profile, workspace_path, created_at, updated_at, title, source
       FROM sessions
       ORDER BY updated_at DESC
       LIMIT ?
@@ -210,7 +239,7 @@ export class SqliteService {
     const row = this.#db
       .prepare(
         `
-      SELECT id, status, profile, workspace_path, created_at, updated_at, title
+      SELECT id, status, profile, workspace_path, created_at, updated_at, title, source
       FROM sessions
       WHERE id = ?
     `
@@ -832,6 +861,7 @@ export class SqliteService {
       workspacePath: row.workspace_path,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      source: mapSessionSource(row.source),
       ...(row.title ? { title: row.title } : {})
     };
   }

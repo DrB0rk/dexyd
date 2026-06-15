@@ -350,6 +350,13 @@ export async function registerRoutes(
         ...(parsed.data.modelProviderID ? { modelProviderID: parsed.data.modelProviderID } : {}),
         ...(parsed.data.modelID ? { modelID: parsed.data.modelID } : {})
       });
+      persistOpenCodeSession(context, session);
+      context.eventService.emit({
+        eventType: 'session.created',
+        source: 'session',
+        sessionId: session.id,
+        payload: session
+      });
       context.db.addAuditLog({
         actor: auth.sub,
         action: 'opencode.session.created',
@@ -370,12 +377,13 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'invalid_session_id', issues: params.error.issues });
     }
     const deleted = await context.opencodeSessionService.deleteSession(params.data.sessionId);
+    const localDeleted = context.db.deleteSession(params.data.sessionId);
     context.db.addAuditLog({
       actor: auth.sub,
       action: 'opencode.session.deleted',
       target: params.data.sessionId
     });
-    return { deleted };
+    return { deleted: deleted || localDeleted, remoteDeleted: deleted, localDeleted };
   });
 
   app.get('/opencode/sessions/:sessionId/diff', async (request, reply) => {
@@ -792,16 +800,32 @@ export async function registerRoutes(
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'invalid_workspace' });
     }
 
-    const session = parsed.data.source === 'codex'
-      ? context.codexSessionService.createSession({
+    let session: SessionRecord;
+    try {
+      if (parsed.data.source === 'codex') {
+        session = context.codexSessionService.createSession({
           workspacePath,
-          ...(parsed.data.title ? { title: parsed.data.title } : {})
-        })
-      : context.db.createSession({
-          workspacePath,
-          profile: parsed.data.profile,
           ...(parsed.data.title ? { title: parsed.data.title } : {})
         });
+      } else if (parsed.data.source === 'opencode') {
+        session = await context.opencodeSessionService.createSession({
+          workspacePath,
+          ...(parsed.data.title ? { title: parsed.data.title } : {})
+        });
+        persistOpenCodeSession(context, session);
+      } else {
+        session = context.db.createSession({
+          workspacePath,
+          profile: parsed.data.profile,
+          source: parsed.data.source,
+          ...(parsed.data.title ? { title: parsed.data.title } : {})
+        });
+      }
+    } catch (error) {
+      return reply.code(parsed.data.source === 'opencode' ? 502 : 400).send({
+        error: error instanceof Error ? error.message : 'session_create_failed'
+      });
+    }
 
     context.eventService.emit({
       eventType: 'session.created',
@@ -976,7 +1000,10 @@ export async function registerRoutes(
       return { deleted: false, hidden: true };
     }
 
-    const deleted = context.db.deleteSession(params.data.sessionId);
+    const remoteDeleted = session.source === 'opencode'
+      ? await context.opencodeSessionService.deleteSession(params.data.sessionId)
+      : false;
+    const deleted = context.db.deleteSession(params.data.sessionId) || remoteDeleted;
     if (!deleted) {
       context.db.hideSession(params.data.sessionId);
     }
@@ -1093,6 +1120,10 @@ export async function registerRoutes(
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
+    if (session.source === 'opencode') {
+      return { queue: [] };
+    }
+
     return { queue: context.codexChatService.getQueue(params.data.sessionId) };
   });
 
@@ -1113,6 +1144,9 @@ export async function registerRoutes(
     const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
+    }
+    if (session.source === 'opencode') {
+      return reply.code(400).send({ error: 'queue_not_supported_for_opencode' });
     }
 
     const queued = context.codexChatService.steerQueuedMessage({
@@ -1147,6 +1181,9 @@ export async function registerRoutes(
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
     }
+    if (session.source === 'opencode') {
+      return reply.code(400).send({ error: 'queue_not_supported_for_opencode' });
+    }
 
     const removed = context.codexChatService.removeQueuedMessage({
       sessionId: params.data.sessionId,
@@ -1179,6 +1216,10 @@ export async function registerRoutes(
       return reply.code(404).send({ error: 'session_not_found' });
     }
 
+    if (session.source === 'opencode') {
+      return { scheduled: [] };
+    }
+
     return { scheduled: context.codexChatService.getScheduledMessages(params.data.sessionId) };
   });
 
@@ -1199,6 +1240,9 @@ export async function registerRoutes(
     const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
+    }
+    if (session.source === 'opencode') {
+      return reply.code(400).send({ error: 'scheduled_messages_not_supported_for_opencode' });
     }
 
     const runAt = new Date(body.data.runAt);
@@ -1237,6 +1281,9 @@ export async function registerRoutes(
     const session = await getSession(context, params.data.sessionId);
     if (!session) {
       return reply.code(404).send({ error: 'session_not_found' });
+    }
+    if (session.source === 'opencode') {
+      return reply.code(400).send({ error: 'scheduled_messages_not_supported_for_opencode' });
     }
 
     const scheduled = context.codexChatService.cancelScheduledMessage({
@@ -1562,6 +1609,19 @@ sessions: [
 
 function getChatService(context: AppContext, session: SessionRecord) {
   return session.source === 'opencode' ? context.opencodeChatService : context.codexChatService;
+}
+
+function persistOpenCodeSession(context: AppContext, session: SessionRecord): void {
+  context.db.createSession({
+    id: session.id,
+    workspacePath: session.workspacePath,
+    profile: session.profile || 'opencode',
+    source: 'opencode',
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    ...(session.title ? { title: session.title } : {})
+  });
 }
 
 async function listOpenCodeSessionsForAggregate(context: AppContext, limit: number): Promise<SessionRecord[]> {
